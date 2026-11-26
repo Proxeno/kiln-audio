@@ -82,6 +82,62 @@ public class EncoderOptionTests
     }
 
     [Fact]
+    public void Stereo_voip_falls_back_to_celt_and_decodes()
+    {
+        var options = Supported() with
+        {
+            Application = OpusApplication.Voip,
+            Channels = 2,
+            BitrateBps = 64000,
+        };
+
+        using var encoder = new OpusEncoder(options);
+        using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 2 });
+        var packet = new byte[1276];
+        var pcm = new short[960 * 2];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            pcm[i] = (short)(6000 * Math.Sin(2 * Math.PI * 300 * i / 48000.0));
+        }
+
+        int written = encoder.Encode(pcm, packet);
+        written.Should().BeGreaterThan(1);
+        // RFC 6716 §3.1, Table 2: configs 16..31 are CELT-only, so this is the pre-SILK path.
+        (packet[0] >> 3).Should().BeGreaterThanOrEqualTo(16);
+
+        var decoded = new short[960 * 2];
+        decoder.Decode(packet.AsSpan(0, written), decoded).Should().Be(960);
+        decoder.FinalRange.Should().Be(encoder.FinalRange);
+    }
+
+    [Fact]
+    public void Five_ms_voip_falls_back_to_celt_and_decodes()
+    {
+        var options = Supported() with
+        {
+            Application = OpusApplication.Voip,
+            FrameDuration = OpusFrameDuration.Ms5,
+        };
+
+        using var encoder = new OpusEncoder(options);
+        using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 1 });
+        var packet = new byte[1276];
+        var pcm = new short[240];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            pcm[i] = (short)(6000 * Math.Sin(2 * Math.PI * 300 * i / 48000.0));
+        }
+
+        int written = encoder.Encode(pcm, packet);
+        written.Should().BeGreaterThan(1);
+        (packet[0] >> 3).Should().BeGreaterThanOrEqualTo(16);
+
+        var decoded = new short[240];
+        decoder.Decode(packet.AsSpan(0, written), decoded).Should().Be(240);
+        decoder.FinalRange.Should().Be(encoder.FinalRange);
+    }
+
+    [Fact]
     public void Fec_and_dtx_are_rejected()
     {
         ((Action)(() => new OpusEncoder(Supported() with { UseInbandFec = true }))).Should()

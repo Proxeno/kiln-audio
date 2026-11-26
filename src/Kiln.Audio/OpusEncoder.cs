@@ -10,14 +10,18 @@ namespace Kiln.Audio;
 /// <summary>Opus (RFC 6716) encoder.</summary>
 /// <remarks>
 /// <para>
-/// <see cref="OpusApplication.Voip"/> selects the SILK-only encoder (mono, 10, 20, 40 or 60 ms,
-/// at <see cref="OpusEncoderOptions.Bandwidth"/> narrowband, mediumband or wideband). The other
-/// applications select the CELT encoder, which supports: mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5,
-/// 10, 20, 40 or 60 ms frames, constant or variable bitrate, and the pitch pre-filter. A 40 or
-/// 60 ms frame is encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as
-/// the reference handles CELT durations above 20 ms. Hybrid mode, stereo SILK, in-band FEC, DTX and
-/// automatic mode switching are not implemented and are rejected with
-/// <see cref="NotSupportedException"/>.
+/// <see cref="OpusApplication.Voip"/> selects the SILK-only encoder when the input is mono and
+/// the frame is 10, 20, 40 or 60 ms, at <see cref="OpusEncoderOptions.Bandwidth"/> narrowband,
+/// mediumband or wideband. Every other <see cref="OpusApplication.Voip"/> configuration (stereo,
+/// 2.5 or 5 ms, or a super-wideband/fullband bandwidth hint) falls back to the CELT encoder, as
+/// it did before SILK landed; the mode policy will become automatic in a later change.
+/// </para>
+/// <para>
+/// The CELT encoder supports mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10, 20, 40 or
+/// 60 ms frames, constant or variable bitrate, and the pitch pre-filter. A 40 or 60 ms frame is
+/// encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as the reference
+/// handles CELT durations above 20 ms. Hybrid mode, stereo SILK, in-band FEC, DTX and automatic
+/// mode switching are not implemented and are rejected with <see cref="NotSupportedException"/>.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
@@ -61,38 +65,27 @@ public sealed class OpusEncoder : IDisposable
 
         Options = options;
 
-        if (options.Application == OpusApplication.Voip)
+        // SILK owns mono Voip at SILK frame durations and a SILK bandwidth. Anything else that
+        // asks for Voip keeps the pre-SILK behaviour and encodes with CELT, so existing callers
+        // (stereo, 2.5/5 ms) are not broken. A later change makes the mode policy automatic.
+        OpusBandwidth? requestedBandwidth = options.Bandwidth;
+        bool silkBandwidth = requestedBandwidth is null
+            or OpusBandwidth.Narrowband or OpusBandwidth.Mediumband or OpusBandwidth.Wideband;
+        bool useSilk = options.Application == OpusApplication.Voip
+            && options.Channels == 1
+            && silkBandwidth
+            && options.FrameDuration is OpusFrameDuration.Ms10 or OpusFrameDuration.Ms20
+                or OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60;
+
+        if (useSilk)
         {
-            if (options.Channels != 1)
-            {
-                throw new NotSupportedException(
-                    FormattableString.Invariant($"SILK supports mono input only; got {options.Channels} channels."));
-            }
-
-            if (options.UseInbandFec)
-            {
-                throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
-            }
-
-            if (options.UseDtx)
-            {
-                throw new NotSupportedException("Discontinuous transmission is not implemented.");
-            }
-
-            if (options.FrameDuration is OpusFrameDuration.Ms2_5 or OpusFrameDuration.Ms5)
-            {
-                throw new NotSupportedException(
-                    FormattableString.Invariant($"SILK supports 10, 20, 40 and 60 ms frames; got {options.FrameDuration}."));
-            }
-
-            OpusBandwidth bandwidth = options.Bandwidth ?? OpusBandwidth.Wideband;
+            OpusBandwidth bandwidth = requestedBandwidth ?? OpusBandwidth.Wideband;
             int internalRate = bandwidth switch
             {
                 OpusBandwidth.Narrowband => 8000,
                 OpusBandwidth.Mediumband => 12000,
                 OpusBandwidth.Wideband => 16000,
-                _ => throw new NotSupportedException(
-                    "SILK supports narrowband, mediumband and wideband; hybrid and super-wideband/fullband are not implemented."),
+                _ => 16000,
             };
 
             int frameDurationMs = options.FrameDuration switch
