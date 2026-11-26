@@ -275,6 +275,8 @@ internal sealed class CeltDecoder
         {
             if (dec.DecodeBitLogp(1))
             {
+                // RFC 6716 Table 56: the octave is uniform over 6 values (0..5), which with
+                // 4+octave raw bits bounds the pitch at 1022 as §4.3.7.1 states.
                 int octave = (int)dec.DecodeUInt(6);
                 postFilterPitch = (16 << octave) + (int)dec.DecodeBits(4 + octave) - 1;
                 int qg = (int)dec.DecodeBits(3);
@@ -2032,7 +2034,10 @@ internal sealed class CeltDecoder
         }
     }
 
-    /// <summary>Normalizes a vector to the requested gain (RFC 6716 §4.3.4.1).</summary>
+    /// <summary>
+    /// Normalizes a vector to the requested gain (RFC 6716 §4.3.4.2; Appendix A,
+    /// celt/vq.c: renormalise_vector).
+    /// </summary>
     private static void RenormaliseVector(Span<float> x, float gain)
     {
         float energy = 1e-15f;
@@ -2284,7 +2289,10 @@ internal sealed class CeltDecoder
         return CeltTables.CacheBits[CacheRow(lm, _ctx.Band) + pulses] + 1;
     }
 
-    /// <summary>Copies the first hybrid band's folding data into the second (RFC 6716 §4.3.4.4).</summary>
+    /// <summary>
+    /// Copies the first hybrid band's folding data into the second (RFC 8251 §9, which
+    /// amends the folding of RFC 6716 §4.3.4.4).
+    /// </summary>
     private static void SpecialHybridFolding(Span<float> norm, Span<float> norm2, int start, int m, bool dualStereo)
     {
         ReadOnlySpan<short> eBands = CeltTables.EBands;
@@ -2302,7 +2310,7 @@ internal sealed class CeltDecoder
         }
     }
 
-    /// <summary>Applies the Haar transform used by the time/frequency reshaping (RFC 6716 §4.3.4.4).</summary>
+    /// <summary>Applies the Haar transform used by the time/frequency reshaping (RFC 6716 §4.3.4.5).</summary>
     private static void Haar1(Span<float> x, int n0, int stride)
     {
         n0 >>= 1;
@@ -2318,7 +2326,7 @@ internal sealed class CeltDecoder
         }
     }
 
-    /// <summary>Reorders a Hadamard-transformed band into the frequency layout (RFC 6716 §4.3.4.4).</summary>
+    /// <summary>Reorders a Hadamard-transformed band into the frequency layout (RFC 6716 §4.3.4.5).</summary>
     private void DeinterleaveHadamard(Span<float> x, int n0, int stride, bool hadamard)
     {
         int count = n0 * stride;
@@ -2348,7 +2356,7 @@ internal sealed class CeltDecoder
         tmp.CopyTo(x);
     }
 
-    /// <summary>Reorders a Hadamard-transformed band back into time order (RFC 6716 §4.3.4.4).</summary>
+    /// <summary>Reorders a Hadamard-transformed band back into time order (RFC 6716 §4.3.4.5).</summary>
     private void InterleaveHadamard(Span<float> x, int n0, int stride, bool hadamard)
     {
         int count = n0 * stride;
@@ -2378,7 +2386,10 @@ internal sealed class CeltDecoder
         tmp.CopyTo(x);
     }
 
-    /// <summary>Bounds- and overflow-safe version of the RFC's Q15 cosine (RFC 6716 §4.3.4.2).</summary>
+    /// <summary>
+    /// Bit-exact Q15 cosine used by the split angle (RFC 6716 Appendix A, celt/bands.c:
+    /// bitexact_cos; §4.3.4.4 defers the split quantizer to the reference).
+    /// </summary>
     private static int BitexactCos(int x)
     {
         int tmp = (4096 + (x * x)) >> 13;
@@ -2387,7 +2398,10 @@ internal sealed class CeltDecoder
         return 1 + x2;
     }
 
-    /// <summary>Bit-exact <c>log2(tan)</c> used by the split angle (RFC 6716 §4.3.4.2).</summary>
+    /// <summary>
+    /// Bit-exact <c>log2(tan)</c> used by the split angle (RFC 6716 Appendix A,
+    /// celt/bands.c: bitexact_log2tan).
+    /// </summary>
     private static int BitexactLog2Tan(int isin, int icos)
     {
         int lc = CeltTables.Ilog(icos);
@@ -2399,7 +2413,10 @@ internal sealed class CeltDecoder
             - FracMul16(icos, FracMul16(icos, -2597) + 7932);
     }
 
-    /// <summary>Q15 fractional multiply of two 16-bit values (RFC 6716 §4.3.4.2).</summary>
+    /// <summary>
+    /// Q15 fractional multiply of two 16-bit values (RFC 6716 Appendix A, celt/mathops.h:
+    /// FRAC_MUL16).
+    /// </summary>
     private static int FracMul16(int a, int b) => (16384 + ((short)a * (short)b)) >> 15;
 
     /// <summary>
@@ -2428,7 +2445,10 @@ internal sealed class CeltDecoder
         return (int)g;
     }
 
-    /// <summary>The linear congruential generator used for spectral folding (RFC 6716 §4.3.4).</summary>
+    /// <summary>
+    /// The linear congruential generator used for spectral folding and anti-collapse
+    /// (RFC 6716 Appendix A, celt/bands.c: celt_lcg_rand).
+    /// </summary>
     private static uint Lcg(uint seed) => (1664525 * seed) + 1013904223;
 
     /// <summary>Truncating division, as the RFC reference's integer semantics specify.</summary>

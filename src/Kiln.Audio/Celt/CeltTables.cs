@@ -57,7 +57,7 @@ internal static class CeltTables
     /// </summary>
     internal const int AllocSteps = 6;
 
-    /// <summary>Number of allocation vectors (RFC 6716 §4.3.3, Table 56).</summary>
+    /// <summary>Number of allocation vectors (RFC 6716 §4.3.3, Table 57).</summary>
     internal const int AllocVectorCount = 11;
 
     /// <summary>
@@ -82,7 +82,7 @@ internal static class CeltTables
     ];
 
     /// <summary>
-    /// Bit allocation vectors in units of 1/32 bit per sample (RFC 6716 §4.3.3, Table 56).
+    /// Bit allocation vectors in units of 1/32 bit per sample (RFC 6716 §4.3.3, Table 57).
     /// </summary>
     /// <remarks>
     /// Eleven vectors of 21 entries each, indexed <c>vector * BandCount + band</c>. The RFC
@@ -136,7 +136,8 @@ internal static class CeltTables
     internal const short BetaIntra = 4915;
 
     /// <summary>
-    /// Coarse-energy Laplace probability model (RFC 6716 §4.3.2.1, Table 58).
+    /// Coarse-energy Laplace probability model (RFC 6716 §4.3.2.1, which names
+    /// <c>e_prob_model</c> in <c>quant_bands.c</c>; values from Appendix A).
     /// </summary>
     /// <remarks>
     /// <c>[LM][intra][2*band + 0]</c> is the probability of zero in Q8 and
