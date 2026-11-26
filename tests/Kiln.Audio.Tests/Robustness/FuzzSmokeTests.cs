@@ -42,7 +42,9 @@ public class FuzzSmokeTests
             Environment.NewLine,
             report.Findings.Select(finding => FormattableString.Invariant($"{finding.Target}: {finding.Message}")));
         report.Findings.Should().BeEmpty(failures);
+        report.Seeds.Should().BeGreaterThan(1000);
         report.Mutations.Should().Be(20000);
+        report.AllocationChecks.Should().BeGreaterThan(0);
         stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(30));
     }
 }
