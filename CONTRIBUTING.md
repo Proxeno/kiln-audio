@@ -10,31 +10,34 @@ exist; the codec does not.
 
 ## Getting set up
 
-You need the **.NET 10 SDK** and nothing else to build and run the unit test
-suite. The conformance tests additionally use material that is not committed;
-two idempotent scripts fetch and build it, each verifying a pinned SHA-256:
+You need the **.NET 10 SDK**. The RFC 8251 `.bit` packet files are committed, but their large
+`.dec` reference decodes (117 MB) are not, so run the fetch script before `dotnet test`:
 
 ```bash
 git clone https://github.com/Proxeno/kiln-audio.git
 cd kiln-audio
 
-# Optional, for the conformance suite:
-bash scripts/fetch-test-vectors.sh    # RFC 8251 test vectors -> tests/Kiln.Audio.Tests/Fixtures/opus_testvectors
-bash scripts/build-libopus-oracle.sh  # pinned libopus 1.5.2 -> .oracle/bin (needs CMake and a C compiler)
+bash scripts/fetch-test-vectors.sh    # required: materializes the RFC 8251 .dec references
 
 dotnet restore
 dotnet build -c Release
 dotnet test -c Release
 ```
 
-Both scripts are safe to re-run: the vectors and the oracle build are
-git-ignored, and a matching stamp makes the script a no-op. `opus_demo` and
-`opus_compare` are a **test-only black-box oracle**; nothing under `src/` may
-reference libopus.
+For the oracle-backed tests, also build the pinned libopus tools (needs CMake and a C compiler):
 
-Oracle tests skip themselves when the vectors or the oracle are missing, so a
-clean checkout still passes `dotnet test`. Set `KILN_AUDIO_REQUIRE_ORACLE=1`
-to turn absence into a test failure instead; CI sets it on Linux and macOS.
+```bash
+bash scripts/build-libopus-oracle.sh  # optional: pinned libopus 1.5.2 -> .oracle/bin
+```
+
+Both scripts verify a pinned SHA-256 and are idempotent: a matching stamp makes
+the script a no-op. `opus_demo` and `opus_compare` are a **test-only black-box
+oracle**; nothing under `src/` may reference libopus.
+
+Because the vectors are committed, the conformance tests fail when they are
+missing. The oracle binaries are optional: tests that need them return without
+asserting when they are absent. Set `KILN_AUDIO_REQUIRE_ORACLE=1` to turn a
+missing oracle into a test failure instead; CI sets it on Linux and macOS.
 
 `dotnet build` must report zero warnings — see [Style](#style) below.
 

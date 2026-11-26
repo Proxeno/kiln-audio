@@ -1,0 +1,3 @@
+# RFC 8251 test vectors are binary: never diff, merge, or line-ending-convert them.
+tests/Kiln.Audio.Tests/Fixtures/opus_testvectors/*.bit binary
+tests/Kiln.Audio.Tests/Fixtures/opus_testvectors/*.dec binary

@@ -10,9 +10,10 @@ namespace Kiln.Audio.Tests.Oracle;
 /// pinned libopus build used purely as a black-box oracle.
 /// </summary>
 /// <remarks>
-/// Every test returns without asserting when the fixtures or the oracle are missing; set
-/// <c>KILN_AUDIO_REQUIRE_ORACLE=1</c> to make that a failure instead (CI does this where the
-/// oracle builds). Expensive analyses are cached per vector for the lifetime of the test run.
+/// The RFC 8251 vectors are committed, so missing fixtures fail these tests. The libopus oracle
+/// is optional: its absence makes the oracle-dependent tests return without asserting, unless
+/// <c>KILN_AUDIO_REQUIRE_ORACLE=1</c> is set (CI does this where the oracle builds). Expensive
+/// analyses are cached per vector for the lifetime of the test run.
 /// </remarks>
 public class OracleTests
 {

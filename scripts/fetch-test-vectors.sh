@@ -60,8 +60,10 @@ if [[ -z "${source_dir}" || ! -f "${source_dir}/testvector01.bit" ]]; then
     exit 1
 fi
 
-rm -rf "${fixtures_dir}"
+# Keep tracked files (SOURCE.md, the committed .bit packets) and replace only the
+# vector outputs the archive provides.
 mkdir -p "${fixtures_dir}"
+find "${fixtures_dir}" -maxdepth 1 -type f -name 'testvector*' -delete
 cp -R "${source_dir}/." "${fixtures_dir}/"
 printf '%s\n' "${SHA256_EXPECTED}" > "${stamp_file}"
 
