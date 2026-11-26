@@ -72,7 +72,7 @@ public class SilkEncoderQualityTests
             oursTotal += ours * count;
             libopusTotal += theirs * count;
             segments += count;
-            lines.Add($"v{vector}: ours {ours:F2} libopus {theirs:F2} (q {ourQuality:F1}% / {theirQuality:F1}%)");
+            lines.Add($"v{vector}: ours {ours:F2} libopus {theirs:F2} (q {FormatQuality(ourQuality)} / {FormatQuality(theirQuality)})");
         }
 
         double oursMean = oursTotal / segments;
@@ -187,9 +187,10 @@ public class SilkEncoderQualityTests
     }
 
     /// <summary>
-    /// Runs <c>opus_compare</c> on the aligned signals, capped at ten seconds for runtime. The
-    /// result is reported, not gated; if the tool cannot score the internal rate the value stays
-    /// zero and the segSNR gate still applies.
+    /// Attempts to run <c>opus_compare</c> on the aligned signals, capped at ten seconds. The
+    /// result is reported, not gated. <c>opus_compare</c> only scores 48 kHz, and comparing a
+    /// band-limited SILK decode to the full-band original is not its intended use, so the metric
+    /// is reported as "n/a" unless the tool returns a usable score.
     /// </summary>
     private static double CompareQuality(short[] reference, short[] decoded, int delay, int internalRate)
     {
@@ -200,7 +201,7 @@ public class SilkEncoderQualityTests
             int length = Math.Min(available, 10 * internalRate);
             if (length <= internalRate / 5)
             {
-                return 0;
+                return double.NaN;
             }
 
             // opus_compare always reads its reference file as stereo, so the mono reference is
@@ -218,9 +219,12 @@ public class SilkEncoderQualityTests
         }
         catch (Exception)
         {
-            return 0;
+            return double.NaN;
         }
     }
+
+    private static string FormatQuality(double quality) =>
+        double.IsNaN(quality) ? "n/a" : FormattableString.Invariant($"{quality:F1}%");
 
     private static int FindDelay(short[] reference, short[] decoded, int internalRate)
     {

@@ -539,9 +539,12 @@ SILK-QUAL-1 changed. It is evidence, not a CI gate; the gate lives in `SilkEncod
   reference above 150 Hz, where both codecs encode the same content; the encoder's own high-pass
   (60-100 Hz) makes full-band alignment ill-conditioned. The delay search is coarse-to-fine
   (step 8 then step 1).
-- `opus_compare` quality percent is reported alongside segSNR for each vector, capped at ten
-  seconds of audio per vector. It is informational: the gate is segSNR, because the reference is
-  band-limited to the codec's internal rate and `opus_compare`'s model is tuned for 48 kHz.
+- `opus_compare` quality percent is reported as `n/a`. The tool only scores 48 kHz, and its
+  intended reference is a 48 kHz signal with the same bandwidth; comparing a band-limited SILK
+  decode to the full-band original produces meaningless negative scores for both codecs. A
+  correct harness needs an independent band-limited 48 kHz reference, which roughly quintuples
+  the gate's runtime (measured: 5m19s versus 1m06s), so it is deferred. The scored gate is
+  segSNR at the internal rate.
 
 The earlier SILK-ENC-1 harness searched delays on a fixed four-sample grid and used the encoder's
 own resampler as the reference. At 12 kHz that misaligned up to two samples and understated every
