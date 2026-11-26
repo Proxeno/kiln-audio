@@ -206,7 +206,7 @@ varied by up to 40% between runs. The per-stage figures come from two runs with 
 (before on the PERF-1 base, after on this branch); the SILK mediumband row (03) is the clearest
 victim of the noise, since even its untouched decode stage moved by 30%.
 
-### Decode results
+### Decode ratios (PERF-2)
 
 Per-frame microseconds for the whole vector, best observed mean on each side. `libopus` is the
 fastest of two in-process harness runs. The whole-vector rows were taken at different times, so
