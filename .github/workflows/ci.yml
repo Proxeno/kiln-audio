@@ -45,7 +45,7 @@ jobs:
         # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.
         # GITHUB_PATH prepends, so later `shell: bash` steps resolve to Git's bash.
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\bin'
       - name: Cache RFC 8251 test vectors
         uses: actions/cache@v4
