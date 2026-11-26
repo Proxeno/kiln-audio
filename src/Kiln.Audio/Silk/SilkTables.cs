@@ -8,10 +8,19 @@ namespace Kiln.Audio.Silk;
 /// (RFC 6716 §4.2.7), transcribed from the RFC's tables.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The RFC publishes forward probability masses out of 256 (written <c>{...}/256</c>). The
 /// decoder converts a table to cumulative frequencies on the fly in <see cref="DecodePdf"/>,
 /// which is equivalent to the inverse-CDF form of RFC 6716 §4.1.3.3. Keeping the tables in the
 /// RFC's own presentation makes each one directly checkable against its RFC table.
+/// </para>
+/// <para>
+/// RFC 8251 changes no SILK table ("Only the C implementation is affected, not the English text
+/// of the specification"). Its SILK errata are the stereo state reset (§3), the inverse-gain
+/// wrap-around (§6) and the LSF stabilization wrap-around (§7); the last two live in synthesis
+/// and stabilization, which this symbol decoder does not perform. The stereo reset is covered
+/// by <see cref="SilkDecoder.Reset"/>.
+/// </para>
 /// </remarks>
 internal static class SilkTables
 {
@@ -247,7 +256,7 @@ internal static class SilkTables
     /// <summary>Low part of the absolute primary pitch lag, WB: 8 entries (RFC 6716 §4.2.7.6.1, Table 30).</summary>
     internal static readonly byte[] PitchLagLowPdfWb = [32, 32, 32, 32, 32, 32, 32, 32];
 
-    /// <summary>Low part of the primary lag PDF by bandwidth, indexed NB, MB, WB (Table 30).</summary>
+    /// <summary>Low part of the primary lag PDF by bandwidth, indexed NB, MB, WB (RFC 6716 §4.2.7.6.1, Table 30).</summary>
     internal static readonly byte[][] PitchLagLowPdf = [PitchLagLowPdfNb, PitchLagLowPdfMb, PitchLagLowPdfWb];
 
     /// <summary>Primary lag scale factor by bandwidth, indexed NB, MB, WB (RFC 6716 §4.2.7.6.1, Table 30).</summary>
@@ -417,7 +426,7 @@ internal static class SilkTables
         [2, 1, 6, 27, 58, 56, 39, 25, 14, 10, 6, 3, 3, 2, 1, 1, 2, 0],
     ];
 
-    /// <summary>Pulse count split PDFs, 16-sample partitions, indexed by pulse count (Table 47).</summary>
+    /// <summary>Pulse count split PDFs, 16-sample partitions, indexed by pulse count (RFC 6716 §4.2.7.8.3, Table 47).</summary>
     internal static readonly byte[][] PulseSplit16Pdf =
     [
         [126, 130],
@@ -438,7 +447,7 @@ internal static class SilkTables
         [1, 1, 1, 1, 13, 18, 27, 36, 41, 41, 34, 24, 14, 1, 1, 1, 1],
     ];
 
-    /// <summary>Pulse count split PDFs, 8-sample partitions, indexed by pulse count (Table 48).</summary>
+    /// <summary>Pulse count split PDFs, 8-sample partitions, indexed by pulse count (RFC 6716 §4.2.7.8.3, Table 48).</summary>
     internal static readonly byte[][] PulseSplit8Pdf =
     [
         [127, 129],
@@ -459,7 +468,7 @@ internal static class SilkTables
         [1, 1, 2, 6, 12, 21, 30, 36, 38, 36, 30, 21, 12, 6, 2, 1, 1],
     ];
 
-    /// <summary>Pulse count split PDFs, 4-sample partitions, indexed by pulse count (Table 49).</summary>
+    /// <summary>Pulse count split PDFs, 4-sample partitions, indexed by pulse count (RFC 6716 §4.2.7.8.3, Table 49).</summary>
     internal static readonly byte[][] PulseSplit4Pdf =
     [
         [127, 129],
@@ -480,7 +489,7 @@ internal static class SilkTables
         [1, 1, 4, 9, 15, 21, 28, 32, 34, 32, 28, 21, 15, 9, 4, 1, 1],
     ];
 
-    /// <summary>Pulse count split PDFs, 2-sample partitions, indexed by pulse count (Table 50).</summary>
+    /// <summary>Pulse count split PDFs, 2-sample partitions, indexed by pulse count (RFC 6716 §4.2.7.8.3, Table 50).</summary>
     internal static readonly byte[][] PulseSplit2Pdf =
     [
         [128, 128],
@@ -530,7 +539,7 @@ internal static class SilkTables
         },
     ];
 
-    /// <summary>Excitation quantization offset, Q23, indexed by signal and offset type (Table 53).</summary>
+    /// <summary>Excitation quantization offset, Q23, indexed by signal and offset type (RFC 6716 §4.2.7.8.6, Table 53).</summary>
     internal static readonly int[][] QuantizationOffsetQ23 =
     [
         [25, 60], // Inactive: low, high

@@ -17,8 +17,15 @@ namespace Kiln.Audio.Silk;
 /// <para>
 /// The header bits, LBRR frames and regular frames are all read from one range decoder per
 /// Opus frame (RFC 6716 §4.2.2). The only state that carries across Opus frames is the clamp
-/// of an independently coded gain (RFC 6716 §4.2.7.4), which does not affect the symbols, so a
-/// caller may reset between Opus frames without changing the final range.
+/// of an independently coded gain (RFC 6716 §4.2.7.4) and the previous stereo weights, neither
+/// of which affects the symbols, so a caller may reset between Opus frames without changing the
+/// final range.
+/// </para>
+/// <para>
+/// RFC 8251 §3 additionally requires the stereo state to be reinitialized on a mode switch,
+/// even when the internal rate and channel count do not change; the top-level decoder must call
+/// <see cref="Reset"/> on such a switch (RFC 8251 §6 and §7 apply to inverse-gain and LSF
+/// stabilization, which are synthesis-side and outside this decoder).
 /// </para>
 /// </remarks>
 internal sealed class SilkDecoder
@@ -67,7 +74,10 @@ internal sealed class SilkDecoder
     /// <summary>Creates a decoder in its reset state.</summary>
     public SilkDecoder() => Reset();
 
-    /// <summary>Clears every piece of cross-frame state (RFC 6716 §4.5.2).</summary>
+    /// <summary>
+    /// Clears every piece of cross-frame state (RFC 6716 §4.5.2), including the stereo weight
+    /// memory that RFC 8251 §3 requires to be reinitialized on a mode switch.
+    /// </summary>
     public void Reset()
     {
         _rateHz = 0;
