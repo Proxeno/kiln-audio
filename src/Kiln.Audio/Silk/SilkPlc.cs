@@ -165,6 +165,12 @@ internal sealed partial class SilkSynthesis
     /// Receives <c>frameDurationMs * Rate / 1000</c> interleaved samples per channel; it must
     /// hold that many samples for every coded channel.
     /// </param>
+    /// <remarks>
+    /// The frame geometry follows the lost frame's duration, not the last decoded frame's: the
+    /// reference decoder reconfigures <c>nb_subfr</c> from the payload size on every call,
+    /// including a lost one (Appendix A, <c>silk/dec_API.c: silk_Decode()</c>). A 10 ms loss uses
+    /// two 5 ms subframes whatever the previous good frame was.
+    /// </remarks>
     internal void Conceal(int frameDurationMs, Span<short> pcmOut)
     {
         if (_rateHz == 0)
@@ -173,7 +179,9 @@ internal sealed partial class SilkSynthesis
             return;
         }
 
-        int silkFrames = frameDurationMs <= 10 ? 1 : frameDurationMs / 20;
+        int silkFrameMs = frameDurationMs <= 10 ? 10 : 20;
+        int silkFrames = frameDurationMs / silkFrameMs;
+        ConfigureConcealGeometry(silkFrameMs);
         int required = silkFrames * _frameLength * _channels;
         if (pcmOut.Length < required)
         {
@@ -281,6 +289,16 @@ internal sealed partial class SilkSynthesis
             WriteMixedFrame(frameOffset, pcmOut);
             _previousDecodeOnlyMiddle = _channels == 2 && mid.IsMidOnly;
         }
+    }
+
+    /// <summary>Applies the frame geometry of one concealed SILK frame of 10 or 20 ms.</summary>
+    /// <param name="silkFrameMs">The SILK frame duration in milliseconds: 10 or 20.</param>
+    private void ConfigureConcealGeometry(int silkFrameMs)
+    {
+        _subframeCount = silkFrameMs == 10 ? 2 : 4;
+        _subframeLength = SubframeMilliseconds * (_rateHz / 1000);
+        _frameLength = _subframeCount * _subframeLength;
+        _ltpMemoryLength = LtpMemoryMilliseconds * (_rateHz / 1000);
     }
 
     /// <summary>Applies the shared rate/channel setup used by both normal and FEC synthesis.</summary>
