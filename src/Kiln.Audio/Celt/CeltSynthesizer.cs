@@ -167,7 +167,10 @@ internal sealed class CeltSynthesizer
     /// <summary>Denormalizes the normalized bands and maps the stream channels to the output channels.</summary>
     private void Denormalise(CeltFrameResult frame, int samples, int streamChannels, int channels)
     {
-        Span<float> freq = _freq.AsSpan(0, channels * samples);
+        // The coded stream may have more channels than the output (a stereo stream decoded to
+        // mono): the working span covers the larger of the two so both coded channels fit before
+        // the downmix.
+        Span<float> freq = _freq.AsSpan(0, Math.Max(channels, streamChannels) * samples);
         freq.Clear();
 
         ReadOnlySpan<short> eBands = CeltTables.EBands;

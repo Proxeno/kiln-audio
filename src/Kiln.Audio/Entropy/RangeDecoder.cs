@@ -37,6 +37,7 @@ internal ref struct RangeDecoder
     public const int BitRes = 3;
 
     private readonly ReadOnlySpan<byte> _frame;
+    private int _storageBytes;
     private int _offs;
     private int _endOffs;
     private uint _endWindow;
@@ -55,6 +56,7 @@ internal ref struct RangeDecoder
     public RangeDecoder(ReadOnlySpan<byte> frame)
     {
         _frame = frame;
+        _storageBytes = frame.Length;
         _offs = 0;
         _endOffs = 0;
         _endWindow = 0;
@@ -77,8 +79,24 @@ internal ref struct RangeDecoder
     /// <summary>Gets the current range size (RFC 6716 §4.1.2, <c>rng</c>).</summary>
     public readonly uint Rng => _rng;
 
-    /// <summary>Gets the number of bytes in the frame passed to the constructor.</summary>
-    public readonly int StorageBytes => _frame.Length;
+    /// <summary>Gets the number of bytes the coder may read from (RFC 6716 §4.1).</summary>
+    public readonly int StorageBytes => _storageBytes;
+
+    /// <summary>
+    /// Hides the last <paramref name="bytes"/> bytes of the frame from both range-coded and raw
+    /// bit reads, as the reference decoder does for a hybrid frame's trailing redundant CELT
+    /// frame (RFC 6716 §4.5.1.3: <c>dec.storage -= redundancy_bytes</c>).
+    /// </summary>
+    /// <param name="bytes">Number of trailing bytes to hide.</param>
+    public void TrimStorage(int bytes)
+    {
+        if (bytes < 0 || bytes > _storageBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bytes), bytes, "The trim must fit inside the frame.");
+        }
+
+        _storageBytes -= bytes;
+    }
 
     /// <summary>
     /// Returns the number of whole bits used so far (RFC 6716 §4.1.6.1).
@@ -349,7 +367,7 @@ internal ref struct RangeDecoder
     /// <summary>Reads the next range-coded byte, or zero past the end of the frame (RFC 6716 §4.1.2.1).</summary>
     private int ReadByte()
     {
-        if (_offs < _frame.Length)
+        if (_offs < _storageBytes)
         {
             return _frame[_offs++];
         }
@@ -360,10 +378,10 @@ internal ref struct RangeDecoder
     /// <summary>Reads the next raw bit byte from the end of the frame, or zero past the end (RFC 6716 §4.1.4).</summary>
     private byte ReadByteFromEnd()
     {
-        if (_endOffs < _frame.Length)
+        if (_endOffs < _storageBytes)
         {
             _endOffs++;
-            return _frame[_frame.Length - _endOffs];
+            return _frame[_storageBytes - _endOffs];
         }
 
         return 0;
