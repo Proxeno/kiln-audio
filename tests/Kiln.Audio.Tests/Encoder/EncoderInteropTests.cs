@@ -1,6 +1,4 @@
 using FluentAssertions;
-using Kiln.Audio.Celt;
-using Kiln.Audio.Entropy;
 using Kiln.Audio.Tests.Oracle;
 
 namespace Kiln.Audio.Tests.Encoder;
@@ -30,39 +28,42 @@ public class EncoderInteropTests
 
     [Theory]
     [MemberData(nameof(Combinations))]
-    public void OpusDemo_decodes_our_stream_without_a_range_mismatch(OpusFrameDuration duration, int bitrate)
+    public void OpusDemo_and_our_decoder_agree_on_every_packet(OpusFrameDuration duration, int bitrate)
     {
         if (!OracleTestSupport.OracleAvailable())
         {
             return;
         }
 
-        int lm = duration switch
+        int frameSamples = duration switch
         {
-            OpusFrameDuration.Ms2_5 => 0,
-            OpusFrameDuration.Ms5 => 1,
-            OpusFrameDuration.Ms10 => 2,
-            OpusFrameDuration.Ms20 => 3,
+            OpusFrameDuration.Ms2_5 => 120,
+            OpusFrameDuration.Ms5 => 240,
+            OpusFrameDuration.Ms10 => 480,
+            OpusFrameDuration.Ms20 => 960,
             _ => throw new ArgumentOutOfRangeException(nameof(duration)),
         };
-        int frameSamples = 120 << lm;
 
         foreach ((int vector, short[] mono) in Corpus.Value)
         {
             var packets = EncoderCorpus.EncodeWithLibrary(mono, bitrate, duration, complexity: 5);
             packets.Should().NotBeEmpty();
 
-            var decoder = new CeltDecoder(1);
-            var frame = new CeltFrameResult();
-            decoder.Reset();
+            using var decoder = new OpusDecoder(new OpusDecoderOptions
+            {
+                SampleRate = 48000,
+                Channels = 1,
+            });
+            var pcm = new short[frameSamples];
             foreach ((byte[] packet, uint expectedRange) in packets)
             {
-                var range = new RangeDecoder(packet.AsSpan(1));
-                decoder.DecodeFrame(ref range, packet.Length - 1, lm, 0, 21, 1, frame);
-                range.Error.Should().BeFalse($"vector {vector}, {duration}, {bitrate}: our decoder reported corruption");
-                range.Rng.Should().Be(
+                int decoded = decoder.Decode(packet, pcm);
+                decoded.Should().Be(
+                    frameSamples,
+                    $"vector {vector}, {duration}, {bitrate}: the public decoder must return one frame");
+                decoder.FinalRange.Should().Be(
                     expectedRange,
-                    $"vector {vector}, {duration}, {bitrate}: our decoder's final range must match the encoder's");
+                    $"vector {vector}, {duration}, {bitrate}: the decoder final range must match the encoder's");
             }
 
             string bitPath = Path.Combine(Path.GetTempPath(), $"kiln-g1-{Guid.NewGuid():N}.bit");

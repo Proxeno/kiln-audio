@@ -8,7 +8,7 @@ dependencies, Apache-2.0. Kiln.Audio is the audio sibling of [Kiln](https://gith
 the H.264 encoder: the goal is a standards-compliant Opus (RFC 6716) codec for real-time voice,
 implemented entirely in this repository, with no native codec to cross-compile, ship, or keep patched.
 
-> **Status: skeleton — no codec yet.**
+> **Status: RFC 8251-conformant decoder; encoder in progress.**
 
 ## Goals
 
@@ -20,11 +20,20 @@ implemented entirely in this repository, with no native codec to cross-compile, 
 
 ## What Kiln.Audio is not (yet)
 
-- Not a working codec: `OpusEncoder.Encode` and `OpusDecoder.Decode` throw `NotImplementedException`.
-- Not a SILK, CELT or hybrid implementation; none of the range coder, MDCT or LPC machinery exists.
-- Not packet-loss concealment or in-band FEC.
-- Not tested against any oracle vectors yet.
-- What does exist: the public API shape, options validation, and an RFC 6716 §3.1 TOC-byte parser.
+- Not an encoder: `OpusEncoder.Encode` still throws `NotImplementedException`.
+- Not full packet-loss concealment or in-band FEC: `DecodeLoss` is minimal (CELT `DecodeLost`,
+  SILK/hybrid decaying repeat) and `decodeFec: true` throws `NotSupportedException`.
+
+## What exists
+
+- The public `OpusDecoder`: SILK-only, hybrid and CELT-only packets at 8/12/16/24/48 kHz and
+  one or two channels, RFC 8251 transition redundancy, the §4.5.2 reset rules, and `FinalRange`.
+- All 12 RFC 8251 vectors pass `opus_compare` through the public API at 48 kHz stereo, the final
+  range matches for every packet, and `Decode` allocates nothing after construction.
+- The range coder, MDCT/IMDCT, LPC/LTP synthesis, CELT PVQ, the SILK output resampler and an
+  RFC 6716 §3.1–§3.4 packet parser.
+- `DecodeLoss` and the SILK resampler are documented as minimal/non-normative (see
+  `docs/architecture.md` and RFC 6716 §4.2.9).
 
 ## Documentation
 

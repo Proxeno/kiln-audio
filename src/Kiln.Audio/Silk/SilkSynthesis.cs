@@ -112,6 +112,16 @@ internal sealed class SilkSynthesis
     public SilkSynthesis() => Reset();
 
     /// <summary>
+    /// Gets the last mid sample of the most recently synthesized frame.
+    /// </summary>
+    /// <remarks>
+    /// This is the second element of the reference decoder's <c>sStereo.sMid</c> history. The
+    /// top-level decoder uses it to carry the mid history across a mono/stereo channel change,
+    /// which is not a mode change and therefore does not reset the decoder (RFC 6716 §4.5.2).
+    /// </remarks>
+    internal short LastMidSample => _stereoMid[1];
+
+    /// <summary>
     /// Clears all cross-frame state, including the stereo mid/side memory RFC 8251 §3 requires to
     /// be reinitialized on a mode switch.
     /// </summary>
@@ -166,13 +176,17 @@ internal sealed class SilkSynthesis
         else if (_channels != frame.Channels)
         {
             // A channel-count change at the same rate is not a mode change. The reference
-            // implementation keeps the mid channel's synthesis memory and only initializes the
-            // new side channel (Appendix A, silk/dec_API.c); RFC 8251 §3 requires the stereo
-            // mid/side and prediction state to be cleared.
+            // implementation keeps the mid channel's synthesis and mid-history memory and only
+            // initializes the new side channel (Appendix A, silk/dec_API.c). On mono-to-stereo it
+            // also clears the side history and predictor, but it deliberately keeps sMid, which
+            // is what makes the first stereo frame continue from the mono mid history.
             _channelState[1].Reset();
-            _stereoMid.AsSpan().Clear();
-            _stereoSide.AsSpan().Clear();
-            _stereoPredPrevQ13.AsSpan().Clear();
+            if (frame.Channels == 2)
+            {
+                _stereoSide.AsSpan().Clear();
+                _stereoPredPrevQ13.AsSpan().Clear();
+            }
+
             _previousDecodeOnlyMiddle = false;
             _channels = frame.Channels;
         }
@@ -224,6 +238,13 @@ internal sealed class SilkSynthesis
             else
             {
                 _mid.AsSpan(0, _frameLength).CopyTo(pcmOut[frameOffset..]);
+
+                // RFC 6716 Appendix A, dec_API.c: the mono/API-mono buffering branch keeps the
+                // last two mid samples in sStereo.sMid. Keeping them current is what makes the
+                // first stereo frame after mono start from the correct history (the side history
+                // is deliberately left untouched, as the reference does).
+                _stereoMid[0] = _mid[_frameLength - 2];
+                _stereoMid[1] = _mid[_frameLength - 1];
             }
 
             _previousDecodeOnlyMiddle = _channels == 2 && mid.IsMidOnly;
