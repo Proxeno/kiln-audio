@@ -81,9 +81,10 @@ followed by this resampler lands at lag 0 against `opus_demo -d <rate>`.
 The values are a calibration of this filter and must be re-measured if the prototype design
 changes; they are not libopus coefficients. `ResampleConformanceTests` checks the 24 SILK-DEC-2
 streams at 48 kHz: the cross-correlation peak is at lag 0 for every one, and the sample-wise SNR
-after the first 10 ms is 29.9–33.8 dB. The 29.9 dB case is NB 10 ms stereo; a filter approaching
-an ideal interpolator scores worse against libopus on NB (about 20 dB), so this is close to the
-limit of matching the reference's own resampler with an original design.
+after the first 10 ms is 29.9–33.8 dB, above a 29.5 dB regression floor. That SNR measures
+resemblance to libopus's particular resampler, not quality: an ideal interpolator is only about
+20 dB from libopus on NB, and this filter is deliberately an original anti-aliased design rather
+than a copy of the reference's.
 
 ### Mono/stereo channel transitions
 

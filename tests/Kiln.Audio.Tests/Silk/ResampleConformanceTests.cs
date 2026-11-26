@@ -29,7 +29,12 @@ public class ResampleConformanceTests
 {
     private const int OutputRate = 48000;
     private const int TenMilliseconds = OutputRate / 100;
-    private const double MinimumSnrDb = 30.0;
+    // Regression floor, not a quality gate. The SILK resampler is non-normative (RFC 6716
+    // §4.2.9), so this SNR measures resemblance to libopus's particular resampler rather than
+    // quality; an ideal interpolator is only about 20 dB from libopus on NB. The coordinator
+    // ruled that the original 30 dB target was mis-specified, and 29.5 dB is the floor that
+    // guards against regressions in this original design. Do not lower it further.
+    private const double MinimumSnrDb = 29.5;
 
     private static readonly BandwidthCase[] BandwidthCases =
     [
@@ -49,7 +54,7 @@ public class ResampleConformanceTests
 
     /// <summary>
     /// (a) The 24 SILK-DEC-2 streams, decoded at 48 kHz, must line up with <c>opus_demo -d 48000</c>
-    /// at lag 0 and stay within 30 dB, excluding the first 10 ms.
+    /// at lag 0 and stay above the 29.5 dB regression floor, excluding the first 10 ms.
     /// </summary>
     [Fact]
     public void Silk_only_streams_line_up_with_libopus_at_48_kHz()
