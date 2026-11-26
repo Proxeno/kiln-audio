@@ -43,6 +43,20 @@ public sealed record OpusEncoderOptions
     /// <summary>Whether to enable discontinuous transmission. Default false.</summary>
     public bool UseDtx { get; init; }
 
+    /// <summary>
+    /// Optional bandwidth override. For <see cref="OpusApplication.Voip"/> it also selects the
+    /// SILK-only path: narrowband (8 kHz internal), mediumband (12 kHz) or wideband (16 kHz).
+    /// When null, <see cref="OpusApplication.Voip"/> defaults to wideband. Hybrid and
+    /// super-wideband/fullband SILK are not implemented yet.
+    /// </summary>
+    public OpusBandwidth? Bandwidth { get; init; }
+
+    /// <summary>
+    /// Whether the SILK encoder targets a constant packet size. Default false (variable rate).
+    /// Ignored by the CELT path, which is always constant-rate.
+    /// </summary>
+    public bool UseCbr { get; init; }
+
     /// <summary>Validates every field.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A value is outside its legal range.</exception>
     public void Validate()
