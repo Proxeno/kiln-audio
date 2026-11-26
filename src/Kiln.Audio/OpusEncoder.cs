@@ -2,6 +2,7 @@
 
 using Kiln.Audio.Celt;
 using Kiln.Audio.Celt.Encoder;
+using Kiln.Audio.Encoder;
 
 namespace Kiln.Audio;
 
@@ -9,20 +10,27 @@ namespace Kiln.Audio;
 /// <remarks>
 /// <para>
 /// This version supports the configuration HaIyu's outbound voice path needs: application
-/// <see cref="OpusApplication.RestrictedLowDelay"/>, 48 kHz, mono, CELT-only, CBR, and 2.5, 5, 10
-/// or 20 ms frames. Every other valid option combination is rejected with
-/// <see cref="NotSupportedException"/> and a message naming the unsupported feature.
+/// <see cref="OpusApplication.RestrictedLowDelay"/>, 48 kHz, mono, CELT-only, CBR, and 2.5, 5, 10,
+/// 20, 40 or 60 ms frames. A 40 or 60 ms frame is encoded as two or three 20 ms frames in one
+/// code 1 or code 3 packet, exactly as the reference handles CELT durations above 20 ms. Every
+/// other valid option combination is rejected with <see cref="NotSupportedException"/> and a
+/// message naming the unsupported feature.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
-/// byte followed by one CELT frame. It allocates nothing after construction.
+/// byte followed by one CELT frame (or the multi-frame layout for 40 and 60 ms). It allocates
+/// nothing after construction.
 /// </para>
 /// </remarks>
 public sealed class OpusEncoder : IDisposable
 {
     private readonly CeltEncoder _encoder;
-    private readonly OpusFrameDuration _frameDuration;
+    private readonly OpusFrameDuration _tocDuration;
+    private readonly int _subFrameSamples;
+    private readonly int _subFrameCount;
+    private readonly int _inputFrameSamples;
     private readonly short[] _conversionBuffer;
+    private readonly byte[] _subFrameData;
     private bool _disposed;
 
     /// <summary>Creates an encoder after validating and checking <paramref name="options"/>.</summary>
@@ -54,13 +62,6 @@ public sealed class OpusEncoder : IDisposable
                 FormattableString.Invariant($"Only mono input is supported; got {options.Channels} channels."));
         }
 
-        if (options.FrameDuration is OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60)
-        {
-            throw new NotSupportedException(
-                FormattableString.Invariant(
-                    $"CELT supports 2.5, 5, 10 and 20 ms frames; got {options.FrameDuration}."));
-        }
-
         if (options.UseInbandFec)
         {
             throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
@@ -72,9 +73,24 @@ public sealed class OpusEncoder : IDisposable
         }
 
         Options = options;
-        _frameDuration = options.FrameDuration;
-        _encoder = new CeltEncoder(options.FrameDuration, options.BitrateBps, options.Complexity);
-        _conversionBuffer = new short[_encoder.FrameSamples];
+
+        // CELT packets are at most 20 ms; 40 and 60 ms are split into 20 ms frames (RFC 6716
+        // §3.2.5, Appendix A opus_encoder.c). The packet TOC therefore advertises 20 ms.
+        _tocDuration = options.FrameDuration is OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60
+            ? OpusFrameDuration.Ms20
+            : options.FrameDuration;
+        _subFrameCount = options.FrameDuration switch
+        {
+            OpusFrameDuration.Ms40 => 2,
+            OpusFrameDuration.Ms60 => 3,
+            _ => 1,
+        };
+
+        _encoder = new CeltEncoder(_tocDuration, options.BitrateBps, options.Complexity);
+        _subFrameSamples = _encoder.FrameSamples;
+        _inputFrameSamples = _subFrameSamples * _subFrameCount;
+        _conversionBuffer = new short[_inputFrameSamples];
+        _subFrameData = new byte[_subFrameCount * _encoder.FrameBytes];
     }
 
     /// <summary>The validated options this encoder was created with.</summary>
@@ -96,26 +112,44 @@ public sealed class OpusEncoder : IDisposable
     public int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (pcm.Length != _encoder.FrameSamples)
+        if (pcm.Length != _inputFrameSamples)
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {_encoder.FrameSamples} samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_inputFrameSamples} samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
         int frameBytes = _encoder.FrameBytes;
-        if (packet.Length < frameBytes + 1)
+        int minimumPacket = (frameBytes * _subFrameCount) + (_subFrameCount == 1 ? 1 : 2);
+        if (packet.Length < minimumPacket)
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The packet buffer must hold at least {frameBytes + 1} bytes; got {packet.Length}."),
+                    $"The packet buffer must hold at least {minimumPacket} bytes; got {packet.Length}."),
                 nameof(packet));
         }
 
-        packet[0] = BuildToc();
-        int written = _encoder.EncodeFrame(pcm, packet.Slice(1));
-        return written + 1;
+        if (_subFrameCount == 1)
+        {
+            packet[0] = BuildToc();
+            int written = _encoder.EncodeFrame(pcm, packet.Slice(1));
+            return written + 1;
+        }
+
+        // 40 and 60 ms CELT are code 1/code 3 packets of 20 ms frames (RFC 6716 Appendix A,
+        // opus_encoder.c: the "can't support higher than wideband for > 20 ms frames" block).
+        Span<int> sizes = stackalloc int[_subFrameCount];
+        int dataBytes = 0;
+        for (int i = 0; i < _subFrameCount; i++)
+        {
+            int size = _encoder.EncodeFrame(
+                pcm.Slice(i * _subFrameSamples, _subFrameSamples), _subFrameData.AsSpan(dataBytes));
+            sizes[i] = size;
+            dataBytes += size;
+        }
+
+        return OpusPacketWriter.Write(packet, BuildToc(), sizes, _subFrameData.AsSpan(0, dataBytes));
     }
 
     /// <summary>Encodes one frame of mono floating-point PCM in [-1, 1] into an Opus packet.</summary>
@@ -124,11 +158,11 @@ public sealed class OpusEncoder : IDisposable
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
     public int Encode(ReadOnlySpan<float> pcm, Span<byte> packet)
     {
-        if (pcm.Length != _encoder.FrameSamples)
+        if (pcm.Length != _inputFrameSamples)
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {_encoder.FrameSamples} samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_inputFrameSamples} samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
@@ -150,7 +184,8 @@ public sealed class OpusEncoder : IDisposable
     private byte BuildToc()
     {
         // CELT-only fullband configs are 28..31 (RFC 6716 §3.1, Table 2), one per frame duration.
-        int config = 28 + (int)_frameDuration;
+        // A 40 or 60 ms input frame is signalled as 20 ms and split into several frames.
+        int config = 28 + (int)_tocDuration;
         return (byte)(config << 3);
     }
 }

@@ -20,6 +20,11 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Decoder/CeltOutput.cs`
 - `src/Kiln.Audio/Decoder/OpusDecoderCore.cs`
 - `src/Kiln.Audio/Decoder/SilkOutput.cs`
+- `src/Kiln.Audio/Encoder/OpusModeSelector.cs`
+- `src/Kiln.Audio/Encoder/OpusPacketWriter.cs`
+- `src/Kiln.Audio/Encoder/OpusRepacketizer.cs`
+- `src/Kiln.Audio/Encoder/OpusTocBuilder.cs`
+- `src/Kiln.Audio/Encoder/OpusTransitionEncoder.cs`
 - `src/Kiln.Audio/OpusDecoder.cs`
 - `src/Kiln.Audio/OpusEncoder.cs`
 - `src/Kiln.Audio/Silk/SilkDecoder.cs`
