@@ -6,6 +6,7 @@
     <Project Path="src/Kiln.Audio/Kiln.Audio.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Kiln.Audio.Fuzz/Kiln.Audio.Fuzz.csproj" />
     <Project Path="tests/Kiln.Audio.Tests/Kiln.Audio.Tests.csproj" />
   </Folder>
 </Solution>

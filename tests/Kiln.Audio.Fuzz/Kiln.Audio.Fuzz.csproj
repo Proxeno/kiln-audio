@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Kiln.Audio.Fuzz</RootNamespace>
+    <AssemblyName>Kiln.Audio.Fuzz</AssemblyName>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Kiln.Audio/Kiln.Audio.csproj" />
+  </ItemGroup>
+
+</Project>

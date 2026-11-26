@@ -44,6 +44,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Kiln.Audio.Tests" />
     <InternalsVisibleTo Include="Kiln.Audio.Benchmarks" />
+    <InternalsVisibleTo Include="Kiln.Audio.Fuzz" />
   </ItemGroup>
 
 </Project>
