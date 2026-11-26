@@ -100,7 +100,7 @@ public class CeltDecodeBenchmarks
             int frameSamples = CeltTables.ShortBlockSamples << lm;
             if (size <= 1)
             {
-                _synthesizer.DecodeLost(lm, floatPcm[..(frameSamples * OutputChannels)]);
+                _synthesizer.DecodeLost(lm, startBand: 0, floatPcm[..(frameSamples * OutputChannels)]);
             }
             else
             {

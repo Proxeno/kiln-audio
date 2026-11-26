@@ -45,13 +45,15 @@ public class OpusDecoderApiTests
     }
 
     [Fact]
-    public void In_band_FEC_throws_NotSupportedException()
+    public void In_band_FEC_decode_returns_the_frame_duration()
     {
         using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 1 });
         byte[] packet = FirstPacket(12);
 
-        Action decode = () => decoder.Decode(packet, new short[960], decodeFec: true);
-        decode.Should().Throw<NotSupportedException>().WithMessage("*EWI-2742*");
+        var pcm = new short[960];
+        int samples = decoder.Decode(packet, pcm, decodeFec: true);
+
+        samples.Should().Be(960, "the output has the frame size of the packet that carries the FEC");
     }
 
     [Fact]

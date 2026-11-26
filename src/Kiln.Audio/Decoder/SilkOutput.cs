@@ -48,6 +48,8 @@ internal sealed class SilkOutput
     private SilkResampler? _right;
     private int _resamplerRate;
     private short _mid1;
+    private int _internalRate;
+    private int _internalChannels;
 
     /// <inheritdoc cref="SilkOutput"/>
     /// <param name="apiRate">API sample rate: 8000, 12000, 16000, 24000 or 48000 Hz.</param>
@@ -77,6 +79,8 @@ internal sealed class SilkOutput
         _left?.Reset();
         _right?.Reset();
         _mid1 = 0;
+        _internalRate = 0;
+        _internalChannels = 0;
     }
 
     /// <summary>
@@ -110,12 +114,80 @@ internal sealed class SilkOutput
         }
 
         _decoder.DecodeFrame(ref dec, internalRateHz, internalChannels, frameDurationMs, _frameResult);
+        _internalRate = internalRateHz;
+        _internalChannels = internalChannels;
 
         short heldMid = _mid1;
         int internalCount = internalSamples * internalChannels;
         _synthesis.Synthesize(_frameResult, _internalPcm.AsSpan(0, internalCount));
         _mid1 = _synthesis.LastMidSample;
+        return WriteOutput(internalSamples, internalChannels, outputSamples, heldMid, pcm);
+    }
 
+    /// <summary>
+    /// Conceals a lost Opus frame with the SILK packet-loss algorithm and writes normalized PCM
+    /// at the API rate.
+    /// </summary>
+    /// <param name="frameDurationMs">Duration of the lost frame: 10, 20, 40 or 60 ms.</param>
+    /// <param name="pcm">Destination for normalized interleaved PCM at the API rate.</param>
+    /// <returns>The number of samples per channel written.</returns>
+    internal int DecodeLost(int frameDurationMs, Span<float> pcm)
+    {
+        int outputSamples = _apiRate * frameDurationMs / 1000;
+        if (_internalRate == 0 || _internalChannels == 0)
+        {
+            pcm[..(outputSamples * _apiChannels)].Clear();
+            return outputSamples;
+        }
+
+        int internalSamples = _internalRate * frameDurationMs / 1000;
+        short heldMid = _mid1;
+        _synthesis.Conceal(
+            frameDurationMs, _internalPcm.AsSpan(0, internalSamples * _internalChannels));
+        _mid1 = _synthesis.LastMidSample;
+        _decoder.ResetGainClampAfterLoss();
+        return WriteOutput(internalSamples, _internalChannels, outputSamples, heldMid, pcm);
+    }
+
+    /// <summary>
+    /// Decodes the in-band FEC (LBRR) frames of this packet and writes normalized PCM at the API
+    /// rate, concealing intervals that carry no LBRR frame.
+    /// </summary>
+    /// <param name="dec">Range decoder positioned at the start of the frame's SILK data.</param>
+    /// <param name="internalRateHz">SILK internal rate: 8000, 12000 or 16000 Hz.</param>
+    /// <param name="internalChannels">Coded SILK channels: 1 or 2.</param>
+    /// <param name="frameDurationMs">Opus frame duration: 10, 20, 40 or 60 ms.</param>
+    /// <param name="pcm">Destination for normalized interleaved PCM at the API rate.</param>
+    /// <returns>The number of samples per channel written.</returns>
+    internal int DecodeFec(
+        ref RangeDecoder dec,
+        int internalRateHz,
+        int internalChannels,
+        int frameDurationMs,
+        Span<float> pcm)
+    {
+        int outputSamples = _apiRate * frameDurationMs / 1000;
+        int internalSamples = internalRateHz * frameDurationMs / 1000;
+        short heldMid = _mid1;
+        _decoder.DecodeFrame(ref dec, internalRateHz, internalChannels, frameDurationMs, _frameResult, lbrrOnly: true);
+        _internalRate = internalRateHz;
+        _internalChannels = internalChannels;
+        _synthesis.SynthesizeFec(
+            _frameResult, _internalPcm.AsSpan(0, internalSamples * internalChannels));
+        _mid1 = _synthesis.LastMidSample;
+        return WriteOutput(internalSamples, internalChannels, outputSamples, heldMid, pcm);
+    }
+
+    /// <summary>Feeds the internal-rate PCM through the mono buffering and the resamplers.</summary>
+    /// <param name="internalSamples">Samples per channel at the internal rate.</param>
+    /// <param name="internalChannels">Coded channels: 1 or 2.</param>
+    /// <param name="outputSamples">Samples per channel expected at the API rate.</param>
+    /// <param name="heldMid">The mid-history sample held from the previous frame.</param>
+    /// <param name="pcm">Destination for normalized interleaved PCM at the API rate.</param>
+    /// <returns>The number of samples per channel written.</returns>
+    private int WriteOutput(
+        int internalSamples, int internalChannels, int outputSamples, short heldMid, Span<float> pcm)
+    {
         for (int i = 0; i < internalSamples; i++)
         {
             _channel0[i] = _internalPcm[i * internalChannels];
@@ -125,7 +197,7 @@ internal sealed class SilkOutput
             }
         }
 
-        EnsureResamplers(internalRateHz);
+        EnsureResamplers(_internalRate);
 
         ReadOnlySpan<short> feed0;
         ReadOnlySpan<short> feed1;

@@ -93,9 +93,8 @@ internal static class CeltVectorDriver
                 int sampleCount = CeltTables.ShortBlockSamples << lm;
                 if (size <= 1)
                 {
-                    // DTX or a lost frame: the reference decodes these with packet loss
-                    // concealment, which is a later lane. Emit silence for the duration.
-                    synthesizer.DecodeLost(lm, floatPcm.AsSpan(0, sampleCount * outputChannels));
+                    // DTX or a lost frame: use the CELT packet loss concealment.
+                    synthesizer.DecodeLost(lm, startBand: 0, floatPcm.AsSpan(0, sampleCount * outputChannels));
                 }
                 else
                 {
