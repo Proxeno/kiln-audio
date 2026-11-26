@@ -349,6 +349,136 @@ public class SimdParityTests
         Assert.Equal(disabled, SimdConfig.IsDisabledValue(value));
     }
 
+    [Theory]
+    [InlineData(4)]
+    [InlineData(7)]
+    [InlineData(16)]
+    [InlineData(96)]
+    [InlineData(176)]
+    public void Dec_scale_copy_is_bit_exact_between_the_scalar_and_vector_paths(int count)
+    {
+        var source = new float[count];
+        FillRandom(source, count + 400);
+        var vectorOutput = new float[count];
+        var scalarOutput = new float[count];
+        const float Gain = 0.375f;
+
+        DecKernels.ScaleCopy(vectorOutput, source, Gain, useVector: true);
+        DecKernels.ScaleCopy(scalarOutput, source, Gain, useVector: false);
+
+        Assert.Equal(scalarOutput, vectorOutput);
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(17)]
+    [InlineData(120)]
+    public void Dec_scale_in_place_is_bit_exact_between_the_scalar_and_vector_paths(int count)
+    {
+        var source = new float[count];
+        FillRandom(source, count + 500);
+        var vectorValues = (float[])source.Clone();
+        var scalarValues = (float[])source.Clone();
+        const float Gain = -1.25f;
+
+        DecKernels.ScaleInPlace(vectorValues, Gain, useVector: true);
+        DecKernels.ScaleInPlace(scalarValues, Gain, useVector: false);
+
+        Assert.Equal(scalarValues, vectorValues);
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(13)]
+    [InlineData(96)]
+    [InlineData(176)]
+    public void Dec_scale_int_to_float_is_bit_exact_between_the_scalar_and_vector_paths(int count)
+    {
+        var source = new int[count];
+        var random = new Random(count + 600);
+        for (int i = 0; i < count; i++)
+        {
+            source[i] = random.Next(-8, 9);
+        }
+
+        var vectorOutput = new float[count];
+        var scalarOutput = new float[count];
+        const float Gain = 0.0137f;
+
+        DecKernels.ScaleIntToFloat(vectorOutput, source, Gain, useVector: true);
+        DecKernels.ScaleIntToFloat(scalarOutput, source, Gain, useVector: false);
+
+        Assert.Equal(scalarOutput, vectorOutput);
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(15)]
+    [InlineData(88)]
+    public void Dec_stereo_merge_is_bit_exact_between_the_scalar_and_vector_paths(int count)
+    {
+        var xSource = new float[count];
+        var ySource = new float[count];
+        FillRandom(xSource, count + 700);
+        FillRandom(ySource, count + 800);
+        var vectorX = (float[])xSource.Clone();
+        var vectorY = (float[])ySource.Clone();
+        var scalarX = (float[])xSource.Clone();
+        var scalarY = (float[])ySource.Clone();
+
+        DecKernels.StereoMerge(vectorX, vectorY, 0.7f, 1.1f, 0.9f, count, useVector: true);
+        DecKernels.StereoMerge(scalarX, scalarY, 0.7f, 1.1f, 0.9f, count, useVector: false);
+
+        Assert.Equal(scalarX, vectorX);
+        Assert.Equal(scalarY, vectorY);
+    }
+
+    [Theory]
+    [InlineData(80, 32)]
+    [InlineData(80, 10)]
+    [InlineData(80, 12)]
+    [InlineData(40, 160)]
+    [InlineData(4, 16)]
+    [InlineData(320, 20)]
+    public void Silk_ltp_synthesis_is_bit_exact_between_the_scalar_and_vector_paths(int count, int lag)
+    {
+        const int Taps = 5;
+        const int BufferLength = 1024;
+        const int PredictionLag = 400;
+        int writeIndex = PredictionLag + lag - 2;
+        var random = new Random((count * 131) + lag);
+        var initial = new int[BufferLength];
+        for (int i = 0; i < initial.Length; i++)
+        {
+            initial[i] = (int)(random.NextInt64(int.MinValue, (long)int.MaxValue + 1));
+        }
+
+        var coefficients = new short[Taps];
+        for (int t = 0; t < Taps; t++)
+        {
+            coefficients[t] = (short)random.Next(short.MinValue, short.MaxValue + 1);
+        }
+
+        var excitation = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            excitation[i] = (int)(random.NextInt64(int.MinValue, (long)int.MaxValue + 1));
+        }
+
+        var vectorBuffer = (int[])initial.Clone();
+        var scalarBuffer = (int[])initial.Clone();
+        var vectorResidual = new int[count];
+        var scalarResidual = new int[count];
+
+        DecSilkLtp.Synthesize(
+            vectorBuffer, PredictionLag, writeIndex, coefficients, excitation, vectorResidual, count, useVector: true);
+        DecSilkLtp.Synthesize(
+            scalarBuffer, PredictionLag, writeIndex, coefficients, excitation, scalarResidual, count, useVector: false);
+
+        Assert.Equal(scalarResidual, vectorResidual);
+        Assert.Equal(scalarBuffer, vectorBuffer);
+    }
+
     private static void AssertWithinRms(double[] expected, double[] actual, string context)
     {
         Assert.Equal(expected.Length, actual.Length);

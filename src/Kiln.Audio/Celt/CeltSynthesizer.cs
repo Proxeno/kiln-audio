@@ -188,14 +188,30 @@ internal sealed partial class CeltSynthesizer
         // The coded stream may have more channels than the output (a stereo stream decoded to
         // mono): the working span covers the larger of the two so both coded channels fit before
         // the downmix.
-        Span<float> freq = _freq.AsSpan(0, Math.Max(channels, streamChannels) * samples);
-        freq.Clear();
+        int workingChannels = Math.Max(channels, streamChannels);
+        Span<float> freq = _freq.AsSpan(0, workingChannels * samples);
 
         ReadOnlySpan<short> eBands = CeltTables.EBands;
         ReadOnlySpan<float> eMeans = CeltTables.EMeans;
         int m = 1 << frame.Lm;
+
+        // Only the bands outside the coded range stay zero; the per-band writes below overwrite
+        // everything inside it, so clearing the whole working buffer first would be wasted work.
+        int firstCoded = m * eBands[frame.StartBand];
+        int lastCoded = m * eBands[frame.EndBand];
+        for (int channel = 0; channel < workingChannels; channel++)
+        {
+            int offset = channel * samples;
+            freq.Slice(offset, firstCoded).Clear();
+            if (lastCoded < samples)
+            {
+                freq.Slice(offset + lastCoded, samples - lastCoded).Clear();
+            }
+        }
+
         for (int channel = 0; channel < streamChannels; channel++)
         {
+            int offset = channel * samples;
             for (int i = frame.StartBand; i < frame.EndBand; i++)
             {
                 float logEnergy = frame.BandEnergies[(channel * CeltTables.BandCount) + i] + eMeans[i];
@@ -208,10 +224,10 @@ internal sealed partial class CeltSynthesizer
                 float gain = (float)Math.Exp(0.6931471805599453094 * logEnergy);
                 int start = m * eBands[i];
                 int end = m * eBands[i + 1];
-                for (int j = start; j < end; j++)
-                {
-                    freq[(channel * samples) + j] = frame.Spectrum[(channel * samples) + j] * gain;
-                }
+                DecKernels.ScaleCopy(
+                    freq.Slice(offset + start, end - start),
+                    frame.Spectrum.AsSpan(offset + start, end - start),
+                    gain);
             }
         }
 
@@ -243,18 +259,22 @@ internal sealed partial class CeltSynthesizer
     /// <summary>Runs the inverse MDCT for one channel and does the overlap-add with the previous frame.</summary>
     private void BuildTimeSignal(CeltFrameResult frame, int samples, int channel)
     {
-        if (samples + Overlap > _block.Length)
-        {
-            throw new InvalidOperationException(
-                FormattableString.Invariant($"samples {samples} overlap {Overlap} block {_block.Length}"));
-        }
-
-        Span<float> block = _block.AsSpan(0, samples + Overlap);
-        block.Clear();
-
         ReadOnlySpan<float> spectrum = _freq.AsSpan(channel * samples, samples);
+        Span<float> raw = _rawOutput.AsSpan(0, samples);
+        float[] overlap = _rawOverlap[channel];
+
         if (frame.ShortBlocks != 0)
         {
+            if (samples + Overlap > _block.Length)
+            {
+                throw new InvalidOperationException(
+                    FormattableString.Invariant($"samples {samples} overlap {Overlap} block {_block.Length}"));
+            }
+
+            // The short-block inverse writes overlapped regions that accumulate across blocks,
+            // so the buffer must start at zero.
+            Span<float> block = _block.AsSpan(0, samples + Overlap);
+            block.Clear();
             int blocks = frame.ShortBlocks;
             float scale = _shortMdct.CoefficientCount * 0.5f;
             for (int b = 0; b < blocks; b++)
@@ -266,29 +286,35 @@ internal sealed partial class CeltSynthesizer
                     block[offset + k] += scale * _imdct[k];
                 }
             }
+
+            for (int j = 0; j < Overlap; j++)
+            {
+                raw[j] = block[j] + overlap[j];
+                overlap[j] = block[samples + j];
+            }
+
+            for (int j = Overlap; j < samples; j++)
+            {
+                raw[j] = block[j];
+            }
         }
         else
         {
+            // The long-block inverse covers the whole frame exactly once, so the windowed output
+            // is written straight into the overlap-add instead of through an intermediate buffer.
             Mdct mdct = _mdct[frame.Lm];
             mdct.Inverse(spectrum, _imdct);
             float scale = mdct.CoefficientCount * 0.5f;
-            for (int k = 0; k < mdct.Length; k++)
+            for (int j = 0; j < Overlap; j++)
             {
-                block[k] += scale * _imdct[k];
+                raw[j] = (scale * _imdct[j]) + overlap[j];
+                overlap[j] = scale * _imdct[samples + j];
             }
-        }
 
-        float[] overlap = _rawOverlap[channel];
-        Span<float> raw = _rawOutput.AsSpan(0, samples);
-        for (int j = 0; j < Overlap; j++)
-        {
-            raw[j] = block[j] + overlap[j];
-            overlap[j] = block[samples + j];
-        }
-
-        for (int j = Overlap; j < samples; j++)
-        {
-            raw[j] = block[j];
+            for (int j = Overlap; j < samples; j++)
+            {
+                raw[j] = scale * _imdct[j];
+            }
         }
 
         float[] history = _history[channel];

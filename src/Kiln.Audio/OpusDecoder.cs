@@ -59,7 +59,7 @@ public sealed class OpusDecoder : IDisposable
     /// <summary>Decodes one Opus packet to interleaved 16-bit PCM.</summary>
     /// <param name="packet">The Opus packet, starting at its TOC byte.</param>
     /// <param name="pcm">
-    /// Destination for interleaved PCM. It must hold at least <paramref name="return"/> times
+    /// Destination for interleaved PCM. It must hold at least the returned count times
     /// <see cref="OpusDecoderOptions.Channels"/> samples.
     /// </param>
     /// <param name="decodeFec">
@@ -121,7 +121,7 @@ public sealed class OpusDecoder : IDisposable
     /// <param name="packet">The Opus packet, starting at its TOC byte.</param>
     /// <param name="pcm">
     /// Destination for interleaved samples in [-1, 1]. It must hold at least
-    /// <paramref name="return"/> times <see cref="OpusDecoderOptions.Channels"/> samples.
+    /// the returned count times <see cref="OpusDecoderOptions.Channels"/> samples.
     /// </param>
     /// <param name="decodeFec">
     /// Decode the in-band FEC (LBRR) data of this packet to recover the frame that preceded it.
@@ -152,7 +152,7 @@ public sealed class OpusDecoder : IDisposable
 
     /// <summary>Synthesises concealment audio for a lost packet (packet loss concealment).</summary>
     /// <param name="pcm">
-    /// Destination for interleaved PCM. It must hold at least <paramref name="return"/> times
+    /// Destination for interleaved PCM. It must hold at least the returned count times
     /// <see cref="OpusDecoderOptions.Channels"/> samples.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>

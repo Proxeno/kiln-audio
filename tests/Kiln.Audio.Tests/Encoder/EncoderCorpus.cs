@@ -116,6 +116,14 @@ internal static class EncoderCorpus
         WriteBitFileTo(stream, packets);
     }
 
+    /// <summary>Serializes a packet stream in the <c>.bit</c> format and returns the bytes.</summary>
+    internal static byte[] WriteBitFileToBytes(IReadOnlyList<(byte[] Packet, uint Range)> packets)
+    {
+        using var stream = new MemoryStream();
+        WriteBitFileTo(stream, packets);
+        return stream.ToArray();
+    }
+
     /// <summary>Writes a <c>.bit</c> stream to an open stream.</summary>
     internal static void WriteBitFileTo(Stream stream, IReadOnlyList<(byte[] Packet, uint Range)> packets)
     {
