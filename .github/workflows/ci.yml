@@ -74,7 +74,9 @@ jobs:
           KILN_AUDIO_REQUIRE_ORACLE: ${{ matrix.require_oracle }}
         run: dotnet test --no-build -c Release --logger "trx" --results-directory artifacts/test-results
       - name: Upload test results
-        if: always()
+        # Only on failure, and never fatal: the org artifact storage quota is shared.
+        if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.os }}
