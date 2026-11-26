@@ -1,6 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -211,9 +212,25 @@ internal sealed class CeltEncoder
         CeltEncoderEnergy.Amp2Log2(_bandEnergy, BandCount, BandCount, _bandLogE);
         NormaliseBands(BandCount);
 
-        int tfSelect = CeltEncoderAnalysis.TfAnalysis(
-            CeltTables.EBands, BandCount, isTransient, _tfResolution, frameBytes, _spectrum, lm, out _,
-            _metric, _path0, _path1, _tfScratch);
+        int tfSelect;
+        if (_complexity < 2)
+        {
+            // RFC 6716 Appendix A, celt/celt_encoder.c: enable_tf_analysis requires complexity 2.
+            // Below that the reference forces the time resolution from isTransient, which is
+            // always false here because transient analysis also needs complexity > 1.
+            for (int i = 0; i < BandCount; i++)
+            {
+                _tfResolution[i] = isTransient ? 1 : 0;
+            }
+
+            tfSelect = 0;
+        }
+        else
+        {
+            tfSelect = CeltEncoderAnalysis.TfAnalysis(
+                CeltTables.EBands, BandCount, isTransient, _tfResolution, frameBytes, _spectrum, lm, out _,
+                _metric, _path0, _path1, _tfScratch);
+        }
 
         CeltEncoderEnergy.QuantCoarseEnergy(
             ref enc, lm, 0, BandCount, BandCount, _bandLogE, _oldBandE, _error,
@@ -365,12 +382,7 @@ internal sealed class CeltEncoder
         if (shortBlocks == 0)
         {
             _mdct[_lm].Forward(input.Slice(0, n + Overlap), _frequency.AsSpan(0, n));
-            float scale = 2f / n;
-            for (int k = 0; k < n; k++)
-            {
-                _frequency[k] *= scale;
-            }
-
+            EncKernels.Scale(_frequency.AsSpan(0, n), 2f / n);
             return;
         }
 
@@ -381,11 +393,7 @@ internal sealed class CeltEncoder
             _shortMdct.Forward(input.Slice(b * shortSamples, shortSamples + Overlap), _frequency.AsSpan(b), blocks);
         }
 
-        float shortScale = 2f / shortSamples;
-        for (int k = 0; k < n; k++)
-        {
-            _frequency[k] *= shortScale;
-        }
+        EncKernels.Scale(_frequency.AsSpan(0, n), 2f / shortSamples);
     }
 
     private void ComputeBandEnergies(int end)
@@ -408,8 +416,9 @@ internal sealed class CeltEncoder
         {
             int start = m * eBands[i];
             int count = m * (eBands[i + 1] - eBands[i]);
-            _frequency.AsSpan(start, count).CopyTo(_spectrum.AsSpan(start, count));
-            CeltEncoderKernels.NormaliseBand(_spectrum.AsSpan(start, count), _bandEnergy[i]);
+            float gain = 1f / (1e-27f + _bandEnergy[i]);
+            EncKernels.NormaliseInto(
+                _frequency.AsSpan(start, count), _spectrum.AsSpan(start, count), gain);
         }
     }
 }

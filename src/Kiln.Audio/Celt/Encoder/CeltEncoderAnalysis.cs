@@ -1,5 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Kiln.Audio.Entropy;
 
 namespace Kiln.Audio.Celt.Encoder;
@@ -55,10 +57,7 @@ internal static class CeltEncoderAnalysis
         {
             int bandStart = eBands[i] << lm;
             int samples = (eBands[i + 1] - eBands[i]) << lm;
-            for (int j = 0; j < samples; j++)
-            {
-                tmp[j] = spectrum[bandStart + j];
-            }
+            spectrum.Slice(bandStart, samples).CopyTo(tmp);
 
             float best = L1Metric(tmp, samples, isTransient ? lm : 0, samples >> lm);
             int bestLevel = 0;
@@ -136,13 +135,16 @@ internal static class CeltEncoderAnalysis
 
     private static float L1Metric(ReadOnlySpan<float> tmp, int n, int lm, int width)
     {
+        ref float values = ref MemoryMarshal.GetReference(tmp);
+        int groups = 1 << lm;
+        int perGroup = n >> lm;
         float l1 = 0f;
-        for (int i = 0; i < 1 << lm; i++)
+        for (int i = 0; i < groups; i++)
         {
             float l2 = 0f;
-            for (int j = 0; j < n >> lm; j++)
+            for (int j = 0; j < perGroup; j++)
             {
-                float value = tmp[(j << lm) + i];
+                float value = Unsafe.Add(ref values, (j << lm) + i);
                 l2 += value * value;
             }
 
@@ -372,14 +374,20 @@ internal static class CeltEncoderAnalysis
     internal static void Haar1(Span<float> x, int n0, int stride)
     {
         n0 >>= 1;
+        ref float values = ref MemoryMarshal.GetReference(x);
         for (int i = 0; i < stride; i++)
         {
+            int even = i;
+            int odd = stride + i;
+            int advance = 2 * stride;
             for (int j = 0; j < n0; j++)
             {
-                float first = 0.70710678f * x[(stride * 2 * j) + i];
-                float second = 0.70710678f * x[(stride * ((2 * j) + 1)) + i];
-                x[(stride * 2 * j) + i] = first + second;
-                x[(stride * ((2 * j) + 1)) + i] = first - second;
+                float first = 0.70710678f * Unsafe.Add(ref values, even);
+                float second = 0.70710678f * Unsafe.Add(ref values, odd);
+                Unsafe.Add(ref values, even) = first + second;
+                Unsafe.Add(ref values, odd) = first - second;
+                even += advance;
+                odd += advance;
             }
         }
     }
