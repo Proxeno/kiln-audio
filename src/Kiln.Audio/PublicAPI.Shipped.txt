@@ -1,0 +1,67 @@
+#nullable enable
+Kiln.Audio.OpusApplication
+Kiln.Audio.OpusApplication.Audio = 1 -> Kiln.Audio.OpusApplication
+Kiln.Audio.OpusApplication.RestrictedLowDelay = 2 -> Kiln.Audio.OpusApplication
+Kiln.Audio.OpusApplication.Voip = 0 -> Kiln.Audio.OpusApplication
+Kiln.Audio.OpusDecoder
+Kiln.Audio.OpusDecoder.Decode(System.ReadOnlySpan<byte> packet, System.Span<float> pcm, bool decodeFec = false) -> int
+Kiln.Audio.OpusDecoder.Decode(System.ReadOnlySpan<byte> packet, System.Span<short> pcm, bool decodeFec = false) -> int
+Kiln.Audio.OpusDecoder.DecodeLoss(System.Span<short> pcm) -> int
+Kiln.Audio.OpusDecoder.Dispose() -> void
+Kiln.Audio.OpusDecoder.FinalRange.get -> uint
+Kiln.Audio.OpusDecoder.Options.get -> Kiln.Audio.OpusDecoderOptions!
+Kiln.Audio.OpusDecoder.OpusDecoder(Kiln.Audio.OpusDecoderOptions! options) -> void
+Kiln.Audio.OpusDecoderOptions
+Kiln.Audio.OpusDecoderOptions.<Clone>$() -> Kiln.Audio.OpusDecoderOptions!
+Kiln.Audio.OpusDecoderOptions.Channels.get -> int
+Kiln.Audio.OpusDecoderOptions.Channels.init -> void
+Kiln.Audio.OpusDecoderOptions.Equals(Kiln.Audio.OpusDecoderOptions? other) -> bool
+Kiln.Audio.OpusDecoderOptions.OpusDecoderOptions() -> void
+Kiln.Audio.OpusDecoderOptions.SampleRate.get -> int
+Kiln.Audio.OpusDecoderOptions.SampleRate.init -> void
+Kiln.Audio.OpusDecoderOptions.Validate() -> void
+Kiln.Audio.OpusEncoder
+Kiln.Audio.OpusEncoder.Dispose() -> void
+Kiln.Audio.OpusEncoder.Encode(System.ReadOnlySpan<float> pcm, System.Span<byte> packet) -> int
+Kiln.Audio.OpusEncoder.Encode(System.ReadOnlySpan<short> pcm, System.Span<byte> packet) -> int
+Kiln.Audio.OpusEncoder.FinalRange.get -> uint
+Kiln.Audio.OpusEncoder.Options.get -> Kiln.Audio.OpusEncoderOptions!
+Kiln.Audio.OpusEncoder.OpusEncoder(Kiln.Audio.OpusEncoderOptions! options) -> void
+Kiln.Audio.OpusEncoderOptions
+Kiln.Audio.OpusEncoderOptions.<Clone>$() -> Kiln.Audio.OpusEncoderOptions!
+Kiln.Audio.OpusEncoderOptions.Application.get -> Kiln.Audio.OpusApplication
+Kiln.Audio.OpusEncoderOptions.Application.init -> void
+Kiln.Audio.OpusEncoderOptions.BitrateBps.get -> int
+Kiln.Audio.OpusEncoderOptions.BitrateBps.init -> void
+Kiln.Audio.OpusEncoderOptions.Channels.get -> int
+Kiln.Audio.OpusEncoderOptions.Channels.init -> void
+Kiln.Audio.OpusEncoderOptions.Complexity.get -> int
+Kiln.Audio.OpusEncoderOptions.Complexity.init -> void
+Kiln.Audio.OpusEncoderOptions.Equals(Kiln.Audio.OpusEncoderOptions? other) -> bool
+Kiln.Audio.OpusEncoderOptions.FrameDuration.get -> Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusEncoderOptions.FrameDuration.init -> void
+Kiln.Audio.OpusEncoderOptions.OpusEncoderOptions() -> void
+Kiln.Audio.OpusEncoderOptions.SampleRate.get -> int
+Kiln.Audio.OpusEncoderOptions.SampleRate.init -> void
+Kiln.Audio.OpusEncoderOptions.UseDtx.get -> bool
+Kiln.Audio.OpusEncoderOptions.UseDtx.init -> void
+Kiln.Audio.OpusEncoderOptions.UseInbandFec.get -> bool
+Kiln.Audio.OpusEncoderOptions.UseInbandFec.init -> void
+Kiln.Audio.OpusEncoderOptions.Validate() -> void
+Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusFrameDuration.Ms10 = 2 -> Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusFrameDuration.Ms20 = 3 -> Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusFrameDuration.Ms2_5 = 0 -> Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusFrameDuration.Ms40 = 4 -> Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusFrameDuration.Ms5 = 1 -> Kiln.Audio.OpusFrameDuration
+Kiln.Audio.OpusFrameDuration.Ms60 = 5 -> Kiln.Audio.OpusFrameDuration
+override Kiln.Audio.OpusDecoderOptions.Equals(object? obj) -> bool
+override Kiln.Audio.OpusDecoderOptions.GetHashCode() -> int
+override Kiln.Audio.OpusDecoderOptions.ToString() -> string!
+override Kiln.Audio.OpusEncoderOptions.Equals(object? obj) -> bool
+override Kiln.Audio.OpusEncoderOptions.GetHashCode() -> int
+override Kiln.Audio.OpusEncoderOptions.ToString() -> string!
+static Kiln.Audio.OpusDecoderOptions.operator !=(Kiln.Audio.OpusDecoderOptions? left, Kiln.Audio.OpusDecoderOptions? right) -> bool
+static Kiln.Audio.OpusDecoderOptions.operator ==(Kiln.Audio.OpusDecoderOptions? left, Kiln.Audio.OpusDecoderOptions? right) -> bool
+static Kiln.Audio.OpusEncoderOptions.operator !=(Kiln.Audio.OpusEncoderOptions? left, Kiln.Audio.OpusEncoderOptions? right) -> bool
+static Kiln.Audio.OpusEncoderOptions.operator ==(Kiln.Audio.OpusEncoderOptions? left, Kiln.Audio.OpusEncoderOptions? right) -> bool
