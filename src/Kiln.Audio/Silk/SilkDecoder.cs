@@ -114,7 +114,8 @@ internal sealed class SilkDecoder
         int internalRateHz,
         int channels,
         int frameDurationMs,
-        SilkFrameResult result)
+        SilkFrameResult result,
+        bool lbrrOnly = false)
     {
         ArgumentNullException.ThrowIfNull(result);
         int bandwidthIndex = internalRateHz switch
@@ -207,6 +208,14 @@ internal sealed class SilkDecoder
         int sideLbrrMask = sideHasLbrr ? DecodeLbrrMask(ref dec, silkFrames) : 0;
 
         DecodeLbrrFrames(ref dec, result, silkFrames, midLbrrMask, sideLbrrMask);
+        if (lbrrOnly)
+        {
+            // In-band FEC decodes only the LBRR frames; the regular frames are decoded when this
+            // packet is submitted normally. Leaving them unparsed keeps the cross-frame state
+            // exactly where the reference leaves it after a FLAG_DECODE_LBRR pass.
+            return;
+        }
+
         DecodeRegularFrames(ref dec, result, silkFrames, midVadMask, sideVadMask);
     }
 
@@ -240,6 +249,24 @@ internal sealed class SilkDecoder
         // RFC 6716 §4.5.1.3: for SILK-only frames the size is every whole byte left.
         int bytes = ((frameBytes * 8) - dec.Tell()) / 8;
         return OpusRedundancyInfo.Create(celtToSilk, bytes);
+    }
+
+    /// <summary>
+    /// Removes the previous-gain clamp after a lost packet (RFC 6716 Appendix A, <c>dec_API.c</c>:
+    /// on <c>FLAG_PACKET_LOST</c> the reference sets every channel's <c>LastGainIndex</c> to 10).
+    /// </summary>
+    /// <remarks>
+    /// Without this, a low gain decoded after the loss would be clamped against the pre-loss
+    /// gain, so the first good frame would differ from the reference's by the narrowband energy
+    /// that the concealment had been fading. The clamp is reset only for a real packet loss, not
+    /// for an LBRR interval that falls back to concealment.
+    /// </remarks>
+    internal void ResetGainClampAfterLoss()
+    {
+        for (int channel = 0; channel < MaxChannels; channel++)
+        {
+            _previousLogGain[channel] = 10;
+        }
     }
 
     /// <summary>Dequantizes a gain index to a linear Q16 scale factor (RFC 6716 §4.2.7.4).</summary>

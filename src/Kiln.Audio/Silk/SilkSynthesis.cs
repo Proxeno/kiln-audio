@@ -29,7 +29,7 @@ namespace Kiln.Audio.Silk;
 /// Synthesizing a frame allocates nothing.
 /// </para>
 /// </remarks>
-internal sealed class SilkSynthesis
+internal sealed partial class SilkSynthesis
 {
     private const int MaxChannels = 2;
     private const int MaxLpcOrder = 16;
@@ -144,6 +144,7 @@ internal sealed class SilkSynthesis
         _stereoSide.AsSpan().Clear();
         _stereoPredPrevQ13.AsSpan().Clear();
         _previousDecodeOnlyMiddle = false;
+        ResetPlc();
     }
 
     /// <summary>
@@ -159,42 +160,7 @@ internal sealed class SilkSynthesis
     public void Synthesize(SilkFrameResult frame, Span<short> pcmOut)
     {
         ArgumentNullException.ThrowIfNull(frame);
-
-        if (_rateHz != frame.InternalRateHz)
-        {
-            Reset();
-            _rateHz = frame.InternalRateHz;
-            _channels = frame.Channels;
-            _bandwidthIndex = _rateHz switch
-            {
-                8000 => 0,
-                12000 => 1,
-                _ => 2,
-            };
-            _lpcOrder = _bandwidthIndex == 2 ? MaxLpcOrder : 10;
-        }
-        else if (_channels != frame.Channels)
-        {
-            // A channel-count change at the same rate is not a mode change. The reference
-            // implementation keeps the mid channel's synthesis and mid-history memory and only
-            // initializes the new side channel (Appendix A, silk/dec_API.c). On mono-to-stereo it
-            // also clears the side history and predictor, but it deliberately keeps sMid, which
-            // is what makes the first stereo frame continue from the mono mid history.
-            _channelState[1].Reset();
-            if (frame.Channels == 2)
-            {
-                _stereoSide.AsSpan().Clear();
-                _stereoPredPrevQ13.AsSpan().Clear();
-            }
-
-            _previousDecodeOnlyMiddle = false;
-            _channels = frame.Channels;
-        }
-
-        _subframeCount = frame.SubframeCount;
-        _subframeLength = SubframeMilliseconds * (_rateHz / 1000);
-        _frameLength = _subframeCount * _subframeLength;
-        _ltpMemoryLength = LtpMemoryMilliseconds * (_rateHz / 1000);
+        ConfigureForFrame(frame);
 
         int silkFrames = frame.SilkFrameCount;
         int required = silkFrames * _frameLength * _channels;
@@ -219,11 +185,17 @@ internal sealed class SilkSynthesis
             }
 
             SynthesizeChannel(_channelState[0], mid, _mid.AsSpan(0, _frameLength));
+            PlcUpdate(0, mid);
+            PlcGlue(0, _mid.AsSpan(0, _frameLength));
+            Cng(0, _mid.AsSpan(0, _frameLength), mid);
 
             if (sideCoded)
             {
-                SynthesizeChannel(
-                    _channelState[1], frame.Regular(f, 1), _side.AsSpan(0, _frameLength));
+                SilkChannelFrame side = frame.Regular(f, 1);
+                SynthesizeChannel(_channelState[1], side, _side.AsSpan(0, _frameLength));
+                PlcUpdate(1, side);
+                PlcGlue(1, _side.AsSpan(0, _frameLength));
+                Cng(1, _side.AsSpan(0, _frameLength), side);
             }
             else if (_channels == 2)
             {

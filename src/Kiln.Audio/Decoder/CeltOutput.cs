@@ -130,12 +130,13 @@ internal sealed class CeltOutput
     /// Produces concealment for a lost frame through the CELT <c>DecodeLost</c> hook.
     /// </summary>
     /// <param name="lm">Base-2 logarithm of the number of short blocks for the lost frame.</param>
+    /// <param name="startBand">First band to generate: 0 for CELT-only, 17 for hybrid.</param>
     /// <param name="pcm">Destination for normalized interleaved PCM at the API rate.</param>
     /// <returns>The number of samples per channel written.</returns>
-    internal int DecodeLost(int lm, Span<float> pcm)
+    internal int DecodeLost(int lm, int startBand, Span<float> pcm)
     {
         int samples48 = CeltTables.ShortBlockSamples << lm;
-        _synthesizer.DecodeLost(lm, _pcm48.AsSpan(0, samples48 * _apiChannels));
+        _synthesizer.DecodeLost(lm, startBand, _pcm48.AsSpan(0, samples48 * _apiChannels));
         return WriteDecimated(samples48, pcm);
     }
 
