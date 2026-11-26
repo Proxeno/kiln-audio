@@ -53,36 +53,42 @@ Kaiser-windowed sinc designed in code (no coefficient table is taken from libopu
 * Passband flat within ±0.5 dB to 0.9 × the lower Nyquist frequency; stopband at or above the
   lower Nyquist frequency is at least 60 dB down (the design targets 70 dB).
 * The linear-phase prototype is converted to minimum phase with the real cepstrum, which keeps
-  the latency small at the cost of a frequency-dependent group delay. `DelaySamplesOut` reports
-  the broadband nominal latency (impulse response cross-correlated with an ideal sinc).
+  the latency small at the cost of a frequency-dependent group delay.
+* An integer alignment delay follows the filter so the total delay matches libopus's decode-to-
+  output delay for every rate pair and channel count. `DelaySamplesOut` reports the filter's
+  nominal delay plus that alignment.
 * `Process` carries state, allocates nothing, and is bit-identical whether the input arrives in
-  one block or in chunks of any size. Equal input and output rates are an exact copy.
+  one block or in chunks of any size. Equal input and output rates are a pure delay, not a copy.
 * The filter coefficients and all polyphase phases are computed in the constructor; the only
   per-call work is the multiply-accumulate loop.
 
 ### Delay relative to the libopus reference
 
-RFC 6716 §4.2.9 leaves the SILK resampler non-normative. The delays below were measured by
-cross-correlating libopus 1.5.2's 48 kHz decode of SILK-only streams against a zero-delay
-band-limited interpolation of its own internal-rate decode (`SilkResamplerOracleTests`). All
-values are output samples at 48 kHz.
+RFC 6716 §4.2.9 leaves the SILK resampler non-normative, but end-to-end alignment with the
+reference decoder is useful for conformance testing, so the resampler is calibrated to libopus
+1.5.2. libopus's internal-rate decode runs a "copy" resampler that delays the SILK synthesis by
+5/10/13 input samples for mono and 4/9/12 for stereo at 8/12/16 kHz; its 48 kHz path delays the
+same synthesis differently. The integer alignment delay compensates for both that copy-path
+offset and the difference between libopus's resampler and this filter, so that SILK synthesis
+followed by this resampler lands at lag 0 against `opus_demo -d <rate>`.
 
-| Pair | libopus relative lag | This resampler nominal delay | Measured on speech |
+| Input | Output | Mono alignment | Stereo alignment |
 |---|---|---|---|
-| 8 → 48 kHz | +3 | 16 | 14 |
-| 12 → 48 kHz | −3 | 10 | 8 |
-| 16 → 48 kHz | −2 | 7 | 6 |
+| 8 kHz | 8/12/16/24/48 kHz | 5/5/6/10/19 | 4/4/4/7/13 |
+| 12 kHz | 8/12/16/24/48 kHz | 5/10/10/16/29 | 4/9/8/14/25 |
+| 16 kHz | 8/12/16/24/48 kHz | 5/8/13/16/31 | 4/7/12/14/28 |
 
-The libopus lag is small and, for 12 and 16 kHz, negative: its internal-rate decode runs a
-"copy" resampler that delays the signal by 4/9/12 input samples relative to the internal SILK
-synthesis, while its 48 kHz path delays it by less, so the 48 kHz output appears ahead of the
-internal-rate PCM that `opus_demo` exposes. That internal signal is not observable through any
-public API, so the copy delay cannot be separated from the conversion delay by cross-correlation,
-and a causal, fixed-block converter fed the internal-rate PCM cannot lead its input. Matching the
-relative lag to ±0 samples would require either non-causal lookahead or a caller-side shift. The
-residual difference is 9–13 output samples (0.19–0.27 ms) and is reported by the oracle tests.
+The values are a calibration of this filter and must be re-measured if the prototype design
+changes; they are not libopus coefficients. `ResampleConformanceTests` checks the 24 SILK-DEC-2
+streams at 48 kHz: the cross-correlation peak is at lag 0 for every one, and the sample-wise SNR
+after the first 10 ms is about 30–32 dB.
 
-Quality against libopus's 48 kHz decode (12 and 20 kbps, 20 ms frames) is well inside the native
-`opus_compare` gate for all three internal rates: 96–97 % for WB and MB, and the native metric
-passes for NB as well. Sample-wise SNR is at least 31.9 dB for every measured case.
+### Known gap: mono/stereo transitions
+
+RFC 8251 vectors 02–04 switch from mono to stereo partway through. libopus carries channel 0's
+decoder and synthesis state across that switch and only initializes the new side channel
+(`dec_API.c`), whereas `SilkSynthesis` resets every channel on a channel-count change. The reset
+makes the first ~100 ms of the stereo half differ from the reference, which dominates the
+`opus_compare` score. The RFC vectors therefore cannot pass end to end until the synthesis
+state handling for channel transitions is fixed; that is outside the resampler module.
 
