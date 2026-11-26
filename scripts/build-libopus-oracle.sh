@@ -10,6 +10,15 @@
 #         .oracle/bin/ec_probe(.exe)
 set -euo pipefail
 
+# Set KILN_ORACLE_KEEP_LIB=1 to also keep the static library and the public
+# headers under .oracle/lib, so scripts/bench-libopus-inproc.sh can link the
+# in-process comparison harness against exactly this oracle build. The default
+# (unset or 0) keeps only the command-line tools and is unchanged.
+keep_lib=0
+if [[ "${KILN_ORACLE_KEEP_LIB:-0}" == "1" || "${1:-}" == "--keep-lib" ]]; then
+    keep_lib=1
+fi
+
 VERSION="1.5.2"
 URL="https://downloads.xiph.org/releases/opus/opus-${VERSION}.tar.gz"
 SHA256_EXPECTED="65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1"
@@ -20,6 +29,7 @@ oracle_root="${repo_root}/.oracle"
 src_dir="${oracle_root}/src"
 build_dir="${oracle_root}/build"
 bin_dir="${oracle_root}/bin"
+lib_dir="${oracle_root}/lib"
 stamp_file="${bin_dir}/.sha256"
 
 exe_suffix=""
@@ -40,6 +50,38 @@ sha256_of() {
     fi
 }
 
+# Copies the static library, the public headers and the compiler flags that
+# produced them into .oracle/lib. No-op unless KILN_ORACLE_KEEP_LIB=1.
+keep_static_library() {
+    [[ "${keep_lib}" -eq 1 ]] || return 0
+
+    local source="${src_dir}/opus-${VERSION}"
+    local library
+    library="$(find "${build_dir}" -maxdepth 1 -type f \
+        \( -name "libopus.a" -o -name "opus.lib" \) -print -quit 2>/dev/null || true)"
+    if [[ -z "${library}" || ! -f "${library}" ]]; then
+        echo "Cannot keep libopus: the static library is missing from ${build_dir}." >&2
+        return 1
+    fi
+
+    mkdir -p "${lib_dir}/include"
+    cp "${source}/include/"*.h "${lib_dir}/include/"
+    cp "${library}" "${lib_dir}/libopus.a"
+
+    # Record the exact flags and SIMD configuration of the reference build.
+    local flags_file="${build_dir}/CMakeFiles/opus.dir/flags.make"
+    {
+        echo "libopus ${VERSION}"
+        if [[ -f "${flags_file}" ]]; then
+            grep -E '^(C_FLAGS|C_DEFINES|C_INCLUDES) ' "${flags_file}" || true
+        else
+            echo "C_FLAGS=-O3 -DNDEBUG"
+        fi
+    } > "${lib_dir}/flags.txt"
+
+    echo "Kept libopus.a, headers and flags under ${lib_dir}"
+}
+
 if [[ -f "${stamp_file}" ]]; then
     current="$(tr -d '[:space:]' < "${stamp_file}")"
     if [[ "${current}" == "${SHA256_EXPECTED}" \
@@ -47,7 +89,10 @@ if [[ -f "${stamp_file}" ]]; then
         && -f "${bin_dir}/opus_compare${exe_suffix}" \
         && -f "${bin_dir}/ec_probe${exe_suffix}" ]]; then
         echo "libopus ${VERSION} oracle already built (sha256 ${SHA256_EXPECTED})."
-        exit 0
+        if keep_static_library; then
+            exit 0
+        fi
+        exit 1
     fi
 fi
 
@@ -170,6 +215,7 @@ build_oracle() {
     fi
 
     printf '%s\n' "${SHA256_EXPECTED}" > "${stamp_file}"
+    keep_static_library || return 1
     echo "Built libopus ${VERSION} oracle into ${bin_dir}:"
     ls -l "${bin_dir}"
 }

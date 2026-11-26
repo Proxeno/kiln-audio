@@ -1,5 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using Kiln.Audio.Simd;
+
 namespace Kiln.Audio.Celt;
 
 /// <summary>
@@ -344,55 +346,19 @@ internal sealed partial class CeltSynthesizer
         float gain0,
         float gain1,
         int tapSet0,
-        int tapSet1)
-    {
-        ReadOnlySpan<float> taps0 = CeltTables.PostFilterGains.Slice(tapSet0 * 3, 3);
-        ReadOnlySpan<float> taps1 = CeltTables.PostFilterGains.Slice(tapSet1 * 3, 3);
-
-        float g00 = gain0 * taps0[0];
-        float g01 = gain0 * taps0[1];
-        float g02 = gain0 * taps0[2];
-        float g10 = gain1 * taps1[0];
-        float g11 = gain1 * taps1[1];
-        float g12 = gain1 * taps1[2];
-        bool use0 = g00 != 0f || g01 != 0f || g02 != 0f;
-        bool use1 = g10 != 0f || g11 != 0f || g12 != 0f;
-
-        for (int i = 0; i < count; i++)
-        {
-            int position = frameStart + i;
-            float value = history[position];
-            if (i < Overlap)
-            {
-                float fade = _windowSquare[i];
-                if (use0)
-                {
-                    float weight = 1f - fade;
-                    value += weight * (
-                        (g00 * history[position - period0])
-                        + (g01 * (history[position - period0 - 1] + history[position - period0 + 1]))
-                        + (g02 * (history[position - period0 - 2] + history[position - period0 + 2])));
-                }
-
-                if (use1)
-                {
-                    value += fade * (
-                        (g10 * history[position - period1])
-                        + (g11 * (history[position - period1 - 1] + history[position - period1 + 1]))
-                        + (g12 * (history[position - period1 - 2] + history[position - period1 + 2])));
-                }
-            }
-            else if (use1)
-            {
-                value +=
-                    (g10 * history[position - period1])
-                    + (g11 * (history[position - period1 - 1] + history[position - period1 + 1]))
-                    + (g12 * (history[position - period1 - 2] + history[position - period1 + 2]));
-            }
-
-            history[position] = value;
-        }
-    }
+        int tapSet1) =>
+        CeltPostFilterKernel.CombFilter(
+            history,
+            frameStart,
+            count,
+            period0,
+            period1,
+            gain0,
+            gain1,
+            tapSet0,
+            tapSet1,
+            _windowSquare,
+            Overlap);
 
     /// <summary>Applies the §4.3.7.2 de-emphasis filter and writes the interleaved output.</summary>
     private void Deemphasise(int samples, int channel, Span<float> pcmOut, int channels)

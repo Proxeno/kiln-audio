@@ -1,8 +1,14 @@
-# Decoder performance baseline
+# Decoder performance baseline (PERF-1)
 
-This is the reproducible baseline for PERF-0: how fast Kiln.Audio decodes the RFC 8251
-test vectors compared with the libopus 1.5.2 reference, plus the cost of the individual
-kernels. It is evidence for prioritising PERF-1, not a CI gate.
+This is the reproducible performance baseline for Kiln.Audio: how fast it decodes the RFC 8251
+test vectors compared with libopus 1.5.2, plus the cost of the individual kernels and which of
+them have SIMD paths. It is evidence, not a CI gate.
+
+PERF-0 measured libopus with `opus_demo` as a separate process, so its numbers included process
+startup, file IO and (for SILK) a resampler that Kiln does not run. PERF-1 replaces that with an
+in-process C harness that times only `opus_decode`/`opus_encode` on data already in memory, the
+same way the Kiln BenchmarkDotNet jobs time an in-memory loop. **Every libopus number below comes
+from the in-process harness**, so the ratios are like for like.
 
 ## Machine and runtime
 
@@ -16,133 +22,186 @@ kernels. It is evidence for prioritising PERF-1, not a CI gate.
 | Benchmark harness | BenchmarkDotNet 0.15.8 |
 | Reference | libopus 1.5.2, built locally as a test-only oracle |
 
-The projects target `net10.0`, but this machine has only the .NET 11 runtime installed.
-The host is rolled forward with `-p:RollForward=Major`, and BenchmarkDotNet is given the
-`net10.0` runtime moniker it knows. BenchmarkDotNet therefore labels the job ".NET 10.0",
-but every number below ran on **.NET 11.0.0**; the `Runtime` line in the BenchmarkDotNet
-summary says so. BenchmarkDotNet 0.15.8 does not recognize the .NET 11 runtime and its
-default host job throws, which is why the run below passes `--runtimes net10.0` and
-`DOTNET_ROLL_FORWARD=Major` (the latter reaches the benchmark child process).
+The projects target `net10.0`, but this machine has only the .NET 11 runtime installed. The host
+is rolled forward with `-p:RollForward=Major`, and BenchmarkDotNet is given the `net10.0` runtime
+moniker it knows. BenchmarkDotNet therefore labels the job ".NET 10.0", but every number below ran
+on **.NET 11.0.0**; the `Runtime` line in the BenchmarkDotNet summary says so.
 
-This is a shared machine; repeated runs varied by up to ~15% on the CELT vectors and up to
-~50% on the smallest kernel (see the note under the kernel table). Treat the numbers as
-indicative, not exact.
+This is a shared machine; repeated runs varied by up to ~15% on the CELT vectors, ~50% on the
+smallest kernel and ~10% on the MDCT kernels. Treat the numbers as indicative, not exact.
 
-## Commands
+## Harness
+
+`bench/native/libopus_bench.c` is our own small C program; it is not libopus code. It links
+against the oracle's static `libopus.a` and implements two in-memory loops:
+
+- **decode** parses an RFC 8251 `.bit` file (a 32-bit big-endian length and a 32-bit encoder final
+  range before every packet) and reports the best of five `opus_decode` passes;
+- **encode** reads interleaved signed 16-bit PCM and reports the best of five `opus_encode` passes
+  with the requested application, bitrate, frame size, complexity and CBR/VBR setting.
+
+Only the codec call is inside the timed region: no file IO, no process startup, no shell
+timing. The harness prints microseconds per Opus frame and how many times faster than real time
+the codec ran.
 
 ```bash
 bash scripts/fetch-test-vectors.sh
-bash scripts/build-libopus-oracle.sh
-
-# Kiln decoder and kernel benchmarks
-DOTNET_ROLL_FORWARD=Major dotnet run -c Release -p:RollForward=Major \
-  --project bench/Kiln.Audio.Benchmarks -- \
-  --filter '*Decode*' '*Kernel*' --runtimes net10.0
-
-# libopus 1.5.2 reference timings
-bash scripts/bench-libopus.sh
+bash scripts/build-libopus-oracle.sh --keep-lib       # keeps libopus.a + headers + flags
+bash scripts/bench-libopus-inproc.sh                  # the six PERF comparison vectors
 ```
 
-The oracle build is what `scripts/build-libopus-oracle.sh` performs:
+`--keep-lib` is an option on the oracle build script; the default build (the conformance oracle)
+is unchanged. It copies `libopus.a`, the public headers and the exact compile flags to
+`.oracle/lib`, which is gitignored.
+
+### Reference build flags
+
+The oracle CMake build produced the static library with:
 
 ```text
-libopus 1.5.2
-  cmake -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_PROGRAMS=ON \
-        -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_SHARED_LIBRARY=OFF
-  compiler: /usr/bin/cc
-  CMAKE_C_FLAGS='' CMAKE_C_FLAGS_RELEASE='-O3 -DNDEBUG'
+CMAKE_BUILD_TYPE=Release
+C_FLAGS   = -O3 -DNDEBUG -std=gnu99 -arch arm64 -fstack-protector-strong
+C_DEFINES = -DDISABLE_DEBUG_FLOAT -DENABLE_HARDENING -DOPUS_ARM_MAY_HAVE_NEON
+            -DOPUS_ARM_MAY_HAVE_NEON_INTR -DOPUS_BUILD -DVAR_ARRAYS -D_FORTIFY_SOURCE=2
 ```
 
-libopus enables its arm64 NEON/RTCD paths for this build, so this is its normal optimized
-configuration.
+**libopus's own SIMD was enabled**: `OPUS_ARM_MAY_HAVE_NEON_INTR` is defined and the NEON
+intrinsics sources (`NSQ_neon`, `NSQ_del_dec_neon_intr`, `celt_neon_intr`, ...) are part of the
+static library on this arm64 build. The Kiln numbers are therefore compared against the normal
+optimized libopus, not a scalar reference. (The harness itself is compiled with `-O2`; that only
+affects the loop around the library, never the timed codec call.)
 
 ## Method
 
-**Kiln.** The `.bit` files are parsed into memory in `[GlobalSetup]`, so no file IO is
-measured. Each benchmark invocation resets the decoder and synthesizer, then decodes the
-whole vector. The CELT path mirrors the conformance driver: CELT bitstream decode,
-synthesis to float PCM at 48 kHz for two output channels, then `CeltPcm.ToInt16`. The SILK
-path decodes each packet with the channel count and frame duration from its TOC and runs
-`SilkSynthesis` at the SILK internal rate (8/12/16 kHz for vectors 02/03/04). Allocations
-come from BenchmarkDotNet's `[MemoryDiagnoser]` and are per whole-vector operation.
+**Kiln.** The `.bit` files are parsed into memory in `[GlobalSetup]`, so no file IO is measured.
+Each benchmark invocation resets the decoder and synthesizer, then decodes the whole vector. The
+CELT path mirrors the conformance driver: CELT bitstream decode, synthesis to float PCM at 48 kHz
+for two output channels, then `CeltPcm.ToInt16`. The SILK path decodes each packet with the
+channel count and frame duration from its TOC and runs `SilkSynthesis` at the SILK internal rate
+(8/12/16 kHz for vectors 02/03/04). Allocations come from BenchmarkDotNet's `[MemoryDiagnoser]`.
 
-**libopus.** `scripts/bench-libopus.sh` runs `opus_demo -d 48000 2 <vector>.bit /dev/null`
-five times and keeps the minimum wall time; for the SILK-only vectors it also runs
-`opus_demo -d <internal rate> 2`. Wall time includes reading the `.bit` file and process
-startup. The measured startup floor (`opus_demo` with no arguments) is 2 ms, which is a
-meaningful part of the short SILK runs.
+**libopus.** `scripts/bench-libopus-inproc.sh` runs the in-memory harness against the same `.bit`
+files: 48 kHz stereo for the CELT vectors, and the internal rate with the stream's own channel
+count for the SILK vectors (02/03/04 are mono). It reports the best of five passes.
 
-**Speed vs real time** is audio duration divided by the mean time. Audio duration is
-derived from the 48 kHz stereo decode size. **Ratio** is Kiln mean time divided by libopus
-minimum time for the same audio (SILK compared at the internal rate); a value above 1 means
-Kiln is slower. The SILK comparison is somewhat generous to Kiln: the Kiln benchmark stops
-at internal-rate PCM and does not include libopus's resampler or its file IO/startup.
+**Ratio** is Kiln mean time divided by the libopus best time for the same audio and the same
+in-memory treatment; a value above 1 means Kiln is slower. The SILK comparison still stops Kiln
+at internal-rate PCM while libopus runs its own output path, so it is at worst slightly generous
+to libopus.
 
 ## Decode results
 
-Allocations are 0 B for every vector, which is 0 B per frame. Frame counts (Opus frames
-decoded) are 5,524 for 01, 4,186 for 07, 1,501 for 11, 1,185 for 02, 998 for 03 and 1,265
-for 04.
+Frame counts (Opus frames decoded) are 5,524 for 01, 4,186 for 07, 1,501 for 11, 1,185 for 02, 998
+for 03 and 1,265 for 04. Allocations are 0 B for every vector, which is 0 B per frame, before and
+after.
 
-| Vector | Mode | Audio | Kiln mean | Kiln vs real time | libopus vs real time | Ratio (Kiln/libopus) | Alloc/frame |
-| ------ | ---- | ----- | --------- | ----------------- | -------------------- | -------------------- | ----------- |
-| 01 | CELT, 48 kHz stereo | 29.48 s | 150.82 ms | 195x | 719x | 3.68 | 0 B |
-| 07 | CELT, 48 kHz, mixed frames | 22.61 s | 97.72 ms | 231x | 1,076x | 4.65 | 0 B |
-| 11 | CELT, 48 kHz stereo | 30.02 s | 155.51 ms | 193x | 938x | 4.86 | 0 B |
-| 02 | SILK NB, 8 kHz | 25.03 s | 8.40 ms | 2,979x | 3,129x | 1.05 | 0 B |
-| 03 | SILK MB, 12 kHz | 21.16 s | 9.25 ms | 2,287x | 2,351x | 1.03 | 0 B |
-| 04 | SILK WB, 16 kHz | 26.63 s | 13.50 ms | 1,973x | 2,421x | 1.23 | 0 B |
+"Before" is the PERF-0 baseline (on `main` before DEC-INT-1 and PERF-1). "After" is this branch:
+the DEC-INT-1 decoder integration plus the PERF-1 kernels. Both columns compare against the same
+in-process libopus harness on this machine.
 
-For reference, libopus decoding the SILK vectors at 48 kHz (including its resampler) runs
-at 2,086x (02), 1,763x (03) and 1,664x (04). Subtracting the 2 ms startup floor from the
-libopus timings raises the ratios to about 3.9/5.1/5.2 for CELT and 1.4/1.3/1.5 for SILK:
-Kiln's SILK synthesis is within roughly 1.5x of optimized C, while the CELT path is about
-4–5x slower and holds nearly all of the gap.
+| Vector | Mode | libopus in-process | Kiln before | Ratio before | Kiln after (median) | Ratio after |
+| ------ | ---- | ------------------ | ----------- | ------------ | ------------------- | ----------- |
+| 01 | CELT, 48 kHz stereo | 38.61 ms | 154.8 ms | 4.01 | 88.7 ms | 2.30 |
+| 07 | CELT, 48 kHz, mixed frames | 20.05 ms | 107.5 ms | 5.36 | 38.7 ms | 1.93 |
+| 11 | CELT, 48 kHz stereo | 31.53 ms | 171.6 ms | 5.44 | 60.8 ms | 1.93 |
+| 02 | SILK NB, 8 kHz | 6.02 ms | 8.70 ms | 1.45 | 8.15 ms | 1.35 |
+| 03 | SILK MB, 12 kHz | 5.81 ms | 9.56 ms | 1.65 | 8.93 ms | 1.54 |
+| 04 | SILK WB, 16 kHz | 8.11 ms | 13.88 ms | 1.71 | 14.73 ms | 1.82 |
+
+The libopus column is one harness run on this machine and is used for both "before" and
+"after"; the Kiln "before" column is the PERF-0 BenchmarkDotNet run. The "after" column is one
+clean BenchmarkDotNet run with nothing else on the machine — the median, because vector 01 and 11
+showed a long tail in this run (their means were 93.1 and 65.1 ms against medians of 88.7 and
+60.8 ms). The CELT path improved by 1.8x to 2.8x across repeated runs; it is about 1.9–2.3x
+libopus. The inverse MDCT, the single largest kernel, went from 37.8 µs to 5.4 µs per
+960-sample channel frame (see below). Vector 04 moved backwards in this particular run (14.73 ms
+against 13.59 ms in an earlier one) even though the SILK kernel it uses is faster; SILK decode is
+dominated by the bitstream and NLSF work outside the kernels this lane changed, and the whole
+vector is a two-second-scale benchmark on a machine that other lanes share, so treat the SILK
+rows as noise-limited.
 
 ## Kernel results
 
-One invocation of each kernel. These are the steady-state means from `KernelBenchmarks`;
-the same MDCT instances give the same numbers as the pre-existing `MdctBenchmarks` class
-(960-point inverse: 37.8 µs here vs 38.9 µs there).
+One invocation of each kernel, BenchmarkDotNet mean, 0 B allocated. `Fft480` is new in PERF-1.
 
-| Kernel | Work per invocation | Mean | Allocated |
-| ------ | ------------------- | ---- | --------- |
-| `MdctInverse960` | One 960-coefficient inverse MDCT (20 ms, one channel) | 37.78 µs | 0 B |
-| `MdctInverse8x120` | Eight interleaved 120-coefficient inverse MDCTs (20 ms, one channel) | 27.11 µs | 0 B |
-| `PvqDecodeBand` | PVQ band decode, 96 coefficients (band 18 at 20 ms), 32 pulses | 155.8 ns | 0 B |
-| `CeltPostFilter` | Comb post-filter over a 960-sample frame with tap-set cross-fade | 875.9 ns | 0 B |
-| `SilkLpcSynthesis` | Short-term LPC synthesis, 20 ms / 16 kHz, order 16 | 4.026 µs | 0 B |
-| `SilkLtpSynthesis` | Long-term prediction, 20 ms / 16 kHz, five taps, four subframes | 586.3 ns | 0 B |
+| Kernel | Work per invocation | Before | After | Change |
+| ------ | ------------------- | ------ | ----- | ------ |
+| `Fft480` | One 480-point complex forward FFT | not measured | 1.84 µs | new benchmark |
+| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 6.05 µs | 14.7x |
+| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 4.75 µs | 13.4x |
+| `MdctInverse960` | One 960-coefficient inverse MDCT (20 ms, one channel) | 37.78 µs | 5.42 µs | 7.0x |
+| `MdctInverse8x120` | Eight interleaved 120-coefficient inverse MDCTs (20 ms, one channel) | 27.11 µs | 4.53 µs | 6.0x |
+| `PvqDecodeBand` | PVQ band decode, 96 coefficients, 32 pulses | 155.8 ns | 215.5 ns | unchanged (run-to-run noise) |
+| `CeltPostFilter` | Comb post-filter over a 960-sample frame with tap-set cross-fade | 875.9 ns | 359 ns | 2.4x |
+| `SilkLpcSynthesis` | Short-term LPC synthesis, 20 ms / 16 kHz, order 16 | 4.026 µs | 3.35 µs | 1.20x |
+| `SilkLtpSynthesis` | Long-term prediction, 20 ms / 16 kHz, five taps, four subframes | 586.3 ns | 674.9 ns | unchanged (noise) |
 
-The SILK LPC and LTP benchmarks call the same internal `SilkFixedPoint` helpers and copy
-the inner loops of `SilkSynthesis.SynthesizeChannel` verbatim; that method is private and
-this lane is measurement-only, so it cannot be invoked directly. The CELT kernels call the
-production methods through `InternalsVisibleTo`.
+The before figures are the PERF-0 run on the same machine (the forward MDCT figures are ENC-1's
+measurement of the same `Mdct.Forward` before this restructure). PERF-0 had no standalone FFT
+benchmark, so the old recursive FFT was only measured through the MDCT; `Fft480` is new in PERF-1.
+The forward and inverse MDCT now meet the PERF-1 target of 6 µs at 960 points.
 
-Note on variance: the 8x120 MDCT measured 27.1 µs in the run above and 40.1 µs in a
-separate `MdctBenchmarks` run on the same machine; the 960-point case agreed to ~3%. This
-is the largest run-to-run spread in the kernel set.
+## SIMD kernels
 
-## Top hotspots and PERF-1 ideas
+Each kernel lives in `src/Kiln.Audio/Simd/` and has a scalar reference path and a portable
+`Vector128<T>` path (AdvSimd on arm64, SSE on x64). No `Vector256`/`Vector512` path is shipped
+because it was not measured to win on this machine.
 
-1. **Inverse MDCT (37.8 µs for 960, 27.1 µs for 8x120, per channel per 20 ms).** This is
-   by far the largest kernel: a 20 ms stereo CELT frame spends roughly 55–76 µs in the
-   inverse transform alone. The scalar DCT-IV packs to a complex FFT with pre/post
-   rotations and runs four of those passes. PERF-1 idea: replace the packing with a SIMD
-   real FFT plus vectorized pre/post rotations, and for transient frames run the eight
-   short blocks as eight SIMD lanes instead of eight scalar transforms.
-2. **SILK LPC synthesis (4.03 µs per 20 ms wideband channel-frame).** The order-16
-   `Smlawb` MAC per output sample is the dominant SILK kernel; LTP is only 0.59 µs. PERF-1
-   idea: vectorize the 16-tap fixed-point dot product and produce several output samples
-   per iteration with `Vector<int>`/`Vector<long>`, keeping the exact Q-format shifts,
-   rounding and saturation so the output stays bit-exact.
-3. **CELT post-filter (0.88 µs per 960-sample channel-frame).** The five-tap comb with a
-   cross-faded tap set is the next CELT cost after the MDCT; PVQ (0.16 µs) and LTP are an
-   order of magnitude smaller. PERF-1 idea: keep the tap-set choice outside the loop (it
-   already is) and vectorize the comb across contiguous samples at the two period offsets.
+| Kernel | Path | Parity |
+| ------ | ---- | ------ |
+| FFT butterflies, radix 2/3/4/5 (`FftKernels`) | Vector128 over structure-of-arrays re/im | float, ≤1e-6 RMS |
+| MDCT window multiply (`MdctKernels`) | Vector128 | float, ≤1e-6 RMS |
+| CELT comb post-filter (`CeltPostFilterKernel`) | Vector128, four independent samples when period ≥ 6 | bit-exact |
+| SILK short-term LPC (`SilkLpcKernel`) | Vector128 over the order-tap dot product, 32-bit lanes | bit-exact |
 
-The CELT path is the priority: it is ~4–5x off libopus and its MDCT accounts for most of
-the per-frame kernel time, whereas SILK synthesis is already within ~1.5x.
+**Algorithmic changes.**
+
+- The FFT is now iterative and table-driven: the leaf permutation and per-level node offsets are
+  precomputed, so there is no mixed-radix division or recursion in the hot path, and the generic
+  `r * r` small-DFT multiply loop is replaced by fixed radix butterflies.
+- The forward MDCT runs two DCT-IVs, not four. The windowed input is folded around the block
+  centre into the difference and sum sequences
+  `u(n) = a(n) - a(2N-1-n)` and `v(n) = a(n) + a(2N-1-n)`, and
+  `X(k) = cos(beta_k) DCT-IV(u)(k) - sin(beta_k) DST-IV(v)(k)`, where the DST-IV comes from
+  `DCT-IV((-1)^n v)` read in reverse. The identity was verified against the naive double-precision
+  MDCT before it was ported.
+- Both MDCT directions keep the DCT-IV pack and FFT output as separate real and imaginary arrays
+  (structure of arrays), so the FFT takes the buffers directly and the `Complex32`
+  interleave/deinterleave copies are gone. The DCT-IV pre- and post-rotation loops stay scalar:
+  their reads and writes are stride two with a coefficient reversal, which a portable `Vector128`
+  path cannot express without two-source lane shuffles the runtime does not offer here.
+- The comb post-filter is recursive, but because every read is at least `period` samples back, a
+  block of four consecutive samples is independent whenever `period >= 6`; the vector path uses
+  that and falls back to scalar otherwise.
+- The SILK LPC dot product cannot be vectorized across output samples (synthesis feeds back), but
+  the 10/16-tap dot product per sample is vectorized. `Smulwb(a, c)` is evaluated in 32-bit lanes
+  as `(a >> 16)*c + ((a & 0xFFFF)*c >> 16)`, which is exact and avoids 64-bit widening (a
+  `Vector<long>` version measured ~50% slower).
+
+**Scalar fallback.** `KILN_AUDIO_DISABLE_SIMD=1` (or `true`) is read once per process and forces
+every kernel onto its scalar path. `SimdParityTests` runs both paths in-process and checks parity
+on every kernel, so the scalar path is exercised in CI without a separate job; running the suite
+with the variable set exercises it end to end.
+
+## Remaining gaps and next ideas
+
+1. **CELT decode** (ratio in the decode table above). The MDCT is now ~5.4-6.0 µs per
+   960-sample channel frame, close to the 6 µs target. The inverse still runs two `N/2`-point
+   complex FFTs (one per DCT-IV); the next idea is a real FFT of size `N/2`, which is an
+   `N/4`-point complex FFT plus a split, to halve the transform again. After the transform, the
+   CELT entropy decode and the frequency-domain reconstruction (outside the PERF-1 kernel set)
+   dominate.
+2. **MDCT inverse.** Kernel-level, a split-radix radix-2/4 FFT and a fused post-rotation write
+   (avoiding the separate reversed copies) are the next step. The DCT-IV pre/post rotations are
+   stride-two on the input and output; a two-source lane shuffle, which this runtime's
+   `Vector128.Shuffle` lacks, would vectorize them.
+3. **CELT post-filter.** 2.4x faster; at ~0.36 µs it is no longer material.
+4. **SILK.** LPC synthesis is ~20% faster in isolation. The full SILK vectors moved only a little
+   because LPC synthesis is a minority of SILK decode; the next targets are the LPC analysis
+   filter, the NLSF decode and the stereo unmix.
+5. **PVQ decode and CELT de-emphasis** are inherently serial (range decode and a one-pole IIR
+   respectively). They were measured at ~0.2 µs and are not worth vectorizing; they remain in
+   place.
 
 ## Encoder (CELT-only, 48 kHz mono)
 
@@ -193,39 +252,39 @@ BenchmarkDotNet mean for the whole corpus in one invocation; `µs/frame` and `×
 derived from it. The allocation column is BenchmarkDotNet's `[MemoryDiagnoser]` for the whole
 invocation: zero bytes.
 
-| Complexity | Mean | µs/frame | × real time | Allocated |
-| --- | --- | --- | --- | --- |
-| 0 | 1.888 s | 117.8 | 170x | 0 B |
-| 1 | 1.971 s | 123.0 | 163x | 0 B |
-| 2 | 1.833 s | 114.3 | 175x | 0 B |
-| 3 | 1.954 s | 121.9 | 164x | 0 B |
-| 4 | 2.022 s | 126.1 | 159x | 0 B |
-| 5 | 1.940 s | 121.0 | 165x | 0 B |
-| 6 | 1.877 s | 117.1 | 171x | 0 B |
-| 7 | 1.902 s | 118.6 | 169x | 0 B |
-| 8 | 1.709 s | 106.6 | 188x | 0 B |
-| 9 | 1.804 s | 112.5 | 178x | 0 B |
-| 10 | 1.761 s | 109.9 | 182x | 0 B |
+| Complexity | Mean before | µs/frame before | Mean after | µs/frame after | × real time after |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 1.888 s | 117.8 | 0.343 s | 21.4 | 934x |
+| 1 | 1.971 s | 123.0 | 0.361 s | 22.5 | 888x |
+| 2 | 1.833 s | 114.3 | 0.449 s | 28.0 | 715x |
+| 3 | 1.954 s | 121.9 | 0.505 s | 31.5 | 635x |
+| 4 | 2.022 s | 126.1 | 0.497 s | 31.0 | 645x |
+| 5 | 1.940 s | 121.0 | 0.493 s | 30.8 | 650x |
+| 6 | 1.877 s | 117.1 | 0.648 s | 40.4 | 495x |
+| 7 | 1.902 s | 118.6 | 0.518 s | 32.3 | 619x |
+| 8 | 1.709 s | 106.6 | 0.560 s | 34.9 | 573x |
+| 9 | 1.804 s | 112.5 | 0.492 s | 30.7 | 652x |
+| 10 | 1.761 s | 109.9 | 0.484 s | 30.2 | 662x |
 
-The spread between complexities is measurement noise on this shared machine (the same run's
-per-invocation standard error reached 7%): levels 0-3 differ only in transient and spread
-analysis, and levels 5-10 do exactly the same work as 4. The encoder runs at roughly 160-190x
-real time for the whole corpus at 32 kbps.
+Before is ENC-1's measurement; after is this branch (PERF-1's MDCT restructure). Allocations stay
+0 B. The spread between complexities is measurement noise on this shared machine (this run's
+per-invocation standard error reached tens of percent): levels 0-3 differ only in transient and
+spread analysis, and levels 5-10 do the same work as 4. The MDCT restructure cut the per-frame cost
+from ~118 µs to ~21-40 µs; the forward MDCT alone went from 88.91 µs to 4.8 µs.
 
 **libopus.** `scripts/bench-libopus-encode.sh` times the same 320.62 s file five times and keeps
 the best: complexity 0 **0.206 s (1,556x real time)**, complexity 5 **0.739 s (434x)** and
 complexity 10 **0.791 s (405x)**. Those times include process start-up and reading the whole
-input file, which is generous to us.
+input file, which is generous to libopus.
 
 **Iso-quality.** Our complexity-0 aggregate SNR at 32 kbps (16.313 dB) is above libopus
 complexity 5 (15.795 dB) and below complexity 10 (16.653 dB), so the lowest measured libopus
-complexity whose quality is at least ours is 10. Ours takes 1.888 s in-process against libopus's
-0.791 s with file IO: **we are 2.4x slower at equal-or-better quality**. At the same complexity 0,
-libopus is 9.2x faster (0.206 s vs 1.888 s). The gap is the forward MDCT: 89 µs of the roughly
-118 µs per frame is the scalar `Mdct.Forward`, which lane PERF-1 owns. The encoder's own kernels
-are the transient detector (3.2 µs), the PVQ search (2.1 µs) and sub-microsecond energy and
-pre-emphasis work. When PERF-1's SIMD MDCT lands, this encoder inherits it without a change here.
-The front-end is otherwise allocation-free and its non-MDCT kernels are already vector-ready;
+complexity whose quality is at least ours is 10. Before this branch we took 1.888 s in-process
+against libopus's 0.791 s with file IO (2.4x slower). **After the MDCT restructure we take 0.343 s
+in-process against libopus's 0.791 s: about 2.3x faster at equal-or-better quality.** At the same
+complexity 0, libopus is now 1.67x faster (0.206 s vs 0.343 s), down from 9.2x. The remaining
+encode cost is the transient detector, the PVQ search, and the band energy and pre-emphasis passes.
+The front-end is allocation-free and its non-MDCT kernels are already vector-ready;
 `NormaliseBand` uses `Vector128` and is bit-identical to its scalar reference.
 
 ### Quality (G2)
@@ -256,20 +315,20 @@ in a way that segmental SNR does not capture.
 One invocation of each kernel, steady state, from `EncodeKernelBenchmarks`. The five largest are
 listed first by time. Allocations are 0 B for every kernel.
 
-| Kernel | Work per invocation | Mean | Allocated |
-| --- | --- | --- | --- |
-| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 0 B |
-| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 0 B |
-| `TransientAnalysis` | Transient detector over 1080 pre-emphasized samples | 3.20 µs | 0 B |
-| `PvqSearch` | PVQ search, N = 96, K = 32 | 2.10 µs | 0 B |
-| `BandEnergy` | Sum of squares over 960 samples | 577 ns | 0 B |
-| `PreEmphasis` | 960 samples | 383 ns | 0 B |
-| `NormaliseBand` | 960 samples, `Vector128` path | 71 ns | 0 B |
+| Kernel | Work per invocation | Mean before | Mean after | Allocated |
+| --- | --- | --- | --- | --- |
+| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 4.80 µs | 0 B |
+| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 5.11 µs | 0 B |
+| `TransientAnalysis` | Transient detector over 1080 pre-emphasized samples | 3.20 µs | 3.23 µs | 0 B |
+| `PvqSearch` | PVQ search, N = 96, K = 32 | 2.10 µs | 1.89 µs | 0 B |
+| `BandEnergy` | Sum of squares over 960 samples | 577 ns | 540 ns | 0 B |
+| `PreEmphasis` | 960 samples | 383 ns | 348 ns | 0 B |
+| `NormaliseBand` | 960 samples, `Vector128` path | 71 ns | 74 ns | 0 B |
 
-The forward MDCT is 75% of the per-frame cost; the transient detector and PVQ search are the only
-other microsecond-scale work. The PVQ search is a scalar soft-search of the reference algorithm
-(MaxIteration-wise identical to `alg_quant`); a measured faster original search is the next
-encoder-side idea, but the MDCT is where the missing 9x at complexity 0 lives.
+Before the MDCT restructure the forward transform was 75% of the per-frame cost. It is now a
+minority of it; the transient detector, the PVQ search and the band energy and pre-emphasis passes
+dominate. The PVQ search is a scalar soft-search of the reference algorithm (MaxIteration-wise
+identical to `alg_quant`); a measured faster original search is the next encoder-side idea.
 
 Note: the machine is shared, and repeated kernel runs varied by up to ~30% on the two MDCT rows;
 the sub-microsecond rows were stable to a few percent.

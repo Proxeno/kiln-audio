@@ -1,6 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using System;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Silk;
 
@@ -417,21 +418,14 @@ internal sealed partial class SilkSynthesis
             }
 
             // Short-term LPC synthesis (RFC 6716 §4.2.7.9.2).
-            for (int i = 0; i < subframeLength; i++)
-            {
-                int lpcPredictionQ10 = SilkFixedPoint.Rshift(order, 1);
-                for (int j = 0; j < order; j++)
-                {
-                    lpcPredictionQ10 = SilkFixedPoint.Smlawb(
-                        lpcPredictionQ10, sLpcQ14[MaxLpcOrder + i - 1 - j], aQ12[j]);
-                }
-
-                sLpcQ14[MaxLpcOrder + i] = SilkFixedPoint.Add(
-                    residualQ14[i], SilkFixedPoint.Lshift(lpcPredictionQ10, 4));
-                output[(k * subframeLength) + i] = (short)SilkFixedPoint.Sat16(
-                    SilkFixedPoint.RshiftRound(
-                        SilkFixedPoint.Smulww(sLpcQ14[MaxLpcOrder + i], gainQ10), 8));
-            }
+            SilkLpcKernel.Synthesize(
+                sLpcQ14,
+                aQ12,
+                residualQ14,
+                gainQ10,
+                order,
+                subframeLength,
+                output.Slice(k * subframeLength));
 
             sLpcQ14[subframeLength..(subframeLength + MaxLpcOrder)].CopyTo(sLpcQ14);
             excitationOffset += subframeLength;
