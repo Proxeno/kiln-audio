@@ -261,7 +261,10 @@ internal static class FuzzEngine
         List<FuzzFinding> findings,
         HashSet<string> seen)
     {
-        string signature = FormattableString.Invariant($"{failure.Target}|{failure.Message}");
+        // The exception type and message alone do not distinguish two different bounds bugs;
+        // the first stack frame does.
+        string? frame = failure.InnerException?.StackTrace?.Split('\n')[0].Trim();
+        string signature = FormattableString.Invariant($"{failure.Target}|{failure.Message}|{frame}");
         if (!seen.Add(signature))
         {
             return;
@@ -324,7 +327,9 @@ internal static class FuzzEngine
             // Minimization is best-effort; the original input is always recorded.
         }
 
-        return (packet, null);
+        // Keep the recorded history even when nothing shrank, so a state-dependent finding
+        // stays replayable instead of being saved as a lone packet that does not reproduce.
+        return (packet, failure.Sequence);
     }
 
     private static IReadOnlyList<FuzzStep> MinimizeSequence(IReadOnlyList<FuzzStep> sequence)
