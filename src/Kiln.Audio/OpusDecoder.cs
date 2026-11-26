@@ -56,6 +56,27 @@ public sealed class OpusDecoder : IDisposable
     /// </summary>
     public uint FinalRange => _core.FinalRange;
 
+    /// <summary>
+    /// Gets whether the last <see cref="Decode(ReadOnlySpan{byte},Span{short},bool)"/> or
+    /// <see cref="DecodeLoss"/> call recovered the lost interval from in-band FEC (LBRR) data,
+    /// concealed it, or did not ask for FEC at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="OpusFecOutcome.NotRequested"/> is set by a decode without <c>decodeFec</c> and
+    /// by <see cref="DecodeLoss"/>. <see cref="OpusFecOutcome.Recovered"/> means the packet's
+    /// first SILK frame carried LBRR data and it was decoded; <see cref="OpusFecOutcome.Concealed"/>
+    /// means the packet had no LBRR for the lost interval and packet loss concealment was used.
+    /// In a hybrid packet the CELT layer has no in-band FEC, so it is concealed even when
+    /// <see cref="OpusFecOutcome.Recovered"/> is reported. A packet holding several frames reports
+    /// its first frame.
+    /// </para>
+    /// <para>
+    /// <see cref="OpusPacket.HasLbrr"/> predicts this value for a packet without decoding it.
+    /// </para>
+    /// </remarks>
+    public OpusFecOutcome LastFecOutcome => _core.LastFecOutcome;
+
     /// <summary>Decodes one Opus packet to interleaved 16-bit PCM.</summary>
     /// <param name="packet">The Opus packet, starting at its TOC byte.</param>
     /// <param name="pcm">
@@ -67,7 +88,9 @@ public sealed class OpusDecoder : IDisposable
     /// The output has the frame size of <paramref name="packet"/> itself, which is not
     /// necessarily the size of the lost frame; an interval without LBRR falls back to packet
     /// loss concealment. CELT-only and hybrid packets have no SILK LBRR for the CELT layer, so
-    /// their CELT contribution is concealed as well.
+    /// their CELT contribution is concealed as well. Set <see cref="LastFecOutcome"/> on the
+    /// same decoder reports whether the LBRR data was present, and
+    /// <see cref="OpusPacket.HasLbrr"/> answers that for a packet without decoding it.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
     /// <remarks>
@@ -126,7 +149,8 @@ public sealed class OpusDecoder : IDisposable
     /// <param name="decodeFec">
     /// Decode the in-band FEC (LBRR) data of this packet to recover the frame that preceded it.
     /// The output has the frame size of <paramref name="packet"/> itself; an interval without
-    /// LBRR falls back to packet loss concealment.
+    /// LBRR falls back to packet loss concealment. <see cref="LastFecOutcome"/> reports which of
+    /// the two happened.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
     /// <remarks>

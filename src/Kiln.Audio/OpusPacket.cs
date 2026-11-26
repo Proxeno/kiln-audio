@@ -1,3 +1,7 @@
+using System.IO;
+using Kiln.Audio.Entropy;
+using Kiln.Audio.Silk;
+
 namespace Kiln.Audio;
 
 /// <summary>Result of <see cref="OpusPacket.TryParse"/>.</summary>
@@ -57,7 +61,7 @@ internal enum OpusStatus
 /// and <c>frameCount</c> still receives the number of frames it contains.
 /// </para>
 /// </remarks>
-internal static class OpusPacket
+public static class OpusPacket
 {
     /// <summary>Maximum number of frames in one packet (RFC 6716 §3.2.1).</summary>
     internal const int MaxFrames = 48;
@@ -70,6 +74,104 @@ internal static class OpusPacket
 
     /// <summary>Tenths of a millisecond in one millisecond, for the duration check.</summary>
     private const int TenthsPerMillisecond = 10;
+
+    /// <summary>
+    /// Determines whether the packet's first SILK frame carries in-band FEC (LBRR) data.
+    /// </summary>
+    /// <param name="packet">The packet, starting at its TOC byte.</param>
+    /// <returns>
+    /// True when the first SILK frame of a SILK-only or hybrid packet signals LBRR data; false
+    /// for a CELT-only packet, and for a SILK frame whose LBRR flags are clear.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// LBRR data describes the audio immediately before the packet (RFC 6716 §4.2.4–§4.2.5), so
+    /// this is the data an FEC decode of the packet would use. It range-decodes only the VAD and
+    /// LBRR flags of the first frame (§4.2.3–§4.2.4), keeps no decoder state between calls and
+    /// allocates nothing. For a stereo packet either channel's flag counts.
+    /// </para>
+    /// <para>
+    /// For 40 ms and 60 ms frames, where each channel's LBRR flags are a per-frame mask, only the
+    /// first SILK frame's bit is considered. This matches
+    /// <see cref="OpusDecoder.LastFecOutcome"/> after a successful FEC decode of the same packet.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidDataException">The packet violates RFC 6716 §3 framing.</exception>
+    public static bool HasLbrr(ReadOnlySpan<byte> packet)
+    {
+        Span<Range> frames = stackalloc Range[MaxFrames];
+        if (TryParse(packet, frames, out _, out OpusToc toc, out _) != OpusStatus.Ok)
+        {
+            throw new InvalidDataException("The Opus packet is malformed (RFC 6716 §3.2–§3.4).");
+        }
+
+        // CELT-only packets have no SILK layer and therefore no LBRR (RFC 6716 §4.2).
+        if (toc.Mode == OpusMode.Celt)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> data = packet[frames[0]];
+
+        // A payload of 0 or 1 byte is DTX or a lost frame; there is no SILK header to read.
+        if (data.Length <= 1)
+        {
+            return false;
+        }
+
+        // A 10 or 20 ms Opus frame holds one SILK frame; longer frames hold two or three.
+        int silkFrames = toc.FrameDuration switch
+        {
+            OpusFrameDuration.Ms40 => 2,
+            OpusFrameDuration.Ms60 => 3,
+            _ => 1,
+        };
+
+        var dec = new RangeDecoder(data);
+        return (DecodeFirstFrameLbrrFlags(ref dec, silkFrames, toc.IsStereo) & 1) != 0;
+    }
+
+    /// <summary>
+    /// Range-decodes the VAD and LBRR flags of one frame's SILK header (RFC 6716 §4.2.3–§4.2.4),
+    /// leaving the decoder after the flags.
+    /// </summary>
+    /// <param name="dec">Range decoder over the frame's bytes.</param>
+    /// <param name="silkFrames">Number of SILK frames in the Opus frame: 1, 2 or 3.</param>
+    /// <param name="stereo">Whether the frame carries a side channel.</param>
+    /// <returns>
+    /// The union of both channels' LBRR flags, with bit <c>f</c> set when SILK frame <c>f</c>
+    /// carries LBRR data.
+    /// </returns>
+    private static int DecodeFirstFrameLbrrFlags(ref RangeDecoder dec, int silkFrames, bool stereo)
+    {
+        // The flags precede every state-dependent SILK symbol, so a fresh range decoder reads them
+        // exactly (RFC 6716 §4.2.3: VAD flags first, then the channel's LBRR flag).
+        for (int frame = 0; frame < silkFrames; frame++)
+        {
+            dec.DecodeBitLogp(1);
+        }
+
+        bool midLbrr = dec.DecodeBitLogp(1);
+        bool sideLbrr = false;
+        if (stereo)
+        {
+            for (int frame = 0; frame < silkFrames; frame++)
+            {
+                dec.DecodeBitLogp(1);
+            }
+
+            sideLbrr = dec.DecodeBitLogp(1);
+        }
+
+        // RFC 6716 §4.2.4: 40 ms and 60 ms frames carry a per-frame LBRR mask after the flags.
+        int flags = midLbrr ? SilkDecoder.DecodeLbrrMask(ref dec, silkFrames) : 0;
+        if (sideLbrr)
+        {
+            flags |= SilkDecoder.DecodeLbrrMask(ref dec, silkFrames);
+        }
+
+        return flags;
+    }
 
     /// <summary>
     /// Splits <paramref name="packet"/> into frames and validates it.
