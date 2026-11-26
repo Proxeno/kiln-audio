@@ -12,18 +12,16 @@ namespace Kiln.Audio.Tests.Plc;
 /// <remarks>
 /// <para>
 /// PLC is not normative, so the concealed samples need not match libopus. The checks are:
-/// no NaN or infinity; no clipping or explosion beyond the neighbouring good frames; the decoder
-/// re-syncs, so 40 ms after each loss run our output agrees with libopus decoded with the same
-/// losses at least 3 dB better than it did during the concealed span; and the concealed spans
-/// score better against the clean decode than silence-fill does.
+/// no NaN or infinity; no clipping or explosion beyond the neighbouring good frames; the
+/// concealed spans score better against the clean decode than silence-fill does and within 1 dB
+/// of libopus's own concealment; and the decoder state re-converges, proven per vector by
+/// requiring our lossy decode in the 160-320 ms window after each loss run to be within 3 dB of
+/// our clean decode as closely as libopus's lossy decode is to its own clean decode.
 /// </para>
 /// <para>
-/// The re-sync figure is measured 40 ms after each loss run against libopus decoded with the same
-/// losses, and must stay above 10 dB: the decoder continues to track libopus rather than drifting.
-/// It is deliberately not compared sample-for-sample with libopus's loss-free trajectory: PLC is
-/// not normative, so the pitch/LPC/comb-filter memory left by a different concealment cannot be
-/// expected to rejoin that trajectory within 40 ms, and libopus's own PLC would not either. The
-/// no-loss agreement with libopus's clean decode is reported alongside for reference.
+/// Recovery windows are measured against libopus decoded with the same losses, from the first
+/// good packet after the run, and are clipped at the start of the next loss run so a later loss
+/// does not pollute the measurement. They are 0-20, 20-40, 40-80, 80-160 and 160-320 ms.
 /// </para>
 /// <para>
 /// The figures are aggregated over every concealed sample of every pattern per vector. A single
@@ -34,7 +32,10 @@ namespace Kiln.Audio.Tests.Plc;
 public class PlcLossConcealmentTests
 {
     private const int ApiRate = 48000;
-    private const int ResyncMilliseconds = 40;
+
+    private static readonly int[] WindowStartMs = [0, 20, 40, 80, 160];
+    private static readonly int[] WindowLengthMs = [20, 20, 40, 80, 160];
+    private const int LongWindow = 4;
 
     private static readonly (int Vector, string Name)[] Cases =
     [
@@ -52,7 +53,7 @@ public class PlcLossConcealmentTests
     }
 
     [Fact]
-    public void Loss_patterns_re_sync_and_beat_silence_fill()
+    public void Loss_patterns_re_converge_and_beat_silence_fill()
     {
         if (!OracleTestSupport.OracleAvailable())
         {
@@ -61,21 +62,24 @@ public class PlcLossConcealmentTests
         }
 
         var report = new StringBuilder();
-        report.AppendLine("vector,pattern,drops,concealed_ms,ours_db,libopus_db,silence_db,resync_db,no_loss_db,spike_ok");
-        int spikePasses = 0;
-        int scenarios = 0;
+        report.AppendLine("concealed spans (SNR against the clean decode):");
+        report.AppendLine("vector,pattern,drops,concealed_ms,ours_db,libopus_db,silence_db,spike_ok");
 
-        var total = new ErrorTotals();
-        var vectorTotals = new Dictionary<string, ErrorTotals>();
+        var total = new ConcealedTotals();
+        var vectorTotals = new Dictionary<string, ConcealedTotals>();
+        var recoveries = new Dictionary<string, RecoveryWindows>();
+        int scenarios = 0;
+        int spikePasses = 0;
 
         foreach ((int vector, string name) in Cases)
         {
             var packets = PlcTestData.ReadVector(vector);
-            byte[] cleanBitFile = PlcTestData.BuildBitFile(packets);
-            short[] oracleClean = LibOpusOracle.Decode(cleanBitFile, ApiRate, 1);
+            short[] oracleClean = LibOpusOracle.Decode(PlcTestData.BuildBitFile(packets), ApiRate, 1);
             short[] oursClean = PlcTestData.ToInt16(PlcTestData.DecodeOursClean(packets, ApiRate));
-            var vectorTotal = new ErrorTotals();
+            var vectorTotal = new ConcealedTotals();
+            var recovery = new RecoveryWindows();
             vectorTotals[name] = vectorTotal;
+            recoveries[name] = recovery;
 
             foreach (PlcLossPattern pattern in Enum.GetValues<PlcLossPattern>())
             {
@@ -104,13 +108,10 @@ public class PlcLossConcealmentTests
                 List<(int Start, int End)> concealed = PlcTestData.ConcealedRanges(segments);
                 concealed.Should().NotBeEmpty("{0}/{1}: the pattern must conceal something", name, pattern);
 
-                var scenario = new ErrorTotals();
-                scenario.AddConcealed(oracleClean, oursLossy, concealed);
-                scenario.AddLibopusConcealed(oracleClean, oracleLossy, concealed);
+                var scenario = new ConcealedTotals();
+                scenario.AddOurs(oracleClean, oursLossy, concealed);
+                scenario.AddLibopus(oracleClean, oracleLossy, concealed);
                 scenario.AddSilence(oracleClean, concealed);
-                scenario.AddConcealedCross(oracleLossy, oursLossy, concealed);
-                scenario.AddResync(oracleLossy, oursLossy, oursClean, oracleClean, segments);
-
                 total.Add(scenario);
                 vectorTotal.Add(scenario);
 
@@ -120,6 +121,8 @@ public class PlcLossConcealmentTests
                     spikePasses++;
                 }
 
+                recovery.Add(oracleLossy, oursLossy, oracleClean, oursClean, segments);
+
                 int concealedSamples = 0;
                 foreach ((int start, int end) in concealed)
                 {
@@ -127,19 +130,50 @@ public class PlcLossConcealmentTests
                 }
 
                 report.AppendLine(FormattableString.Invariant(
-                    $"{name},{pattern},{losses.Count},{concealedSamples * 1000.0 / ApiRate:F1},{scenario.OursDb:F2},{scenario.LibopusDb:F2},{scenario.SilenceDb:F2},{scenario.ResyncDb:F2},{scenario.NoLossDb:F2},{spikeOk}"));
+                    $"{name},{pattern},{losses.Count},{concealedSamples * 1000.0 / ApiRate:F1},{scenario.OursDb:F2},{scenario.LibopusDb:F2},{scenario.SilenceDb:F2},{spikeOk}"));
             }
         }
 
         report.AppendLine();
-        foreach ((string name, ErrorTotals sums) in vectorTotals)
+        report.AppendLine("recovery windows (lossy_db = ours-lossy vs libopus-lossy; no_loss_db = ours-clean vs libopus-clean):");
+        report.AppendLine("vector,window_ms,lossy_db,no_loss_db,margin_db,ours_recovery_db,libopus_recovery_db");
+        bool longWindowPasses = true;
+        foreach ((string name, RecoveryWindows windows) in recoveries)
+        {
+            for (int w = 0; w < WindowStartMs.Length; w++)
+            {
+                double lossy = windows.LossyDb(w);
+                double noLoss = windows.NoLossDb(w);
+                report.AppendLine(FormattableString.Invariant(
+                    $"{name},{WindowStartMs[w]}-{WindowStartMs[w] + WindowLengthMs[w]},{lossy:F2},{noLoss:F2},{lossy - noLoss:F2},{windows.OursRecoveryDb(w):F2},{windows.LibopusRecoveryDb(w):F2}"));
+            }
+
+            windows.HasData(LongWindow).Should().BeTrue(
+                FormattableString.Invariant($"{name}: no complete 160-320 ms window to measure"));
+
+            // HARD gate (coordinator ruling, option (c)): in the 160-320 ms window our lossy
+            // decode must be as close to our clean decode as libopus's lossy decode is to its
+            // clean decode, within 3 dB. The no-loss-minus-3 dB form (logged above as margin_db)
+            // cannot be the gate: for CELT the no-loss cross-SNR is near bit-exact (about 79 dB),
+            // while libopus's own lossy decode only recovers to about 67 dB from its clean decode
+            // after 320 ms because of its post-filter memory, so that form is capped by the
+            // reference's PLC residual rather than by our state.
+            if (windows.OursRecoveryDb(LongWindow) < windows.LibopusRecoveryDb(LongWindow) - 3)
+            {
+                longWindowPasses = false;
+            }
+        }
+
+        report.AppendLine();
+        report.AppendLine("aggregate concealed spans:");
+        foreach ((string name, ConcealedTotals sums) in vectorTotals)
         {
             report.AppendLine(FormattableString.Invariant(
-                $"AGGREGATE {name}: ours {sums.OursDb:F2} dB, libopus {sums.LibopusDb:F2} dB, silence {sums.SilenceDb:F2} dB, resync {sums.ResyncDb:F2} dB vs concealed {sums.ConcealedCrossDb:F2} dB (no-loss {sums.NoLossDb:F2} dB)"));
+                $"{name}: ours {sums.OursDb:F2} dB, libopus {sums.LibopusDb:F2} dB, silence {sums.SilenceDb:F2} dB"));
         }
 
         report.AppendLine(FormattableString.Invariant(
-            $"AGGREGATE all: ours {total.OursDb:F2} dB, libopus {total.LibopusDb:F2} dB, silence {total.SilenceDb:F2} dB, resync {total.ResyncDb:F2} dB vs concealed {total.ConcealedCrossDb:F2} dB (no-loss {total.NoLossDb:F2} dB)"));
+            $"all: ours {total.OursDb:F2} dB, libopus {total.LibopusDb:F2} dB, silence {total.SilenceDb:F2} dB"));
 
         _output.WriteLine(report.ToString());
         spikePasses.Should().Be(scenarios, "no concealed run may clip or explode:\n{0}", report);
@@ -148,61 +182,45 @@ public class PlcLossConcealmentTests
         total.OursDb.Should().BeGreaterThan(
             total.LibopusDb - 1,
             FormattableString.Invariant($"concealment must be within 1 dB of libopus's own PLC:\n{report}"));
-        total.ResyncDb.Should().BeGreaterThan(
-            10,
+        longWindowPasses.Should().BeTrue(
             FormattableString.Invariant(
-                $"40 ms after a loss run the decoder must still track libopus (10 dB cross-SNR):\n{report}"));
+                $"in the 160-320 ms window every vector must recover within 3 dB of libopus's own recovery:\n{report}"));
     }
 
-    /// <summary>Accumulated signal and error energies for the SNR figures.</summary>
-    private sealed class ErrorTotals
+    /// <summary>Accumulated signal and error energies over the concealed spans.</summary>
+    private sealed class ConcealedTotals
     {
-        private double _concealedSignal;
+        private double _signal;
         private double _oursError;
         private double _libopusError;
         private double _silenceError;
-        private double _resyncSignal;
-        private double _resyncError;
-        private double _noLossSignal;
-        private double _noLossError;
-        private double _concealedCrossSignal;
-        private double _concealedCrossError;
 
-        public double OursDb => Snr(_concealedSignal, _oursError);
+        public double OursDb => Snr(_signal, _oursError);
 
-        public double LibopusDb => Snr(_concealedSignal, _libopusError);
+        public double LibopusDb => Snr(_signal, _libopusError);
 
-        public double SilenceDb => Snr(_concealedSignal, _silenceError);
+        public double SilenceDb => Snr(_signal, _silenceError);
 
-        public double ResyncDb => Snr(_resyncSignal, _resyncError);
-
-        public double NoLossDb => Snr(_noLossSignal, _noLossError);
-
-        public double ConcealedCrossDb => Snr(_concealedCrossSignal, _concealedCrossError);
-
-        public void AddConcealed(short[] reference, short[] test, IReadOnlyList<(int Start, int End)> ranges)
+        public void AddOurs(short[] reference, short[] test, IReadOnlyList<(int Start, int End)> ranges)
         {
             foreach ((int start, int end) in ranges)
             {
                 for (int i = start; i < end && i < reference.Length; i++)
                 {
                     double r = reference[i];
-                    double t = test[i];
-                    _concealedSignal += r * r;
-                    _oursError += (r - t) * (r - t);
+                    _signal += r * r;
+                    _oursError += (r - test[i]) * (r - test[i]);
                 }
             }
         }
 
-        public void AddLibopusConcealed(short[] reference, short[] test, IReadOnlyList<(int Start, int End)> ranges)
+        public void AddLibopus(short[] reference, short[] test, IReadOnlyList<(int Start, int End)> ranges)
         {
             foreach ((int start, int end) in ranges)
             {
                 for (int i = start; i < end && i < reference.Length; i++)
                 {
-                    double r = reference[i];
-                    double t = test[i];
-                    _libopusError += (r - t) * (r - t);
+                    _libopusError += (reference[i] - test[i]) * (reference[i] - test[i]);
                 }
             }
         }
@@ -218,67 +236,51 @@ public class PlcLossConcealmentTests
             }
         }
 
-        public void AddConcealedCross(
-            short[] oracleLossy, short[] oursLossy, IReadOnlyList<(int Start, int End)> ranges)
+        public void Add(ConcealedTotals other)
         {
-            foreach ((int start, int end) in ranges)
-            {
-                for (int i = start; i < end && i < oracleLossy.Length; i++)
-                {
-                    double r = oracleLossy[i];
-                    _concealedCrossSignal += r * r;
-                    _concealedCrossError += (r - oursLossy[i]) * (r - oursLossy[i]);
-                }
-            }
-        }
-
-        public void AddResync(
-            short[] oracleLossy,
-            short[] oursLossy,
-            short[] oursClean,
-            short[] oracleClean,
-            IReadOnlyList<PlcSegment> segments)
-        {
-            foreach ((int start, int length) in ResyncWindows(segments, oursLossy.Length))
-            {
-                for (int i = start; i < start + length; i++)
-                {
-                    double r = oracleLossy[i];
-                    _resyncSignal += r * r;
-                    _resyncError += (r - oursLossy[i]) * (r - oursLossy[i]);
-
-                    double clean = oracleClean[i];
-                    _noLossSignal += clean * clean;
-                    _noLossError += (clean - oursClean[i]) * (clean - oursClean[i]);
-                }
-            }
-        }
-
-        public void Add(ErrorTotals other)
-        {
-            _concealedSignal += other._concealedSignal;
+            _signal += other._signal;
             _oursError += other._oursError;
             _libopusError += other._libopusError;
             _silenceError += other._silenceError;
-            _resyncSignal += other._resyncSignal;
-            _resyncError += other._resyncError;
-            _noLossSignal += other._noLossSignal;
-            _noLossError += other._noLossError;
-            _concealedCrossSignal += other._concealedCrossSignal;
-            _concealedCrossError += other._concealedCrossError;
         }
 
         private static double Snr(double signal, double noise) =>
             noise <= 0 ? 200 : 10 * Math.Log10(signal / noise);
+    }
 
-        /// <summary>
-        /// The 40 ms window that begins 40 ms after each loss run, as (start, length): the decoder
-        /// must have re-synced with libopus within that time.
-        /// </summary>
-        public static IEnumerable<(int Start, int Length)> ResyncWindows(
-            IReadOnlyList<PlcSegment> segments, int totalLength)
+    /// <summary>SNR per recovery window, aggregated over every loss run of a vector.</summary>
+    private sealed class RecoveryWindows
+    {
+        private readonly double[] _signal = new double[WindowStartMs.Length];
+        private readonly double[] _lossyError = new double[WindowStartMs.Length];
+        private readonly double[] _noLossError = new double[WindowStartMs.Length];
+        private readonly double[] _oursRecoverySignal = new double[WindowStartMs.Length];
+        private readonly double[] _oursRecoveryError = new double[WindowStartMs.Length];
+        private readonly double[] _libopusRecoverySignal = new double[WindowStartMs.Length];
+        private readonly double[] _libopusRecoveryError = new double[WindowStartMs.Length];
+
+        public bool HasData(int window) => _signal[window] > 0;
+
+        public double LossyDb(int window) => Snr(_signal[window], _lossyError[window]);
+
+        public double NoLossDb(int window) => Snr(_signal[window], _noLossError[window]);
+
+        public double OursRecoveryDb(int window) =>
+            Snr(_oursRecoverySignal[window], _oursRecoveryError[window]);
+
+        public double LibopusRecoveryDb(int window) =>
+            Snr(_libopusRecoverySignal[window], _libopusRecoveryError[window]);
+
+        public void Add(
+            short[] oracleLossy,
+            short[] oursLossy,
+            short[] oracleClean,
+            short[] oursClean,
+            IReadOnlyList<PlcSegment> segments)
         {
-            int window = ApiRate * ResyncMilliseconds / 1000;
+            int limit = Math.Min(
+                oracleLossy.Length, Math.Min(oursLossy.Length, Math.Min(oracleClean.Length, oursClean.Length)));
+
             int index = 0;
             while (index < segments.Count)
             {
@@ -298,16 +300,52 @@ public class PlcLossConcealmentTests
                     end = segments[index].StartSample + segments[index].Length;
                 }
 
-                int start = end + window;
-                int length = Math.Min(window, totalLength - start);
-                if (length > 0)
+                // Clip the measurement at the next loss run so a later loss is not counted.
+                int nextRun = limit;
+                for (int j = index + 1; j < segments.Count; j++)
                 {
-                    yield return (start, length);
+                    if (segments[j].Concealed)
+                    {
+                        nextRun = segments[j].StartSample;
+                        break;
+                    }
+                }
+
+                for (int w = 0; w < WindowStartMs.Length; w++)
+                {
+                    int start = end + (ApiRate * WindowStartMs[w] / 1000);
+                    int stop = start + (ApiRate * WindowLengthMs[w] / 1000);
+
+                    // Only a complete window that is not interrupted by the next loss measures
+                    // recovery; a partial one would blend a new loss into the result.
+                    if (stop > nextRun || stop > limit)
+                    {
+                        continue;
+                    }
+
+                    for (int i = start; i < stop; i++)
+                    {
+                        double r = oracleLossy[i];
+                        _signal[w] += r * r;
+                        _lossyError[w] += (r - oursLossy[i]) * (r - oursLossy[i]);
+                        _noLossError[w] += (oracleClean[i] - oursClean[i]) * (oracleClean[i] - oursClean[i]);
+
+                        double oursSignal = oursClean[i];
+                        _oursRecoverySignal[w] += oursSignal * oursSignal;
+                        _oursRecoveryError[w] += (oursSignal - oursLossy[i]) * (oursSignal - oursLossy[i]);
+
+                        double libSignal = oracleClean[i];
+                        _libopusRecoverySignal[w] += libSignal * libSignal;
+                        _libopusRecoveryError[w] += (libSignal - oracleLossy[i]) * (libSignal - oracleLossy[i]);
+                    }
                 }
 
                 index++;
             }
         }
+
+        private static double Snr(double signal, double noise) =>
+            noise <= 0 ? 200 : 10 * Math.Log10(signal / noise);
     }
 
     /// <summary>
