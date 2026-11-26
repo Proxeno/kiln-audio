@@ -6,8 +6,8 @@ using Kiln.Audio.Celt.Encoder;
 namespace Kiln.Audio.Benchmarks;
 
 /// <summary>
-/// Encodes the whole RFC 8251 corpus (mono downmix) from memory at 20 ms / 32 kbps, for every
-/// complexity the encoder supports.
+/// Encodes the whole RFC 8251 corpus (mono downmix) from memory at 20 ms, 24 and 32 kbps CBR,
+/// for complexity 0, 5 and 10.
 /// </summary>
 /// <remarks>
 /// The corpus is loaded in <see cref="GlobalSetup"/>, so no file IO is measured. The corpus
@@ -21,15 +21,18 @@ namespace Kiln.Audio.Benchmarks;
 public class EncodeBenchmarks
 {
     private const int FrameSamples = 960;
-    private const int Bitrate = 32000;
 
     private short[] _corpus = [];
     private byte[] _packet = [];
     private OpusEncoder _encoder = null!;
 
     /// <summary>The encoder complexity under test.</summary>
-    [Params(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)]
+    [Params(0, 5, 10)]
     public int Complexity { get; set; }
+
+    /// <summary>The CBR target bitrate under test.</summary>
+    [Params(24000, 32000)]
+    public int Bitrate { get; set; }
 
     /// <summary>The total audio duration of the loaded corpus, in seconds.</summary>
     public double CorpusSeconds => _corpus.Length / 48000.0;

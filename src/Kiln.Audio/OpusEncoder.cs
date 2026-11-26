@@ -2,6 +2,7 @@
 
 using Kiln.Audio.Celt;
 using Kiln.Audio.Celt.Encoder;
+using Kiln.Audio.Encoder;
 
 namespace Kiln.Audio;
 
@@ -9,21 +10,27 @@ namespace Kiln.Audio;
 /// <remarks>
 /// <para>
 /// This version supports the CELT family: mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5,
-/// 10 or 20 ms frames, constant or variable bitrate, and the pitch pre-filter. All three
-/// <see cref="OpusApplication"/> values currently map onto the same CELT settings. SILK, hybrid,
-/// in-band FEC and DTX are not implemented and are rejected with
-/// <see cref="NotSupportedException"/>.
+/// 10, 20, 40 or 60 ms frames, constant or variable bitrate, and the pitch pre-filter. A 40 or
+/// 60 ms frame is encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as
+/// the reference handles CELT durations above 20 ms. All three <see cref="OpusApplication"/> values
+/// currently map onto the same CELT settings. SILK, hybrid, in-band FEC and DTX are not
+/// implemented and are rejected with <see cref="NotSupportedException"/>.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
-/// byte followed by one CELT frame. It allocates nothing after construction.
+/// byte followed by one CELT frame (or the multi-frame layout for 40 and 60 ms). It allocates
+/// nothing after construction.
 /// </para>
 /// </remarks>
 public sealed class OpusEncoder : IDisposable
 {
     private readonly CeltEncoder _encoder;
-    private readonly OpusFrameDuration _frameDuration;
+    private readonly OpusFrameDuration _tocDuration;
+    private readonly int _subFrameSamples;
+    private readonly int _subFrameCount;
+    private readonly int _inputFrameSamples;
     private readonly short[] _conversionBuffer;
+    private readonly byte[] _subFrameData;
     private bool _disposed;
 
     /// <summary>Creates an encoder after validating and checking <paramref name="options"/>.</summary>
@@ -36,13 +43,6 @@ public sealed class OpusEncoder : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
 
-        if (options.FrameDuration is OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60)
-        {
-            throw new NotSupportedException(
-                FormattableString.Invariant(
-                    $"CELT supports 2.5, 5, 10 and 20 ms frames; got {options.FrameDuration}."));
-        }
-
         if (options.UseInbandFec)
         {
             throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
@@ -54,16 +54,33 @@ public sealed class OpusEncoder : IDisposable
         }
 
         Options = options;
-        _frameDuration = options.FrameDuration;
+
+        // CELT packets are at most 20 ms; 40 and 60 ms are split into 20 ms frames (RFC 6716
+        // §3.2.5, Appendix A opus_encoder.c). The packet TOC therefore advertises 20 ms.
+        _tocDuration = options.FrameDuration is OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60
+            ? OpusFrameDuration.Ms20
+            : options.FrameDuration;
+        _subFrameCount = options.FrameDuration switch
+        {
+            OpusFrameDuration.Ms40 => 2,
+            OpusFrameDuration.Ms60 => 3,
+            _ => 1,
+        };
+
         _encoder = new CeltEncoder(
-            options.FrameDuration,
+            _tocDuration,
             options.BitrateBps,
             options.Complexity,
             options.Channels,
             options.SampleRate,
             options.UseVbr,
             options.ConstrainedVbr);
-        _conversionBuffer = new short[_encoder.FrameSamples * options.Channels];
+        _subFrameSamples = _encoder.FrameSamples;
+        _inputFrameSamples = _subFrameSamples * _subFrameCount * options.Channels;
+        _conversionBuffer = new short[_inputFrameSamples];
+
+        // VBR may use the whole maximum frame; CBR uses only the configured size.
+        _subFrameData = new byte[_subFrameCount * _encoder.MaxFrameBytes];
     }
 
     /// <summary>The validated options this encoder was created with.</summary>
@@ -81,8 +98,8 @@ public sealed class OpusEncoder : IDisposable
     /// </param>
     /// <param name="packet">
     /// Destination for the packet; must hold the TOC byte and the frame. Constant bitrate needs
-    /// the configured frame size plus one byte; variable bitrate may use as much of the buffer as
-    /// is available (up to 1276 bytes).
+    /// the configured frame size plus the framing bytes; variable bitrate may use as much of the
+    /// buffer as is available (up to 1275 bytes per 20 ms frame).
     /// </param>
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
     /// <exception cref="ArgumentException">
@@ -91,40 +108,47 @@ public sealed class OpusEncoder : IDisposable
     public int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        int expected = _encoder.FrameSamples * _encoder.Channels;
-        if (pcm.Length != expected)
+        if (pcm.Length != _inputFrameSamples)
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {expected} interleaved samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_inputFrameSamples} interleaved samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
-        if (Options.UseVbr)
+        int frameBytes = _encoder.FrameBytes;
+        int minimumPacket = Options.UseVbr
+            ? 2 + (_subFrameCount * 2)
+            : (_subFrameCount == 1 ? frameBytes + 1 : (frameBytes * _subFrameCount) + 1 + _subFrameCount);
+        if (packet.Length < minimumPacket)
         {
-            if (packet.Length < 3)
-            {
-                throw new ArgumentException(
-                    FormattableString.Invariant(
-                        $"The packet buffer must hold at least 3 bytes; got {packet.Length}."),
-                    nameof(packet));
-            }
-        }
-        else
-        {
-            int frameBytes = _encoder.FrameBytes;
-            if (packet.Length < frameBytes + 1)
-            {
-                throw new ArgumentException(
-                    FormattableString.Invariant(
-                        $"The packet buffer must hold at least {frameBytes + 1} bytes; got {packet.Length}."),
-                    nameof(packet));
-            }
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The packet buffer must hold at least {minimumPacket} bytes; got {packet.Length}."),
+                nameof(packet));
         }
 
-        packet[0] = BuildToc();
-        int written = _encoder.EncodeFrame(pcm, packet.Slice(1));
-        return written + 1;
+        if (_subFrameCount == 1)
+        {
+            packet[0] = BuildToc();
+            int written = _encoder.EncodeFrame(pcm, packet.Slice(1));
+            return written + 1;
+        }
+
+        // 40 and 60 ms CELT are code 1/code 3 packets of 20 ms frames (RFC 6716 Appendix A,
+        // opus_encoder.c: the "can't support higher than wideband for > 20 ms frames" block).
+        int subFrameInterleaved = _subFrameSamples * Options.Channels;
+        Span<int> sizes = stackalloc int[_subFrameCount];
+        int dataBytes = 0;
+        for (int i = 0; i < _subFrameCount; i++)
+        {
+            int size = _encoder.EncodeFrame(
+                pcm.Slice(i * subFrameInterleaved, subFrameInterleaved), _subFrameData.AsSpan(dataBytes));
+            sizes[i] = size;
+            dataBytes += size;
+        }
+
+        return OpusPacketWriter.Write(packet, BuildToc(), sizes, _subFrameData.AsSpan(0, dataBytes));
     }
 
     /// <summary>Encodes one frame of interleaved floating-point PCM in [-1, 1] into an Opus packet.</summary>
@@ -135,12 +159,11 @@ public sealed class OpusEncoder : IDisposable
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
     public int Encode(ReadOnlySpan<float> pcm, Span<byte> packet)
     {
-        int expected = _encoder.FrameSamples * _encoder.Channels;
-        if (pcm.Length != expected)
+        if (pcm.Length != _inputFrameSamples)
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {expected} interleaved samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_inputFrameSamples} interleaved samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
@@ -163,7 +186,8 @@ public sealed class OpusEncoder : IDisposable
     {
         // CELT-only configurations 16..31 (RFC 6716 §3.1, Table 2): the bandwidth group depends on
         // the API rate and the low two bits select the frame duration. Bit 2 is the stereo flag.
-        int config = InputResampler.TocConfigBase(Options.SampleRate) + (int)_frameDuration;
+        // A 40 or 60 ms input frame is signalled as 20 ms and split into several frames.
+        int config = InputResampler.TocConfigBase(Options.SampleRate) + (int)_tocDuration;
         int toc = config << 3;
         if (Options.Channels == 2)
         {

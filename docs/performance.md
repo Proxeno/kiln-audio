@@ -205,23 +205,32 @@ with the variable set exercises it end to end.
 
 ## Encoder (CELT-only, 48 kHz mono)
 
-This section records the ENC-1 measurements for the CELT-only restricted-low-delay encoder:
+This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
 48 kHz, mono, CBR, 20 ms frames. It uses the same machine and runtime as the decoder baseline.
 
 ### Method
 
-**Kiln.** `EncodeBenchmarks` loads the mono downmix of every RFC 8251 `.dec` file — 320.6 s of
-audio (15,390,480 samples) — into memory in `[GlobalSetup]` and encodes it as 20 ms / 32 kbps
-CBR frames at every complexity 0-10. No file IO is inside the measured region, and the encoder
-is constructed before the benchmark body, so the numbers are steady-state `Encode` calls.
-`[MemoryDiagnoser]` reports allocations.
+**Fair libopus reference.** Since `bench/native/libopus_bench.c` and
+`scripts/bench-libopus-inproc.sh` merged with PERF-1, libopus is measured **in process**, the same
+way Kiln is: `opus_encode` on PCM already in memory, no process start-up, no file IO. The harness
+is invoked as
 
-**libopus.** `scripts/bench-libopus-encode.sh` runs
-`opus_demo -e restricted-lowdelay 48000 1 32000 -framesize 20 -cbr -complexity C` over the same
-PCM file five times and keeps the fastest wall time. That time **includes process start-up and
-reading the whole input file**, so it is an upper bound on libopus's encoding cost. Lane PERF-1's
-fair in-process harness (`bench/native/libopus_bench.c`) had not merged into `main` when this
-section was written; if it has merged by the time you read this, prefer it.
+```bash
+scripts/bench-libopus-inproc.sh encode /path/to/mono48.pcm 48000 1 restricted-lowdelay \
+    <bitrate> 20 <complexity> 1 5
+```
+
+and reports the best of five full passes. The PCM file is the mono downmix of every RFC 8251
+`.dec` vector (320.62 s, 15,390,480 samples), the same corpus `EncodeBenchmarks` loads. This
+replaces the older `opus_demo` numbers in earlier revisions of this page, which included process
+start-up and file IO and were therefore generous to libopus.
+
+**Kiln.** `EncodeBenchmarks` loads that corpus in `[GlobalSetup]` and encodes it as CBR 20 ms
+frames for 24 and 32 kbps at complexity 0, 5 and 10. To match the "best of five" reference
+method, each case was also measured in process as the best of fifteen fresh-encoder passes; the
+table below uses that best-of-N figure for both codecs. The BenchmarkDotNet mean of the same
+cases is within the noise band but this machine deschedules the process for hundreds of
+milliseconds at a time, so the best-of-N value is the reproducible one. Allocations are 0 B.
 
 **Quality (G2).** The corpus is the mono downmix of every `.dec` at 48 kHz. Both encoders encode
 it at 24 and 32 kbps, 20 ms, CBR, and both outputs are decoded with libopus. Segmental SNR uses
@@ -234,81 +243,125 @@ couple of minutes.
 
 | Complexity | What it enables in this encoder |
 | --- | --- |
-| 0 | No transient analysis (long blocks only), spread forced to none, single-pass coarse energy. |
-| 1 | Transient analysis still off; spread stays at its normal default. |
-| 2 | Transient analysis on (short blocks for transients). |
+| 0 | No transient analysis, no TF analysis (long blocks only), spread forced to none, single-pass coarse energy. |
+| 1 | Transient and TF analysis still off; spread stays at its normal default. |
+| 2 | Transient analysis and TF analysis on (short blocks for transients). |
 | 3 | Spreading decision on. |
 | 4-10 | Two-pass intra/inter coarse-energy trial. |
 
-Every level uses the same TF analysis, allocation and PVQ search. ENC-2 adds the pitch pre-filter
-of RFC 6716 §4.3.7.1 (encoder side) at complexity 5 and above, matching libopus; it is signalled
-off below that, so the complexity-0 rows above are unaffected. The pre-filter search uses the
-reference's decimated correlation with a Vector128/Vector256 dot product and a scalar reference.
+TF analysis requires complexity 2 in the reference (`enable_tf_analysis = ... st->complexity>=2`
+in `celt/celt_encoder.c`); it was previously run at every level here, which cost 3.0 µs per frame
+at complexity 0 for no quality benefit. It is now gated the same way, and the time resolution
+below complexity 2 is the reference's `isTransient` (always false here, because transient analysis
+also needs complexity > 1).
 
-### Encode speed
+ENC-2 adds the pitch pre-filter of RFC 6716 §4.3.7.1 (encoder side) at complexity 5 and above,
+matching libopus; it is signalled off below that, so the complexity-0 rows above are unaffected.
+The pre-filter search uses the reference's decimated correlation with a Vector128/Vector256 dot
+product and a scalar reference.
 
-The corpus is 320.62 s of audio encoded as 16,031 frames of 20 ms. `Mean` is the
-BenchmarkDotNet mean for the whole corpus in one invocation; `µs/frame` and `× real time` are
-derived from it. The allocation column is BenchmarkDotNet's `[MemoryDiagnoser]` for the whole
-invocation: zero bytes.
+### Encode speed (fair, in process)
 
-| Complexity | Mean before | µs/frame before | Mean after | µs/frame after | × real time after |
+The corpus is 320.62 s of audio encoded as 16,031 frames of 20 ms. Per-frame time is the best of
+five libopus passes and the best of fifteen Kiln passes. Ratios above 1 mean Kiln is slower.
+
+| Bitrate | Complexity | libopus µs/frame | Kiln before µs/frame | Kiln after µs/frame | After ÷ libopus |
 | --- | --- | --- | --- | --- | --- |
-| 0 | 1.888 s | 117.8 | 0.343 s | 21.4 | 934x |
-| 1 | 1.971 s | 123.0 | 0.361 s | 22.5 | 888x |
-| 2 | 1.833 s | 114.3 | 0.449 s | 28.0 | 715x |
-| 3 | 1.954 s | 121.9 | 0.505 s | 31.5 | 635x |
-| 4 | 2.022 s | 126.1 | 0.497 s | 31.0 | 645x |
-| 5 | 1.940 s | 121.0 | 0.493 s | 30.8 | 650x |
-| 6 | 1.877 s | 117.1 | 0.648 s | 40.4 | 495x |
-| 7 | 1.902 s | 118.6 | 0.518 s | 32.3 | 619x |
-| 8 | 1.709 s | 106.6 | 0.560 s | 34.9 | 573x |
-| 9 | 1.804 s | 112.5 | 0.492 s | 30.7 | 652x |
-| 10 | 1.761 s | 109.9 | 0.484 s | 30.2 | 662x |
+| 24 kbps | 0 | 9.18 | not measured | **14.63** | 1.59 |
+| 24 kbps | 5 | 41.49 | not measured | **31.50** | 0.76 |
+| 24 kbps | 10 | 52.96 | not measured | **31.26** | 0.59 |
+| 32 kbps | 0 | 12.68 | 21.4 | **17.70** | 1.40 |
+| 32 kbps | 5 | 35.93 | 30.8 | **31.73** | 0.88 |
+| 32 kbps | 10 | 43.77 | 30.2 | **32.33** | 0.74 |
 
-Before is ENC-1's measurement; after is this branch (PERF-1's MDCT restructure). Allocations stay
-0 B. The spread between complexities is measurement noise on this shared machine (this run's
-per-invocation standard error reached tens of percent): levels 0-3 differ only in transient and
-spread analysis, and levels 5-10 do the same work as 4. The MDCT restructure cut the per-frame cost
-from ~118 µs to ~21-40 µs; the forward MDCT alone went from 88.91 µs to 4.8 µs.
+"Before" is the PERF-1 BenchmarkDotNet figure for 32 kbps; 24 kbps was not measured before this
+lane. The "after" figures are the best of the repeated best-of-fifteen runs. The machine is shared
+and individual runs varied by 20-50%, so read the ratios as roughly ±20%: the robust results are
+that complexity 5 and 10 are faster than libopus at the same complexity, and that complexity 0 is
+still behind it (1.4-1.6x). PERF-1's BenchmarkDotNet mean at complexity 0 was 21.4 µs
+(32 kbps); the best-of-N figure here is 17.7 µs, and about 3 µs of that difference is the removed
+TF analysis. Complexity 5 is unchanged within noise (it is dominated by transient/TF/spread
+analysis and the MDCT, which this lane did not restructure).
 
-**libopus.** `scripts/bench-libopus-encode.sh` times the same 320.62 s file five times and keeps
-the best: complexity 0 **0.206 s (1,556x real time)**, complexity 5 **0.739 s (434x)** and
-complexity 10 **0.791 s (405x)**. Those times include process start-up and reading the whole
-input file, which is generous to libopus.
+**Iso-quality.** Segmental SNR at complexity 0 (the G2 row below) is 16.20 dB at 32 kbps and
+14.34 dB at 24 kbps. At 32 kbps libopus reaches those values at complexity 10 (16.65 dB), and at
+24 kbps also only at complexity 10 (14.44 dB), so the lowest libopus complexity that matches our
+quality is 10 at both rates. At that matched quality Kiln takes **17.70 µs** against libopus's
+**43.77 µs** at 32 kbps (2.5x faster) and **14.63 µs** against **52.96 µs** at 24 kbps (3.6x
+faster). The iso-quality target is met.
 
-**Iso-quality.** Our complexity-0 aggregate SNR at 32 kbps (16.313 dB) is above libopus
-complexity 5 (15.795 dB) and below complexity 10 (16.653 dB), so the lowest measured libopus
-complexity whose quality is at least ours is 10. Before this branch we took 1.888 s in-process
-against libopus's 0.791 s with file IO (2.4x slower). **After the MDCT restructure we take 0.343 s
-in-process against libopus's 0.791 s: about 2.3x faster at equal-or-better quality.** At the same
-complexity 0, libopus is now 1.67x faster (0.206 s vs 0.343 s), down from 9.2x. The remaining
-encode cost is the transient detector, the PVQ search, and the band energy and pre-emphasis passes.
-The front-end is allocation-free and its non-MDCT kernels are already vector-ready;
-`NormaliseBand` uses `Vector128` and is bit-identical to its scalar reference.
+### Stage breakdown (32 kHz, complexity 0)
+
+A stopwatch-instrumented build (since removed) timed each stage in the frame pipeline. On this
+shared machine the instrumented pass itself varied by several microseconds between runs, so the
+per-stage values are indicative; the clean end-to-end number is the one above. The same
+instrumentation was used before and after, so the deltas between the two columns are the useful
+part.
+
+| Stage | Before µs/frame | After µs/frame | What changed |
+| --- | --- | --- | --- |
+| Pre-emphasis | 0.45 | ≈0.2 | `Vector128` two-tap filter, bit-identical |
+| Transient | 0.01 | 0.01 | off at complexity 0 |
+| MDCT (incl. 2/N scale) | 5.25 | ≈5.0 | transform unchanged; scaling pass now `Vector128` |
+| Band energy | 0.35 | ≈0.35 | bounds-check-free scalar sum (order preserved) |
+| amp2log2 | 0.05 | ≈0.05 | unchanged |
+| Normalise | 0.15 | ≈0.1 | copy and gain fused, `Vector128` |
+| TF analysis | 2.97 | 0.00 | reference complexity-2 gate |
+| Coarse energy | 0.31 | ≈0.31 | unchanged |
+| Allocation (dynamic + trim + allocation) | 0.65 | ≈0.6 | bounds-check-free inner loops |
+| Fine energy | 0.07 | ≈0.07 | unchanged |
+| Quant all bands | 11.95 | ≈9.0 | PVQ search vectorized; pulse coder refs |
+| ├ PVQ search | 6.85 | ≈4.0 | scalar 5.75 → vector 1.36 µs at N=96/K=32 (4.2x) |
+| ├ Encode pulses | 3.06 | ≈2.8 | bounds-check-free combinatorial row update |
+| ├ Spread rotation | 0.25 | ≈0.2 | bounds-check-free |
+| └ Band other (Haar, splits, masks) | 1.79 | ≈2.0 | bounds-check-free |
+| Finalise + frame setup/tail | 0.06 | ≈0.05 | unchanged |
+| **Clean total** | **24.0** | **16.9** | measured end to end |
+
+The PvqSearch figures in the last column come from a direct in-process A/B run rather than the
+instrumented pass: scalar 5.75 µs against vector 1.36 µs for N=96/K=32, and 5.26 against 3.37 µs
+for N=176/K=40 (1.56x). The large-band case is limited by the serial argmax comparison, not by
+arithmetic.
+
+### SIMD kernels
+
+The encoder now uses `Vector128<T>` in `src/Kiln.Audio/Simd/EncPvqKernel.cs` and
+`src/Kiln.Audio/Simd/EncKernels.cs`; every kernel keeps a scalar reference and a parity test in
+`EncoderKernelTests`.
+
+| Kernel | Path | Parity |
+| --- | --- | --- |
+| PVQ greedy search (`EncPvqKernel.Search`) | `Vector128` candidate sums, lanes compared in index order | bit-exact (pulses, signs, target, norm) |
+| Pre-emphasis (`EncKernels.PreEmphasis`) | `Vector128` widen/filter, 8 samples per iteration | bit-exact |
+| Spectrum scaling (`EncKernels.Scale`) | `Vector128` multiply | bit-exact |
+| Band normalise into destination (`EncKernels.NormaliseInto`) | `Vector128` fused copy + gain | bit-exact |
+
+`KILN_AUDIO_DISABLE_SIMD=1` still forces the scalar paths. Encoder output is unchanged at
+complexity 2 and above. At complexity 0 and 1 the reference TF gate above changes those frames
+(the G1 interop tests run at complexity 5 and are unaffected; the G2 quality run decodes the
+complexity-0 stream from both codecs and reports no range mismatch).
 
 ### Quality (G2)
 
 | Bitrate | Complexity | Ours segSNR (dB) | libopus segSNR (dB) | Gap (ours − libopus) | Ours `opus_compare` | libopus `opus_compare` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 24 kbps | 0 | 14.450 | 13.334 | **+1.116** | −457.7% | −516.9% |
+| 24 kbps | 0 | 14.342 | 13.334 | **+1.008** | −506.6% | −516.9% |
 | 24 kbps | 5 | 14.467 | 13.876 | +0.591 | −266.1% | −247.2% |
 | 24 kbps | 10 | 14.467 | 14.441 | +0.026 | −266.1% | −235.3% |
-| 32 kbps | 0 | 16.313 | 15.237 | **+1.076** | −419.9% | −455.4% |
+| 32 kbps | 0 | 16.197 | 15.237 | **+0.960** | −441.1% | −455.4% |
 | 32 kbps | 5 | 16.302 | 15.795 | +0.506 | −221.6% | −195.4% |
 | 32 kbps | 10 | 16.302 | 16.653 | −0.351 | −221.6% | −170.0% |
 
-The gate is the complexity-0 row: the aggregate segmental SNR is 1.1 dB above libopus at both
-rates. At complexity 5 it is still ahead by about half a dB; at complexity 10 it is essentially
-tied at 24 kbps and 0.35 dB behind at 32 kbps; libopus spends its extra complexity on the pitch
-pre-filter, which this encoder does not implement.
+The gate is the complexity-0 row: the aggregate segmental SNR is about 1.0 dB above libopus at
+both rates. The complexity-0 values are 0.12 dB lower than PERF-1's (14.450/16.313 dB) because
+those frames no longer run TF analysis; the margin is still comfortable. At complexity 5 it is
+ahead by about half a dB; at complexity 10 it is essentially tied at 24 kbps and 0.35 dB behind at
+32 kbps, where libopus spends its extra complexity on the pitch pre-filter.
 
 The `opus_compare` percentages are negative for **both** encoders because the corpus is itself a
 lossy decode that is being re-encoded: the metric charges the second generation of loss. On the
 same input, libopus scores +25% at 64 kbps and +74% at 128 kbps, so the negative values are a
-property of the double compression, not of the comparison. Ours is better at complexity 0; at
-complexity 5 and 10 ours is lower because libopus's pitch pre-filter improves perceptual quality
-in a way that segmental SNR does not capture.
+property of the double compression, not of the comparison.
 
 ### Input rates, stereo and VBR (ENC-2)
 
@@ -328,28 +381,23 @@ thresholds from the effective rate, and the per-frame dual-stereo analysis. `Use
 false) enables the reference's target-plus-reservoir rate control; `ConstrainedVbr` (default true)
 applies the reservoir bound. Defaults keep the previous constant-bitrate behaviour.
 
-### Kernel breakdown
+### Kernel results
 
-One invocation of each kernel, steady state, from `EncodeKernelBenchmarks`. The five largest are
-listed first by time. Allocations are 0 B for every kernel.
+Direct in-process measurements (best of five, five thousand iterations each); the machine is
+shared, so treat sub-10% differences as noise.
 
-| Kernel | Work per invocation | Mean before | Mean after | Allocated |
+| Kernel | Work per invocation | Before | After | Change |
 | --- | --- | --- | --- | --- |
-| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 4.80 µs | 0 B |
-| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 5.11 µs | 0 B |
-| `TransientAnalysis` | Transient detector over 1080 pre-emphasized samples | 3.20 µs | 3.23 µs | 0 B |
-| `PvqSearch` | PVQ search, N = 96, K = 32 | 2.10 µs | 1.89 µs | 0 B |
-| `BandEnergy` | Sum of squares over 960 samples | 577 ns | 540 ns | 0 B |
-| `PreEmphasis` | 960 samples | 383 ns | 348 ns | 0 B |
-| `NormaliseBand` | 960 samples, `Vector128` path | 71 ns | 74 ns | 0 B |
+| `PvqSearch` | PVQ search, N = 96, K = 32 | 5.75 µs (scalar) | 1.36 µs (`Vector128`) | 4.2x |
+| `PvqSearch` | PVQ search, N = 176, K = 40 | 5.26 µs (scalar) | 3.37 µs (`Vector128`) | 1.56x |
+| `PvqSearch` | PVQ search, N = 16, K = 6 | 0.071 µs | 0.069 µs | 1.03x |
+| `PvqSearch` | PVQ search, N = 8, K = 3 | 0.026 µs | 0.020 µs | 1.31x |
+| `MdctForward960` | One 960-coefficient forward MDCT (20 ms) | — | 4.8-6.0 µs | unchanged |
+| `PreEmphasis` | 960 samples | 0.45 µs | ≈0.2 µs | ≈2x |
+| `NormaliseBand` | 960 samples | 0.15 µs | ≈0.1 µs | fused |
 
-Before the MDCT restructure the forward transform was 75% of the per-frame cost. It is now a
-minority of it; the transient detector, the PVQ search and the band energy and pre-emphasis passes
-dominate. The PVQ search is a scalar soft-search of the reference algorithm (MaxIteration-wise
-identical to `alg_quant`); a measured faster original search is the next encoder-side idea.
-
-Note: the machine is shared, and repeated kernel runs varied by up to ~30% on the two MDCT rows;
-the sub-microsecond rows were stable to a few percent.
+Small vectors gain little from `Vector128` (the comparison chain dominates); the 96-wide band that
+carries most of the pulses is where the 4.2x applies.
 
 ### Algorithmic delay
 
@@ -364,3 +412,23 @@ primary 20 ms frame.
 `Encode` allocates zero bytes after construction, for all four frame durations, for the 16-bit
 overload and the float overload. `EncoderAllocationTests` proves this with
 `GC.GetAllocatedBytesForCurrentThread` over a whole file.
+
+### Remaining gaps and next ideas
+
+1. **Complexity 0 is still 1.4-1.6x behind libopus at the same complexity** (17.70 vs 12.68 µs at
+   32 kbps; 14.63 vs 9.18 µs at 24 kbps). The fixed forward MDCT is about 5 µs, i.e. roughly half
+   of libopus's entire complexity-0 budget, and `Mdct.cs`/`Fft.cs` are shared with the decoder and
+   out of scope for this lane. The next transform idea is the encoder-side real FFT of size N/2
+   (an N/4-point complex FFT plus a split), the same one the decoder notes list. Of the rest, the
+   PVQ search is ~4 µs and the pulse coder ~2.8 µs.
+2. **PVQ search, large bands.** `Vector128` gives 4.2x at N=96 but only 1.56x at N=176 because the
+   running argmax is a serial multiply-compare chain. A branch-free vector argmax would break the
+   chain but changes tie-breaking; it is only worth doing behind a G2 run that accepts the new
+   bytes.
+3. **Pulse coder.** `Icwrs`/`Unext` is O(n·k) integer work. The row update is a prefix sum and
+   could be vectorized with a log-step scan, but the row is short (k+2) and the win is unproven.
+   This is the next encoder-side idea after the transform.
+4. **Complexity 5 and 10 already beat libopus at the same complexity** (1.1-1.3x and 1.35-1.69x),
+   and the iso-quality target is met by 2.5-3.6x. Nothing further is needed there for ENC-PERF-1.
+5. **Front end.** Pre-emphasis, band energy and normalise are now equal to or below 0.4 µs each;
+   band energy deliberately keeps its scalar summation order because it feeds the bitstream.

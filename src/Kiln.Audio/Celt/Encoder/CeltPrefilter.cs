@@ -52,6 +52,17 @@ internal sealed class CeltPrefilter
     internal CeltPrefilter(int channels)
     {
         _channels = channels;
+        Reset();
+    }
+
+    /// <summary>Restores the freshly constructed state (RFC 6716 Appendix A, <c>OPUS_RESET_STATE</c>).</summary>
+    internal void Reset()
+    {
+        Array.Clear(_prefilterMemory);
+        Array.Clear(_inMemory);
+        _period = MinPeriod;
+        _gain = 0f;
+        _tapset = 0;
     }
 
     /// <summary>
@@ -65,6 +76,11 @@ internal sealed class CeltPrefilter
     /// <param name="totalBits">The frame budget in bits.</param>
     /// <param name="complexity">The encoder complexity, 0 to 10.</param>
     /// <param name="tapsetDecision">The tap-set decision left by the previous spreading analysis.</param>
+    /// <param name="allowPitch">
+    /// False for a hybrid frame, whose CELT layer starts at band 17: the reference skips the
+    /// pitch search and signals nothing, but still applies the (zero-gain) comb filter so the
+    /// overlap history stays consistent.
+    /// </param>
     /// <param name="window">The rising CELT window, <see cref="Overlap"/> samples.</param>
     /// <returns>True when the pre-filter was enabled.</returns>
     internal bool Process(
@@ -76,6 +92,7 @@ internal sealed class CeltPrefilter
         int totalBits,
         int complexity,
         int tapsetDecision,
+        bool allowPitch,
         ReadOnlySpan<float> window)
     {
         int stride = frameSamples + Overlap;
@@ -85,7 +102,7 @@ internal sealed class CeltPrefilter
         int tapset = 0;
         float gain1 = 0f;
 
-        if (availableBytes > 12 * channels && complexity >= 5)
+        if (allowPitch && availableBytes > 12 * channels && complexity >= 5)
         {
             PitchDownsample(channels, MaxPeriod + frameSamples, stride);
             PitchSearch(
@@ -147,7 +164,7 @@ internal sealed class CeltPrefilter
         bool on;
         if (gain1 < threshold)
         {
-            if (enc.Tell() + 16 <= totalBits)
+            if (allowPitch && enc.Tell() + 16 <= totalBits)
             {
                 enc.EncodeBitLogp(0, 1);
             }

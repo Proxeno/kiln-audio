@@ -67,7 +67,9 @@ public class Enc2InteropTests
         (short[] decoded, string diagnostics) = EncoderOracle.Decode(bit, channels);
         EncoderOracle.HasRangeMismatch(diagnostics).Should().BeFalse(
             $"{channels}ch, {rate} Hz, {duration}, vbr={vbr}: {diagnostics}");
-        decoded.Length.Should().Be(packets.Count * 960 * channels);
+        // opus_demo decodes at 48 kHz, so every frame is 480 (10 ms) or 960 (20 ms) samples.
+        int decodedFrameSamples = duration == OpusFrameDuration.Ms10 ? 480 : 960;
+        decoded.Length.Should().Be(packets.Count * decodedFrameSamples * channels);
     }
 
     private static int FrameSamples(int rate, OpusFrameDuration duration) => duration switch

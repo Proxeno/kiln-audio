@@ -47,6 +47,62 @@ internal sealed class CeltVbr
     /// <returns>The effective byte count.</returns>
     internal static int EffectiveBytes(int vbrRate) => vbrRate >> (3 + BitRes);
 
+    /// <summary>Restores the freshly constructed state (RFC 6716 Appendix A, <c>OPUS_RESET_STATE</c>).</summary>
+    internal void Reset()
+    {
+        _reservoir = 0;
+        _drift = 0;
+        _offset = 0;
+        _count = 0;
+    }
+
+    /// <summary>
+    /// Applies the reference's VBR state update for a silent frame (RFC 6716 Appendix A,
+    /// celt/celt.c: the <c>silence</c> branch of the VBR block).
+    /// </summary>
+    /// <remarks>
+    /// A silent frame is coded as two bytes and its target is fixed at two bytes, but the drift
+    /// still decays and the reservoir is still credited, exactly as the reference does. Without
+    /// this update the encoder would over-shoot the target after a run of silence.
+    /// </remarks>
+    /// <param name="vbrRate">The per-frame target in eighth-bits.</param>
+    /// <param name="constrained">True for constrained VBR.</param>
+    /// <param name="nbCompressedBytes">The current frame size.</param>
+    /// <param name="filledBytes">Bytes written before this frame (zero for CELT-only).</param>
+    /// <returns>The final frame size in bytes.</returns>
+    internal int UpdateSilence(int vbrRate, bool constrained, int nbCompressedBytes, int filledBytes)
+    {
+        const int nbAvailableBytes = 2;
+        const int target = 2 * 8 << BitRes;
+
+        float alpha;
+        if (_count < 970)
+        {
+            _count++;
+            alpha = 1f / (_count + 20);
+        }
+        else
+        {
+            alpha = 0.001f;
+        }
+
+        if (constrained)
+        {
+            _reservoir += target - vbrRate;
+        }
+
+        _drift += (int)(alpha * (-_offset - _drift));
+        _offset = -_drift;
+
+        if (constrained && _reservoir < 0)
+        {
+            // `silence ? 0 : adjust`: a silent frame never grows to repay the reservoir.
+            _reservoir = 0;
+        }
+
+        return Math.Min(nbCompressedBytes, nbAvailableBytes + filledBytes);
+    }
+
     /// <summary>
     /// Applies the constrained-VBR preamble that caps the frame before any symbol is written
     /// (RFC 6716 Appendix A, celt/celt.c: the <c>constrained_vbr</c> block).

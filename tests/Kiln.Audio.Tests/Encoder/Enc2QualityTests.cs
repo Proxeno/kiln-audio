@@ -188,7 +188,7 @@ public class Enc2QualityTests
     private static void SaveReport(
         int channels, int bitrate, int complexity, double ours, double libopus, int vectors)
     {
-        string path = Path.Combine(Path.GetTempPath(), "kiln-encoder-quality.txt");
+        string path = Path.Combine(AppContext.BaseDirectory, "kiln-encoder-quality.txt");
         string line =
             $"ENC2 {channels}ch {bitrate} c{complexity}: ours {ours:F3} dB, libopus {libopus:F3} dB, " +
             $"gap {ours - libopus:+0.000;-0.000} dB, vectors {vectors}\n";

@@ -59,12 +59,20 @@ public class EncoderOptionTests
     }
 
     [Theory]
-    [InlineData(OpusFrameDuration.Ms40)]
-    [InlineData(OpusFrameDuration.Ms60)]
-    public void Silk_frame_durations_are_rejected(OpusFrameDuration duration)
+    [InlineData(OpusFrameDuration.Ms40, 2, 1)]
+    [InlineData(OpusFrameDuration.Ms60, 3, 3)]
+    public void Long_celt_frames_are_split_into_20_ms_frames(OpusFrameDuration duration, int frameCount, int code)
     {
-        var options = Supported() with { FrameDuration = duration };
-        ((Action)(() => new OpusEncoder(options))).Should().Throw<NotSupportedException>();
+        using var encoder = new OpusEncoder(Supported() with { FrameDuration = duration });
+        var packet = new byte[1276];
+        int written = encoder.Encode(new short[frameCount * 960], packet);
+
+        var frames = new Range[OpusPacket.MaxFrames];
+        OpusPacket.TryParse(packet.AsSpan(0, written), frames, out int count, out OpusToc toc, out _)
+            .Should().Be(OpusStatus.Ok);
+        count.Should().Be(frameCount);
+        (packet[0] & 0x03).Should().Be(code);
+        toc.FrameDuration.Should().Be(OpusFrameDuration.Ms20);
     }
 
     [Fact]

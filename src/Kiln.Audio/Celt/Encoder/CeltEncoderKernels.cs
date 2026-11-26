@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -23,7 +24,7 @@ namespace Kiln.Audio.Celt.Encoder;
 internal static class CeltEncoderKernels
 {
     /// <summary>Pre-emphasis coefficient at 48 kHz (RFC 6716 Appendix A, celt/modes.c: preemph[0]).</summary>
-    internal const float PreEmphasisCoefficient = 0.8500061035f;
+    internal const float PreEmphasisCoefficient = EncKernels.PreEmphasisCoefficient;
 
     /// <summary>Largest sample magnitude the reference passes to the encoder, before clipping.</summary>
     private const float ClipLimit = 65536f;
@@ -56,6 +57,15 @@ internal static class CeltEncoderKernels
         Span<float> memory,
         out bool silent)
     {
+        // The 48 kHz mono path is the common case and has a bit-identical SIMD kernel.
+        if (channels == 1 && upsample == 1 && offset == 0 && stride == frameSamples
+            && SimdConfig.UseSimd && Vector128.IsHardwareAccelerated && pcm.Length >= 16)
+        {
+            ref float state = ref memory[0];
+            EncKernels.PreEmphasis(pcm, destination, ref state, out silent);
+            return;
+        }
+
         bool allZero = true;
         for (int c = 0; c < channels; c++)
         {
@@ -94,6 +104,25 @@ internal static class CeltEncoderKernels
         silent = allZero;
     }
 
+    /// <summary>Scalar reference for the 48 kHz mono pre-emphasis; used by the parity test.</summary>
+    internal static void PreEmphasisScalar(ReadOnlySpan<short> pcm, Span<float> destination, ref float memory, out bool silent)
+    {
+        float state = memory;
+        bool allZero = true;
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            float x = pcm[i];
+            x = x > ClipLimit ? ClipLimit : (x < -ClipLimit ? -ClipLimit : x);
+            float y = x + state;
+            state = -PreEmphasisCoefficient * x;
+            destination[i] = y;
+            allZero &= y == 0f;
+        }
+
+        memory = state;
+        silent = allZero;
+    }
+
     /// <summary>Returns the sum of squares of <paramref name="samples"/> plus the reference epsilon.</summary>
     /// <param name="samples">The band coefficients.</param>
     /// <returns>The energy of one CELT band (RFC 6716 Appendix A, celt/bands.c: compute_band_energies).</returns>
@@ -106,10 +135,11 @@ internal static class CeltEncoderKernels
     /// </summary>
     internal static float BandEnergyScalar(ReadOnlySpan<float> samples)
     {
+        ref float values = ref MemoryMarshal.GetReference(samples);
         float sum = 1e-27f;
         for (int j = 0; j < samples.Length; j++)
         {
-            float value = samples[j];
+            float value = Unsafe.Add(ref values, j);
             sum += value * value;
         }
 
@@ -293,7 +323,14 @@ internal static class CeltEncoderKernels
     /// <param name="n">The vector dimension, at least 2.</param>
     /// <param name="k">The number of pulses, at least 1.</param>
     /// <returns>The total squared norm of the integer vector.</returns>
-    internal static float PvqSearch(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static float PvqSearch(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k) =>
+        SimdConfig.UseSimd && Vector128.IsHardwareAccelerated
+            ? EncPvqKernel.Search(x, iy, signs, y, n, k)
+            : PvqSearchScalar(x, iy, signs, y, n, k);
+
+    /// <summary>Scalar reference for <see cref="PvqSearch"/>.</summary>
+    internal static float PvqSearchScalar(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k)
     {
         for (int j = 0; j < n; j++)
         {
