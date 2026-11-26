@@ -225,6 +225,93 @@ public class SimdParityTests
     }
 
     [Theory]
+    [InlineData(256, 320, 840, 0.5f, 0.5f)]
+    [InlineData(15, 17, 120, 0.7f, 0.3f)]
+    [InlineData(19, 19, 100, 0.25f, 0.75f)]
+    [InlineData(4, 7, 200, 0.5f, 0.5f)]
+    [InlineData(120, 120, 840, 0f, 0.9f)]
+    public void Celt_post_filter_is_bit_exact_between_the_scalar_and_vector_paths(
+        int period0, int period1, int count, float gain0, float gain1)
+    {
+        const int HistorySize = 2048;
+        const int FrameStart = 1088;
+        const int Overlap = 120;
+        var history = new float[HistorySize];
+        FillRandom(history, period0 + (period1 * 31));
+        var windowSquare = new float[Overlap];
+        FillRandom(windowSquare, 5);
+        for (int i = 0; i < Overlap; i++)
+        {
+            windowSquare[i] = windowSquare[i] * windowSquare[i];
+        }
+
+        var vectorHistory = (float[])history.Clone();
+        var scalarHistory = (float[])history.Clone();
+
+        CeltPostFilterKernel.CombFilter(
+            vectorHistory, FrameStart, count, period0, period1, gain0, gain1, 0, 1,
+            windowSquare, Overlap, useVector: true);
+        CeltPostFilterKernel.CombFilter(
+            scalarHistory, FrameStart, count, period0, period1, gain0, gain1, 0, 1,
+            windowSquare, Overlap, useVector: false);
+
+        Assert.Equal(scalarHistory, vectorHistory);
+    }
+
+    [Theory]
+    [InlineData(10)]
+    [InlineData(16)]
+    public void Silk_lpc_kernel_is_bit_exact_between_the_scalar_and_vector_paths(int order)
+    {
+        const int SubframeLength = 80;
+        const int MaxOrder = 16;
+        var initialLpc = new int[MaxOrder + SubframeLength];
+        var coefficients = new short[order];
+        var residual = new int[SubframeLength];
+        var vectorOutput = new short[SubframeLength];
+        var scalarOutput = new short[SubframeLength];
+        var vectorState = new int[initialLpc.Length];
+        var scalarState = new int[initialLpc.Length];
+
+        for (int seed = 0; seed < 5; seed++)
+        {
+            var random = new Random(seed + 900);
+            for (int i = 0; i < initialLpc.Length; i++)
+            {
+                initialLpc[i] = seed switch
+                {
+                    0 => random.Next(-1 << 20, 1 << 20),
+                    1 => (int)random.NextInt64(int.MinValue, (long)int.MaxValue + 1),
+                    2 => i % 3 == 0 ? int.MaxValue : int.MinValue,
+                    _ => (int)(random.NextInt64(int.MinValue, (long)int.MaxValue + 1)),
+                };
+            }
+
+            for (int j = 0; j < order; j++)
+            {
+                coefficients[j] = (short)random.Next(short.MinValue, short.MaxValue + 1);
+            }
+
+            for (int i = 0; i < SubframeLength; i++)
+            {
+                residual[i] = (int)(random.NextInt64(int.MinValue, (long)int.MaxValue + 1));
+            }
+
+            initialLpc.CopyTo(vectorState, 0);
+            initialLpc.CopyTo(scalarState, 0);
+            int gainQ10 = random.Next(1, 1 << 24);
+
+            SilkLpcKernel.SynthesizeVector(
+                vectorState, coefficients, residual, gainQ10, order, SubframeLength, vectorOutput);
+            SilkLpcKernel.SynthesizeScalar(
+                scalarState, coefficients, residual, gainQ10, order, SubframeLength, scalarOutput);
+
+            Assert.Equal(scalarState, vectorState);
+            Assert.Equal(scalarOutput, vectorOutput);
+        }
+    }
+
+    [Theory]
     [InlineData("1", true)]
     [InlineData("true", true)]
     [InlineData("TRUE", true)]

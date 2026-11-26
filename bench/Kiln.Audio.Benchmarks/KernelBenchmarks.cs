@@ -2,6 +2,7 @@ using BenchmarkDotNet.Attributes;
 using Kiln.Audio.Celt;
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Silk;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Benchmarks;
 
@@ -174,21 +175,14 @@ public class KernelBenchmarks
         int offset = 0;
         for (int k = 0; k < Subframes; k++)
         {
-            for (int i = 0; i < SubframeLength; i++)
-            {
-                int predictionQ10 = SilkFixedPoint.Rshift(LpcOrder, 1);
-                for (int j = 0; j < LpcOrder; j++)
-                {
-                    predictionQ10 = SilkFixedPoint.Smlawb(
-                        predictionQ10, _lpcState[LpcOrder + i - 1 - j], _lpcCoefficients[j]);
-                }
-
-                _lpcState[LpcOrder + i] = SilkFixedPoint.Add(
-                    _residual[i], SilkFixedPoint.Lshift(predictionQ10, 4));
-                _lpcOutput[offset + i] = (short)SilkFixedPoint.Sat16(
-                    SilkFixedPoint.RshiftRound(
-                        SilkFixedPoint.Smulww(_lpcState[LpcOrder + i], _gainQ10), 8));
-            }
+            SilkLpcKernel.Synthesize(
+                _lpcState,
+                _lpcCoefficients,
+                _residual,
+                _gainQ10,
+                LpcOrder,
+                SubframeLength,
+                _lpcOutput.AsSpan(offset));
 
             Array.Copy(_lpcState, SubframeLength, _lpcState, 0, LpcOrder);
             offset += SubframeLength;
