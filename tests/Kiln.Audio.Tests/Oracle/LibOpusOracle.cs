@@ -12,7 +12,7 @@ namespace Kiln.Audio.Tests.Oracle;
 /// <c>opus_demo</c> decodes packets and <c>opus_compare</c> scores PCM. Test-only; nothing under
 /// <c>src/</c> may reference libopus.
 /// </summary>
-internal static class LibOpusOracle
+internal static partial class LibOpusOracle
 {
     private const string DirectoryVariable = "KILN_AUDIO_ORACLE_DIR";
     private const int ProcessTimeoutMilliseconds = 10 * 60 * 1000;

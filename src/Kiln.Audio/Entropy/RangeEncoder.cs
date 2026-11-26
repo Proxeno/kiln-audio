@@ -21,6 +21,7 @@ internal ref struct RangeEncoder
     private const int BitRes = RangeDecoder.BitRes;
 
     private readonly Span<byte> _buffer;
+    private int _storage;
     private int _offs;
     private int _endOffs;
     private ulong _endWindow;
@@ -32,6 +33,7 @@ internal ref struct RangeEncoder
     private int _ext;
     private bool _error;
     private bool _done;
+    private int _frameBytes;
 
     /// <summary>
     /// Initializes the encoder over a caller-owned output buffer (RFC 6716 §5.1).
@@ -40,6 +42,7 @@ internal ref struct RangeEncoder
     public RangeEncoder(Span<byte> buffer)
     {
         _buffer = buffer;
+        _storage = buffer.Length;
         _offs = 0;
         _endOffs = 0;
         _endWindow = 0;
@@ -52,6 +55,7 @@ internal ref struct RangeEncoder
         _ext = 0;
         _error = false;
         _done = false;
+        _frameBytes = 0;
     }
 
     /// <summary>Gets a value indicating whether the output buffer overflowed (RFC 6716 §5.1.5).</summary>
@@ -60,8 +64,14 @@ internal ref struct RangeEncoder
     /// <summary>Gets the current range size (RFC 6716 §5.1.1, <c>rng</c>).</summary>
     public readonly uint Rng => _rng;
 
-    /// <summary>Gets the number of bytes written to the frame so far (range bytes plus raw bytes).</summary>
-    public readonly int RangeBytes => _offs + _endOffs;
+    /// <summary>
+    /// Gets the number of bytes the frame occupies (range bytes plus raw bytes).
+    /// </summary>
+    /// <remarks>
+    /// Before <see cref="Done"/> this counts the bytes handed to the buffer so far. Once the
+    /// stream is finalized it counts the partial raw-bit byte as well.
+    /// </remarks>
+    public readonly int RangeBytes => _done ? _frameBytes : _offs + _endOffs;
 
     /// <summary>
     /// Returns the number of whole bits used so far (RFC 6716 §5.1.6).
@@ -248,9 +258,10 @@ internal ref struct RangeEncoder
     /// (RFC 6716 §5.1.5).
     /// </summary>
     /// <remarks>
-    /// A value is chosen with as many trailing zero bits as the current range permits, so that any
-    /// raw bits that follow are harmless. The partial raw-bit byte is then written at the end of
-    /// the buffer and the gap between the two regions is zero-filled.
+    /// The encoder emits the shortest aligned value inside [val, val + rng) that decodes correctly
+    /// for any following bits. It then flushes the buffered range byte and the raw-bit bytes. When
+    /// the two regions meet, the remaining partial raw-bit byte is ORed into the last byte of the
+    /// frame (which may be the last range-coded byte), and the gap between the regions is zeroed.
     /// </remarks>
     public void Done()
     {
@@ -261,56 +272,110 @@ internal ref struct RangeEncoder
 
         _done = true;
 
-        uint end = ChooseEnd(_val, _rng);
-        while (end != 0)
+        // RFC 6716 §5.1.5: start with the shortest value ending at a power-of-two boundary, then
+        // fall back one bit if that value is not strictly below val + rng.
+        int l = RangeDecoder.EcCodeBits - Ilog(_rng);
+        uint msk = (CodeTop - 1) >> l;
+        uint end = (_val + msk) & ~msk;
+        if ((end | msk) >= _val + _rng)
+        {
+            l++;
+            msk >>= 1;
+            end = (_val + msk) & ~msk;
+        }
+
+        // Emit the chosen value, one renormalization symbol at a time, until the bit count is spent.
+        while (l > 0)
         {
             CarryOut(end >> 23);
             end = (end << SymBits) & (CodeTop - 1);
+            l -= SymBits;
         }
 
-        if (_rem != 0 || _ext > 0)
+        // A buffered byte exists whenever rem >= 0; ext > 0 means a byte may still receive a carry.
+        if (_rem >= 0 || _ext > 0)
         {
             CarryOut(0);
         }
 
-        if (_nendBits > 0)
+        // Flush any whole raw-bit bytes still held in the window.
+        uint window = (uint)_endWindow;
+        int used = _nendBits;
+        while (used >= SymBits)
         {
-            WriteByteAtEnd((byte)(_endWindow & SymMax));
-            _endWindow = 0;
-            _nendBits = 0;
+            WriteByteAtEnd((byte)(window & SymMax));
+            window >>= SymBits;
+            used -= SymBits;
         }
 
-        int gapEnd = _buffer.Length - _endOffs;
-        for (int i = _offs; i < gapEnd; i++)
+        if (!_error)
         {
-            _buffer[i] = 0;
+            // Zero the gap between the two regions before placing the partial raw-bit byte.
+            int gapEnd = _storage - _endOffs;
+            if (gapEnd > _offs)
+            {
+                _buffer.Slice(_offs, gapEnd - _offs).Clear();
+            }
+
+            if (used > 0)
+            {
+                if (_endOffs >= _storage)
+                {
+                    // No room for raw bits at all.
+                    _error = true;
+                }
+                else
+                {
+                    // l <= 0 counts the unused low bits of the last emitted range byte; raw bits
+                    // may share those bits. If the frame is already full and they do not fit,
+                    // keep the range data intact and report the overflow.
+                    int freeBits = -l;
+                    if (_offs + _endOffs >= _storage && freeBits < used)
+                    {
+                        window &= (1u << freeBits) - 1u;
+                        _error = true;
+                    }
+
+                    _buffer[_storage - _endOffs - 1] |= (byte)window;
+                }
+            }
+        }
+
+        _frameBytes = _offs + _endOffs;
+        if (!_error && used > 0 && _offs + _endOffs < _storage)
+        {
+            _frameBytes++;
         }
     }
 
     /// <summary>
-    /// Chooses the final value <c>end</c> in [val, val + rng) with the most trailing zero bits such
-    /// that a whole aligned block of that size still fits in the interval (RFC 6716 §5.1.5).
+    /// Shrinks the usable frame to <paramref name="size"/> bytes, moving the raw bits at the end of
+    /// the buffer so that they stay at the end (RFC 6716 §5.1.5).
     /// </summary>
-    private static uint ChooseEnd(uint val, uint rng)
+    /// <remarks>
+    /// The CELT VBR encoder uses this when it learns the final packet size after some symbols have
+    /// already been written. The caller must guarantee that everything written so far fits.
+    /// </remarks>
+    /// <param name="size">The new frame size in bytes, at least the number of bytes already written.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="size"/> is smaller than the bytes already written or larger than the current storage.
+    /// </exception>
+    public void Shrink(int size)
     {
-        ulong lo = val;
-        ulong bestEnd = lo;
-        for (int b = 0; b <= 31; b++)
+        if (size < _offs + _endOffs || size > _storage)
         {
-            ulong block = 1UL << b;
-            if (block > rng)
-            {
-                break;
-            }
-
-            ulong candidate = ((lo + block - 1) / block) * block;
-            if (candidate - lo + block <= rng)
-            {
-                bestEnd = candidate;
-            }
+            throw new ArgumentOutOfRangeException(
+                nameof(size), size, "The new size must hold the bytes already written and not exceed the current storage.");
         }
 
-        return (uint)bestEnd;
+        if (size == _storage)
+        {
+            return;
+        }
+
+        // Moving to a lower offset; Span.CopyTo behaves like memmove for overlapping ranges.
+        _buffer.Slice(_storage - _endOffs, _endOffs).CopyTo(_buffer.Slice(size - _endOffs, _endOffs));
+        _storage = size;
     }
 
     /// <summary>Renormalizes the range encoder (RFC 6716 §5.1.1.1).</summary>
@@ -359,7 +424,7 @@ internal ref struct RangeEncoder
     /// <summary>Writes one range-coded byte at the front of the buffer (RFC 6716 §5.1.1.2).</summary>
     private void WriteByte(byte value)
     {
-        if (_offs + _endOffs >= _buffer.Length)
+        if (_offs + _endOffs >= _storage)
         {
             _error = true;
             return;
@@ -372,14 +437,14 @@ internal ref struct RangeEncoder
     /// <summary>Writes one raw-bit byte at the back of the buffer (RFC 6716 §5.1.3).</summary>
     private void WriteByteAtEnd(byte value)
     {
-        if (_offs + _endOffs >= _buffer.Length)
+        if (_offs + _endOffs >= _storage)
         {
             _error = true;
             return;
         }
 
         _endOffs++;
-        _buffer[_buffer.Length - _endOffs] = value;
+        _buffer[_storage - _endOffs] = value;
     }
 
     /// <summary>Returns <c>ilog(x)</c>: the number of bits needed to represent <c>x</c>, for <c>x &gt; 0</c>.</summary>
