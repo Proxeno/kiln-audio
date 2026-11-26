@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
 
@@ -40,9 +41,16 @@ internal readonly record struct Complex32(float Real, float Imag)
 /// in place for each <c>p</c>.
 /// </para>
 /// <para>
-/// The transform is out of place and stateless: all twiddle tables are immutable, so instances
-/// returned by <see cref="Get"/> may be shared across threads. Execute allocates nothing. The
-/// input and output spans must not overlap.
+/// The combine stage is delegated to <see cref="FftKernels"/>, which has a scalar reference path
+/// and a <c>Vector128</c> path (radix 2, 3, 4 and 5) over separate real/imaginary arrays. The
+/// kernel is the structural change from the PERF-0 reference: the generic <c>r * r</c> small-DFT
+/// multiply loop is gone, replaced by the fixed radix-4/2/3/5 butterflies, and the transform is
+/// held in a structure-of-arrays layout so the vector path needs no lane shuffles.
+/// </para>
+/// <para>
+/// The transform is out of place and stateless: all twiddle tables are immutable and the working
+/// buffers are <c>stackalloc</c>-ed per call, so instances returned by <see cref="Get"/> may be
+/// shared across threads. Execute allocates nothing. The input and output spans must not overlap.
 /// </para>
 /// </remarks>
 internal sealed class Fft
@@ -51,46 +59,98 @@ internal sealed class Fft
 
     private readonly int _size;
     private readonly int[] _radices;
-    private readonly Complex32[][] _twiddles;
-    private readonly Complex32[][] _smallDfts;
+    private readonly int[] _halves;
+    private readonly int[] _nodeCounts;
+    private readonly int[] _leafDestination;
+    private readonly int[][] _nodeOffsets;
+    private readonly float[][] _twiddleReal;
+    private readonly float[][] _twiddleImaginary;
+    private readonly float[][] _twiddleRealConjugate;
+    private readonly float[][] _twiddleImaginaryConjugate;
 
     private Fft(int size)
     {
         _size = size;
         _radices = Factor(size);
         int levels = _radices.Length;
-        _twiddles = new Complex32[levels][];
-        _smallDfts = new Complex32[levels][];
+        _halves = new int[levels];
+        _nodeCounts = new int[levels];
+        _twiddleReal = new float[levels][];
+        _twiddleImaginary = new float[levels][];
+        _twiddleRealConjugate = new float[levels][];
+        _twiddleImaginaryConjugate = new float[levels][];
 
         int n = size;
+        int nodes = 1;
         for (int level = 0; level < levels; level++)
         {
             int radix = _radices[level];
-            int m = n / radix;
+            int half = n / radix;
+            _halves[level] = half;
+            _nodeCounts[level] = nodes;
+            nodes *= radix;
 
-            // Twiddle W_n^(s*p) for the r-way combine, stored as [p*r + s].
-            var twiddles = new Complex32[radix * m];
-            for (int p = 0; p < m; p++)
+            // Twiddle W_n^(s*p), stored per source index as [s*half + p] so consecutive p values
+            // are contiguous. The conjugate tables serve the inverse transform directly.
+            var real = new float[radix * half];
+            var imaginary = new float[radix * half];
+            var realConjugate = new float[radix * half];
+            var imaginaryConjugate = new float[radix * half];
+            for (int s = 0; s < radix; s++)
             {
-                for (int s = 0; s < radix; s++)
+                for (int p = 0; p < half; p++)
                 {
-                    twiddles[(p * radix) + s] = UnitRoot(s * p, n);
+                    Complex32 root = UnitRoot(s * p, n);
+                    int index = (s * half) + p;
+                    real[index] = root.Real;
+                    imaginary[index] = root.Imag;
+                    realConjugate[index] = root.Real;
+                    imaginaryConjugate[index] = -root.Imag;
                 }
             }
 
-            // The radix-point DFT kernel W_r^(s*q), stored as [q*r + s].
-            var smallDft = new Complex32[radix * radix];
-            for (int q = 0; q < radix; q++)
+            _twiddleReal[level] = real;
+            _twiddleImaginary[level] = imaginary;
+            _twiddleRealConjugate[level] = realConjugate;
+            _twiddleImaginaryConjugate[level] = imaginaryConjugate;
+            n = half;
+        }
+
+        // Precompute the leaf permutation and the node offsets so Execute has no mixed-radix
+        // division in its inner loops.
+        _leafDestination = new int[size];
+        for (int leaf = 0; leaf < size; leaf++)
+        {
+            int remaining = leaf;
+            int destination = 0;
+            for (int level = 0; level < levels; level++)
             {
-                for (int s = 0; s < radix; s++)
-                {
-                    smallDft[(q * radix) + s] = UnitRoot(s * q, radix);
-                }
+                destination += (remaining % _radices[level]) * _halves[level];
+                remaining /= _radices[level];
             }
 
-            _twiddles[level] = twiddles;
-            _smallDfts[level] = smallDft;
-            n = m;
+            _leafDestination[leaf] = destination;
+        }
+
+        _nodeOffsets = new int[levels][];
+        for (int level = 0; level < levels; level++)
+        {
+            int nodeCount = _nodeCounts[level];
+            var offsets = new int[nodeCount];
+            for (int node = 0; node < nodeCount; node++)
+            {
+                int remaining = node;
+                int offset = 0;
+                for (int m = 0; m < level; m++)
+                {
+                    offset += (remaining % _radices[m]) * _halves[m];
+                    remaining /= _radices[m];
+                }
+
+                offsets[node] = offset;
+            }
+
+            _nodeOffsets[level] = offsets;
         }
     }
 
@@ -118,7 +178,25 @@ internal sealed class Fft
             throw new ArgumentException("The output is shorter than the transform size.", nameof(output));
         }
 
-        Transform(input, 0, 1, output, 0, _size, 0, inverse: false);
+        Execute(input, output, inverse: false, SimdConfig.UseSimd);
+    }
+
+    /// <summary>Forward transform on the scalar path, used by the parity tests.</summary>
+    /// <param name="input">The input, at least <see cref="Size"/> samples.</param>
+    /// <param name="output">The output, at least <see cref="Size"/> samples.</param>
+    internal void ForwardScalar(ReadOnlySpan<Complex32> input, Span<Complex32> output)
+    {
+        if (input.Length < _size)
+        {
+            throw new ArgumentException("The input is shorter than the transform size.", nameof(input));
+        }
+
+        if (output.Length < _size)
+        {
+            throw new ArgumentException("The output is shorter than the transform size.", nameof(output));
+        }
+
+        Execute(input, output, inverse: false, useVector: false);
     }
 
     /// <summary>Computes the inverse transform <c>x[n] = (1/N) sum_k X[k] e^(+i*2*pi*n*k/N)</c>.</summary>
@@ -136,12 +214,120 @@ internal sealed class Fft
             throw new ArgumentException("The output is shorter than the transform size.", nameof(output));
         }
 
-        Transform(input, 0, 1, output, 0, _size, 0, inverse: true);
+        Execute(input, output, inverse: true, SimdConfig.UseSimd);
+        Scale(output);
+    }
+
+    /// <summary>Inverse transform on the scalar path, used by the parity tests.</summary>
+    /// <param name="input">The input, at least <see cref="Size"/> samples.</param>
+    /// <param name="output">The output, at least <see cref="Size"/> samples.</param>
+    internal void InverseScalar(ReadOnlySpan<Complex32> input, Span<Complex32> output)
+    {
+        if (input.Length < _size)
+        {
+            throw new ArgumentException("The input is shorter than the transform size.", nameof(input));
+        }
+
+        if (output.Length < _size)
+        {
+            throw new ArgumentException("The output is shorter than the transform size.", nameof(output));
+        }
+
+        Execute(input, output, inverse: true, useVector: false);
+        Scale(output);
+    }
+
+    private void Scale(Span<Complex32> output)
+    {
         float scale = 1f / _size;
         for (int i = 0; i < _size; i++)
         {
             Complex32 value = output[i];
             output[i] = new Complex32(value.Real * scale, value.Imag * scale);
+        }
+    }
+
+    private void Execute(ReadOnlySpan<Complex32> input, Span<Complex32> output, bool inverse, bool useVector)
+    {
+        // Stack working buffers keep Execute allocation-free. The sizes the CELT MDCT asks for
+        // are at most 8192; above that fall back to a heap buffer (never hit in practice).
+        Span<float> sourceReal = _size <= 8192 ? stackalloc float[_size] : new float[_size];
+        Span<float> sourceImaginary = _size <= 8192 ? stackalloc float[_size] : new float[_size];
+        Span<float> outputReal = _size <= 8192 ? stackalloc float[_size] : new float[_size];
+        Span<float> outputImaginary = _size <= 8192 ? stackalloc float[_size] : new float[_size];
+
+        for (int i = 0; i < _size; i++)
+        {
+            Complex32 value = input[i];
+            sourceReal[i] = value.Real;
+            sourceImaginary[i] = value.Imag;
+        }
+
+        TransformCore(sourceReal, sourceImaginary, outputReal, outputImaginary, inverse, useVector);
+
+        for (int i = 0; i < _size; i++)
+        {
+            output[i] = new Complex32(outputReal[i], outputImaginary[i]);
+        }
+    }
+
+    /// <summary>
+    /// Runs the transform on separate real and imaginary buffers, so callers that already hold
+    /// structure-of-arrays data (the MDCT twiddle stages) avoid the interleave/deinterleave copies.
+    /// </summary>
+    /// <param name="sourceReal">The input real parts.</param>
+    /// <param name="sourceImaginary">The input imaginary parts.</param>
+    /// <param name="outputReal">Receives the output real parts.</param>
+    /// <param name="outputImaginary">Receives the output imaginary parts.</param>
+    /// <param name="inverse">Whether to compute the inverse transform.</param>
+    /// <param name="useVector">Whether the vector combine path may be used.</param>
+    internal void Transform(
+        ReadOnlySpan<float> sourceReal,
+        ReadOnlySpan<float> sourceImaginary,
+        Span<float> outputReal,
+        Span<float> outputImaginary,
+        bool inverse,
+        bool useVector) =>
+        TransformCore(sourceReal, sourceImaginary, outputReal, outputImaginary, inverse, useVector);
+
+    private void TransformCore(
+        ReadOnlySpan<float> sourceReal,
+        ReadOnlySpan<float> sourceImaginary,
+        Span<float> outputReal,
+        Span<float> outputImaginary,
+        bool inverse,
+        bool useVector)
+    {
+        // Place the input in the decimation-in-time leaf order, then run the combine stages
+        // bottom-up. This is the recursion of a mixed-radix Cooley-Tukey transform written as
+        // loops: leaf `l` has digits (s0, s1, ...) with l = s0 + s1*r0 + ..., reads source
+        // sample l, and writes destination index sum(s_m * half_m).
+        int levels = _radices.Length;
+        int[] leafDestination = _leafDestination;
+        for (int leaf = 0; leaf < _size; leaf++)
+        {
+            int destination = leafDestination[leaf];
+            outputReal[destination] = sourceReal[leaf];
+            outputImaginary[destination] = sourceImaginary[leaf];
+        }
+
+        for (int level = levels - 1; level >= 0; level--)
+        {
+            ReadOnlySpan<float> twiddleReal = inverse ? _twiddleRealConjugate[level] : _twiddleReal[level];
+            ReadOnlySpan<float> twiddleImaginary = inverse
+                ? _twiddleImaginaryConjugate[level]
+                : _twiddleImaginary[level];
+
+            FftKernels.CombineMany(
+                _radices[level],
+                outputReal,
+                outputImaginary,
+                _nodeOffsets[level],
+                _halves[level],
+                twiddleReal,
+                twiddleImaginary,
+                inverse,
+                useVector);
         }
     }
 
@@ -194,71 +380,4 @@ internal sealed class Fft
         return new Complex32((float)Math.Cos(angle), (float)Math.Sin(angle));
     }
 
-    private void Transform(
-        ReadOnlySpan<Complex32> source,
-        int sourceOffset,
-        int sourceStep,
-        Span<Complex32> destination,
-        int destinationOffset,
-        int length,
-        int level,
-        bool inverse)
-    {
-        if (length == 1)
-        {
-            destination[destinationOffset] = source[sourceOffset];
-            return;
-        }
-
-        int radix = _radices[level];
-        int half = length / radix;
-
-        // Transform each stride-radix subsequence into its own contiguous region.
-        for (int s = 0; s < radix; s++)
-        {
-            Transform(
-                source,
-                sourceOffset + (s * sourceStep),
-                sourceStep * radix,
-                destination,
-                destinationOffset + (s * half),
-                half,
-                level + 1,
-                inverse);
-        }
-
-        Complex32[] twiddles = _twiddles[level];
-        Complex32[] smallDft = _smallDfts[level];
-        Span<Complex32> values = stackalloc Complex32[radix];
-        Span<Complex32> combined = stackalloc Complex32[radix];
-
-        for (int p = 0; p < half; p++)
-        {
-            for (int s = 0; s < radix; s++)
-            {
-                Complex32 value = destination[destinationOffset + (s * half) + p];
-                Complex32 twiddle = twiddles[(p * radix) + s];
-                values[s] = inverse ? Complex32.MultiplyConjugate(value, twiddle) : value * twiddle;
-            }
-
-            for (int q = 0; q < radix; q++)
-            {
-                Complex32 accumulator = default;
-                for (int s = 0; s < radix; s++)
-                {
-                    Complex32 kernel = smallDft[(q * radix) + s];
-                    accumulator += inverse
-                        ? Complex32.MultiplyConjugate(values[s], kernel)
-                        : values[s] * kernel;
-                }
-
-                combined[q] = accumulator;
-            }
-
-            for (int q = 0; q < radix; q++)
-            {
-                destination[destinationOffset + p + (half * q)] = combined[q];
-            }
-        }
-    }
 }
