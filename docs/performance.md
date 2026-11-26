@@ -522,3 +522,109 @@ overload and the float overload. `EncoderAllocationTests` proves this with
    and the iso-quality target is met by 2.5-3.6x. Nothing further is needed there for ENC-PERF-1.
 5. **Front end.** Pre-emphasis, band energy and normalise are now equal to or below 0.4 µs each;
    band energy deliberately keeps its scalar summation order because it feeds the bitstream.
+
+## SILK encoder quality
+
+This section records the SILK encoder's quality against libopus 1.5.2, the methodology, and what
+SILK-QUAL-1 changed. It is evidence, not a CI gate; the gate lives in `SilkEncoderQualityTests`.
+
+### Method
+
+- Corpus: the mono downmix of RFC 8251 vectors 02, 03, 04 and 06, which is the corpus SILK-ENC-1
+  used. Tuning decisions were checked on vectors 04 and 06 as a held-out pair.
+- Reference: `IdealResampler` (windowed-sinc, zero delay) resamples the 48 kHz original to the
+  codec's internal rate (8, 12 or 16 kHz). It is independent of the encoder's own resampler.
+- Both codecs' packets are decoded by the libopus oracle at the internal rate and scored with
+  aggregate segmental SNR (20 ms segments, clamped to [-10, 60] dB). The decode is aligned to the
+  reference above 150 Hz, where both codecs encode the same content; the encoder's own high-pass
+  (60-100 Hz) makes full-band alignment ill-conditioned. The delay search is coarse-to-fine
+  (step 8 then step 1).
+- `opus_compare` quality percent is not yet reported: the harness has no working mono path.
+
+The earlier SILK-ENC-1 harness searched delays on a fixed four-sample grid and used the encoder's
+own resampler as the reference. At 12 kHz that misaligned up to two samples and understated every
+band; the numbers below supersede it and are not comparable with the SILK-ENC-1 report.
+
+### Results at complexity 0 (the gate)
+
+`ours` and `libopus` are aggregate segmental SNR in dB over the four vectors; positive `gap` means
+we beat libopus.
+
+| Band | Frame | kbps | ours | libopus | gap |
+| ---- | ----- | ---- | ---- | ------- | --- |
+| NB | 20 ms | 8  | 3.64 | 3.60 | +0.04 |
+| NB | 60 ms | 8  | 3.72 | 3.64 | +0.08 |
+| NB | 20 ms | 12 | 5.03 | 5.51 | -0.48 |
+| NB | 60 ms | 12 | 5.08 | 5.49 | -0.41 |
+| MB | 20 ms | 8  | 3.52 | 2.77 | +0.75 |
+| MB | 60 ms | 8  | 3.64 | 2.81 | +0.83 |
+| MB | 20 ms | 12 | 5.07 | 5.01 | +0.06 |
+| MB | 60 ms | 12 | 5.10 | 4.84 | +0.26 |
+| MB | 20 ms | 20 | 6.16 | 6.73 | -0.57 |
+| MB | 60 ms | 20 | 6.11 | 6.72 | -0.61 |
+| WB | 20 ms | 8  | 3.17 | 1.71 | +1.47 |
+| WB | 60 ms | 8  | 3.35 | 1.77 | +1.58 |
+| WB | 20 ms | 12 | 4.57 | 4.50 | +0.07 |
+| WB | 60 ms | 12 | 4.60 | 4.37 | +0.23 |
+| WB | 20 ms | 20 | 6.14 | 6.44 | -0.30 |
+| WB | 60 ms | 20 | 6.08 | 6.43 | -0.35 |
+
+Ten of sixteen complexity-0 configurations meet the target; six remain 0.30-0.61 dB behind (NB
+12 kbps, and MB/WB 20 kbps). Before SILK-QUAL-1, all sixteen were behind by 0.01-0.90 dB.
+
+### Complexity 5 and 10
+
+Complexity 5 and 10 are reported, not gated. The delayed-decision quantizer and warped shaping pay
+off most at the low rates: for example WB 8 kbps 20 ms rises from 1.53 dB (greedy NSQ, complexity
+5) to 2.81 dB, and 1.60 to 3.27 dB at complexity 10; MB 8 kbps 60 ms rises from 2.23 to 3.21 dB at
+complexity 5. At complexity 5 and 10 the remaining gap to libopus is 0.1-0.9 dB across the matrix
+(e.g. WB 8 kbps 60 ms -0.10 dB, MB 20 kbps -0.75 dB).
+
+### What changed
+
+1. **Delayed-decision NSQ at every complexity.** `SilkEncoderCore` now always runs
+   `SilkNsqDelayedDecision` instead of the greedy `SilkNsq`, with trellis snapshots for the rate
+   loop. Complexity 2-3 use one state, 4-5 two, 6-7 three and 8-10 four, as in the reference;
+   complexity 0-1 use four states here (the reference uses one). The winner's LCG seed is written
+   back to the frame indices; without that the transmitted seed does not match the surviving
+   state's sign pattern and multi-state output decodes as noise.
+2. **Warped noise shaping everywhere.** `WarpingQ16 = fs_kHz * 0.015` is now on at every
+   complexity (the reference only enables it from complexity 4), now that the quantizer supports
+   it.
+3. **Higher resolution at complexity 0.** NLSF MSVQ survivors rise from 2 to 8 and the low
+   complexity LTP quantizer is disabled at complexity 0, which is where the 8 and 12 kbps gains
+   come from.
+4. **Spending the 20 kbps budget.** The RFC 1.0 target-rate table leaves about 2 kbps unused at
+   20 kbps. The target SNR now rises by up to 3 dB above 14 kbps, which brings bit usage to
+   ~48.9 bytes per 20 ms frame (19.6 kbps) and recovers 0.1-0.2 dB. A larger boost overfills the
+   budget and loses quality at 60 ms, so 3 dB is the chosen point.
+
+### Encode cost
+
+Measured with a stopwatch over the whole vector 02 corpus (1251 frames of 20 ms, MB, 20 kbps) on
+the shared build machine, so treat the numbers as indicative:
+
+| Complexity | Greedy NSQ (before) | Delayed decision (after) | Ratio |
+| ---------- | ------------------- | ------------------------ | ----- |
+| 0 | 71.8 µs/frame | 83.4-85.5 µs/frame | 1.16-1.19x |
+| 5 | 268 µs/frame | 274 µs/frame | ~1.02x (within run-to-run noise) |
+
+Both are inside the 1.5x budget. Allocations remain zero per frame and the bitstream stays valid
+(`SilkEncoderInteropTests`, `SilkEncoderSmokeTests`, `SilkEncoderAllocationTests`).
+
+### Remaining gap and next ideas
+
+The six failing complexity-0 cases are NB 12 kbps and MB/WB 20 kbps, 0.3-0.6 dB behind. The
+quantizer search is no longer the limiter (four states at complexity 0 already match complexity
+10); the gap is in the analysis and the rate control at high rates.
+
+1. **Rate-distortion index selection** for gains, LTP and NLSFs, instead of nearest-index plus a
+   global gain multiplier. The 20 kbps gap is where a weighted error-plus-lambda·bits criterion
+   should pay.
+2. **Noise shaping tuning by bitrate and activity**, searched on a training split and validated on
+   held-out vectors. The harmonic/tilt/low-frequency strengths are still the RFC 1.0 constants.
+3. **Per-frame bit allocation across 40/60 ms packets and the bit reservoir**, favouring voiced
+   onsets. The 60 ms cases are consistently the weaker ones at 20 kbps.
+4. **LPC analysis** (windowing, noise-floor regularization, Burg conditioning). The remaining
+   high-rate error is broad-band, which points at the short-term predictor rather than the
+   excitation.
