@@ -41,7 +41,7 @@ internal sealed class CeltOutput
         _apiChannels = apiChannels;
         _downsample = 48000 / apiRate;
         _decoder = new CeltDecoder(apiChannels);
-        _synthesizer = new CeltSynthesizer(apiChannels);
+        _synthesizer = new CeltSynthesizer(apiChannels, downsample: _downsample);
         _pcm48 = new float[MaxCeltSamples48 * apiChannels];
 
         float[] window = CeltWindow.Create(CeltWindow.DefaultOverlap);

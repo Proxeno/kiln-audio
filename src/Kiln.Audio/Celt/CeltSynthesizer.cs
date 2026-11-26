@@ -41,6 +41,7 @@ internal sealed class CeltSynthesizer
     private const int MaxFrameSamples = CeltTables.MaxFrameSamples;
 
     private readonly int _outputChannels;
+    private readonly int _downsample;
     private readonly Mdct _shortMdct;
     private readonly Mdct[] _mdct = new Mdct[4];
     private readonly float[] _freq = new float[2 * MaxFrameSamples];
@@ -52,16 +53,29 @@ internal sealed class CeltSynthesizer
     private readonly float[] _deemphasis = new float[2];
     private readonly float[] _windowSquare = new float[Overlap];
 
-    /// <summary>Initializes a synthesizer for the given output channel count.</summary>
+    /// <summary>Initializes a synthesizer for the given output channel count and decimation.</summary>
     /// <param name="outputChannels">Output channels, 1 or 2.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="outputChannels"/> is not 1 or 2.</exception>
-    internal CeltSynthesizer(int outputChannels)
+    /// <param name="downsample">
+    /// The 48 kHz-to-API-rate factor, 1, 2, 3, 4 or 6. The reference zeroes the spectrum above the
+    /// API Nyquist frequency before synthesis when it decimates (RFC 6716 Appendix A,
+    /// <c>celt_decode_with_ec</c>); this must match <see cref="_downsample"/>.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException">A parameter is outside its legal range.</exception>
+    internal CeltSynthesizer(int outputChannels, int downsample = 1)
     {
         if (outputChannels is not (1 or 2))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(outputChannels), outputChannels, "Output channels must be 1 or 2.");
         }
+
+        if (downsample is not (1 or 2 or 3 or 4 or 6))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(downsample), downsample, "The decimation factor must be 1, 2, 3, 4 or 6.");
+        }
+
+        _downsample = downsample;
 
         _outputChannels = outputChannels;
         _shortMdct = new Mdct(CeltTables.ShortBlockSamples);
@@ -194,6 +208,18 @@ internal sealed class CeltSynthesizer
                 {
                     freq[(channel * samples) + j] = frame.Spectrum[(channel * samples) + j] * gain;
                 }
+            }
+        }
+
+        // RFC 6716 Appendix A, celt_decode_with_ec: when the output is decimated, zero the
+        // spectrum above the output Nyquist frequency before synthesis so that nothing aliases
+        // into the lower bands. This happens before the stereo-to-mono downmix.
+        if (_downsample > 1)
+        {
+            int bound = samples / _downsample;
+            for (int channel = 0; channel < streamChannels; channel++)
+            {
+                freq.Slice((channel * samples) + bound, samples - bound).Clear();
             }
         }
 

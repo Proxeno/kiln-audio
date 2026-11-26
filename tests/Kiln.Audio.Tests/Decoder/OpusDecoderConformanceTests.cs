@@ -25,6 +25,30 @@ public class OpusDecoderConformanceTests
 {
     private const int ReferenceRate = 48000;
 
+    // Regression floors for the mono comparison, one row per vector and columns 48 kHz / 16 kHz.
+    // These are measured values minus 1 dB, not quality gates: RFC 6716 §4.2.9 makes the SILK
+    // resampler non-normative, and at 48 kHz the reference decoder's own 1-channel output is
+    // 16-20 dB away from the average of its 2-channel output for SILK/hybrid/PLC content (its
+    // fixed-point resampler and concealment are not linear), so the mono metric is bounded by
+    // those differences. The 16 kHz CELT/hybrid results are essentially exact after the
+    // spectral band-limit before decimation (Appendix A, celt_decode_with_ec), and the exact
+    // rows use 100 dB as the sentinel for "bit-identical".
+    private static readonly double[,] MonoSnrFloor =
+    {
+        { 56.8, 102.8 }, // 01 CELT FB
+        { 27.3, 16.5 },  // 02 SILK NB
+        { 30.6, 17.4 },  // 03 SILK MB
+        { 28.1, 100.0 }, // 04 SILK WB (16 kHz internal == output)
+        { 15.4, 100.0 }, // 05 Hybrid SWB
+        { 18.1, 100.0 }, // 06 Hybrid FB
+        { 18.7, 30.2 },  // 07 CELT NB/WB/SWB/FB
+        { 17.2, 21.0 },  // 08 SILK + CELT
+        { 44.7, 45.5 },  // 09 SILK + CELT
+        { 46.2, 103.3 }, // 10 Hybrid + CELT
+        { 77.5, 104.9 }, // 11 CELT FB
+        { 29.0, 20.6 },  // 12 SILK + Hybrid
+    };
+
     private readonly ITestOutputHelper _output;
 
     public OpusDecoderConformanceTests(ITestOutputHelper output)
@@ -117,9 +141,10 @@ public class OpusDecoderConformanceTests
             _output.WriteLine(FormattableString.Invariant(
                 $"vector {vector:D2} at {rate} Hz mono: SNR {snr:F2} dB, lag {lag}"));
 
-            snr.Should().BeGreaterThan(
-                10,
-                "vector {0:D2} at {1} Hz mono must track opus_demo (SNR {2:F2} dB, lag {3})",
+            double floor = MonoSnrFloor[vector - 1, rate == 48000 ? 0 : 1];
+            snr.Should().BeGreaterThanOrEqualTo(
+                floor,
+                "vector {0:D2} at {1} Hz mono must not regress below its measured value minus 1 dB (SNR {2:F2} dB, lag {3})",
                 vector,
                 rate,
                 snr,
