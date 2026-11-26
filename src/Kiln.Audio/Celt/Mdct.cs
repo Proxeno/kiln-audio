@@ -342,6 +342,7 @@ internal sealed class Mdct
     /// Optional; when present, also receives the result in reverse order so the caller can combine
     /// the two DCT-IV outputs with contiguous elementwise passes.
     /// </param>
+    /// <param name="useVector">Whether to use the vectorised FFT path.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void DctIv(ReadOnlySpan<float> input, Span<float> output, float[]? outputReverse, bool useVector)
     {

@@ -184,6 +184,10 @@ internal sealed class OpusDecoderCore
     /// <param name="data">The frame's bytes.</param>
     /// <param name="capacity">Samples per channel available in <paramref name="pcm"/>.</param>
     /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
+    /// <param name="decodeFec">
+    /// Whether to decode the in-band FEC (LBRR) data carried by this frame rather than the frame
+    /// itself.
+    /// </param>
     /// <returns>The number of samples per channel written.</returns>
     private int DecodeFrame(ReadOnlySpan<byte> data, int capacity, Span<float> pcm, bool decodeFec)
     {

@@ -101,6 +101,7 @@ internal sealed class SilkDecoder
     /// <param name="channels">The channel count of the SILK layer: 1 or 2.</param>
     /// <param name="frameDurationMs">The Opus frame duration: 10, 20, 40 or 60 ms.</param>
     /// <param name="result">Caller-owned storage that receives the decoded parameters.</param>
+    /// <param name="lbrrOnly">When true, decode only the LBRR (in-band FEC) frames.</param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// The rate, channel count or duration is not one of the RFC 6716 §2 Table 2 values.
     /// </exception>
