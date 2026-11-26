@@ -527,7 +527,7 @@ overload and the float overload. `EncoderAllocationTests` proves this with
 
 Aggregate segmental SNR (dB, higher is better) of the SILK encoder (`OpusApplication.Voip`, mono) over the RFC 8251 vectors 2, 3, 4 and 6 mixed to mono, 48 kHz input. Every encoder is decoded with libopus 1.5.2 and scored against the same reference: the input passed through an independent long windowed-sinc resampler (`tests/Kiln.Audio.Tests/SilkEncoder/IdealResampler.cs`, more than 80 dB stopband, zero delay). 20 ms segments, each clamped to [-10, 60] dB.
 
-**Where we stand:** at complexity 0 we match or beat the RFC 6716 Appendix A reference encoder in every configuration (this is the hard G2 gate, with the RFC figures frozen in `SilkRfcBaseline.cs`). We trail libopus 1.5.2: by 0.6 to 1.2 dB in the bands that matter most at 12 kbps and above for the low-complexity settings, and by up to about 2 dB at complexity 5 and 10 at low bitrates, where libopus uses encoder features we do not yet have. Lane SILK-QUAL is working on closing this gap. The gap to libopus is reported by the test, not asserted.
+**Where we stand:** at complexity 0 we match or beat the RFC 6716 Appendix A reference encoder in every configuration (this is the hard G2 gate, with the RFC figures frozen in `SilkRfcBaseline.cs`). We trail libopus 1.5.2 by 0.6 to 1.2 dB in most configurations (measured range: 0.0 to 0.9 dB at complexity 0, 0.4 to 2.0 dB at complexity 5 and 10; the largest gaps are wideband and mediumband at 8 and 12 kbps). Lane SILK-QUAL is working on closing this gap. The gap to libopus is reported by the test, not asserted.
 
 | Band | Frame | Bitrate | Complexity | Ours | RFC reference | libopus 1.5.2 | Ours - libopus |
 |---|---|---|---|---|---|---|---|
