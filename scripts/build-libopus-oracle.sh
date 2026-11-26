@@ -117,12 +117,24 @@ build_oracle() {
         exit 1
     fi
 
-    cmake -S "${source}" -B "${build_dir}" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DOPUS_BUILD_PROGRAMS=ON \
-        -DOPUS_BUILD_TESTING=OFF \
-        -DOPUS_BUILD_SHARED_LIBRARY=OFF
-    cmake --build "${build_dir}" --config Release --parallel 2
+    if command -v cmake >/dev/null 2>&1; then
+        cmake -S "${source}" -B "${build_dir}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPUS_BUILD_PROGRAMS=ON \
+            -DOPUS_BUILD_TESTING=OFF \
+            -DOPUS_BUILD_SHARED_LIBRARY=OFF
+        cmake --build "${build_dir}" --config Release --parallel 2
+    elif [[ "${is_windows}" -eq 0 && -x "${source}/configure" ]]; then
+        # No cmake (e.g. a bare macOS runner): the release tarball ships a
+        # pregenerated configure script, which needs only cc and make.
+        echo "cmake not found; building with the tarball's configure script"
+        mkdir -p "${build_dir}"
+        (cd "${build_dir}" && "${source}/configure" --disable-shared --disable-doc >/dev/null \
+            && make -j2 opus_demo opus_compare >/dev/null)
+    else
+        echo "cmake is required to build the libopus oracle on this platform." >&2
+        exit 1
+    fi
 
     local demo
     demo="$(find_tool opus_demo)"
