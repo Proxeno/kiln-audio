@@ -14,7 +14,7 @@ internal enum OpusMode
 }
 
 /// <summary>Audio bandwidth (RFC 6716 §2, Table 1).</summary>
-internal enum OpusBandwidth
+public enum OpusBandwidth
 {
     /// <summary>Narrowband, 4 kHz audio bandwidth (8 kHz effective sample rate).</summary>
     Narrowband,
