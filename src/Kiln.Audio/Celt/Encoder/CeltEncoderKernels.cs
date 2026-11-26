@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -23,31 +24,93 @@ namespace Kiln.Audio.Celt.Encoder;
 internal static class CeltEncoderKernels
 {
     /// <summary>Pre-emphasis coefficient at 48 kHz (RFC 6716 Appendix A, celt/modes.c: preemph[0]).</summary>
-    internal const float PreEmphasisCoefficient = 0.8500061035f;
+    internal const float PreEmphasisCoefficient = EncKernels.PreEmphasisCoefficient;
 
     /// <summary>Largest sample magnitude the reference passes to the encoder, before clipping.</summary>
     private const float ClipLimit = 65536f;
 
     /// <summary>
-    /// Applies the 48 kHz pre-emphasis filter <c>y[n] = x[n] - 0.85*x[n-1]</c> and reports whether
-    /// every output sample is zero.
+    /// Applies the 48 kHz pre-emphasis filter <c>y[n] = x[n] - 0.85*x[n-1]</c> channel by channel,
+    /// zero-stuffing the input to 48 kHz, and reports whether every output sample is zero.
     /// </summary>
-    /// <param name="pcm">One frame of signed 16-bit samples at full scale.</param>
-    /// <param name="destination">Receives the pre-emphasized samples in the internal signal domain.</param>
-    /// <param name="memory">
-    /// The filter memory: on entry the last pre-emphasized input sample of the previous frame (the
-    /// "x[n-1] term"); on exit the last input sample of this frame.
+    /// <param name="pcm">One frame of interleaved signed 16-bit samples at the API rate.</param>
+    /// <param name="channels">The number of interleaved channels.</param>
+    /// <param name="upsample">
+    /// The 48 kHz upsample factor (RFC 6716 Appendix A, <c>celt.c</c>): one input sample is read
+    /// every <paramref name="upsample"/> output samples and the others are zero.
     /// </param>
+    /// <param name="frameSamples">The number of 48 kHz samples per frame per channel.</param>
+    /// <param name="stride">The distance between channel blocks in <paramref name="destination"/>.</param>
+    /// <param name="offset">The offset of the first written sample inside each channel block.</param>
+    /// <param name="destination">Channel-major destination of length <c>channels * stride</c>.</param>
+    /// <param name="memory">Per-channel filter memory; updated in place.</param>
     /// <param name="silent">Receives true when every pre-emphasized sample is exactly zero.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void PreEmphasis(ReadOnlySpan<short> pcm, Span<float> destination, ref float memory, out bool silent)
+    internal static void PreEmphasis(
+        ReadOnlySpan<short> pcm,
+        int channels,
+        int upsample,
+        int frameSamples,
+        int stride,
+        int offset,
+        Span<float> destination,
+        Span<float> memory,
+        out bool silent)
+    {
+        // The 48 kHz mono path is the common case and has a bit-identical SIMD kernel.
+        if (channels == 1 && upsample == 1 && offset == 0 && stride == frameSamples
+            && SimdConfig.UseSimd && Vector128.IsHardwareAccelerated && pcm.Length >= 16)
+        {
+            ref float state = ref memory[0];
+            EncKernels.PreEmphasis(pcm, destination, ref state, out silent);
+            return;
+        }
+
+        bool allZero = true;
+        for (int c = 0; c < channels; c++)
+        {
+            float state = memory[c];
+            int count = 0;
+            int source = c;
+            Span<float> block = destination.Slice((c * stride) + offset, frameSamples);
+            for (int i = 0; i < frameSamples; i++)
+            {
+                // The reference reads a fresh sample only every `upsample` 48 kHz samples; the
+                // others are zero (the original zero-stuffing upsampler).
+                float x;
+                if (++count == upsample)
+                {
+                    count = 0;
+                    x = pcm[source];
+                    source += channels;
+                }
+                else
+                {
+                    x = 0f;
+                }
+
+                // The reference scales normalized float input by 32768; a short input is already
+                // in that domain. It also clips to +/-65536 and drops NaNs.
+                x = x > ClipLimit ? ClipLimit : (x < -ClipLimit ? -ClipLimit : x);
+                float y = x + state;
+                state = -PreEmphasisCoefficient * x;
+                block[i] = y;
+                allZero &= y == 0f;
+            }
+
+            memory[c] = state;
+        }
+
+        silent = allZero;
+    }
+
+    /// <summary>Scalar reference for the 48 kHz mono pre-emphasis; used by the parity test.</summary>
+    internal static void PreEmphasisScalar(ReadOnlySpan<short> pcm, Span<float> destination, ref float memory, out bool silent)
     {
         float state = memory;
         bool allZero = true;
         for (int i = 0; i < pcm.Length; i++)
         {
-            // The reference scales normalized float input by 32768; a short input is already in
-            // that domain. It also clips to +/-65536 and drops NaNs.
             float x = pcm[i];
             x = x > ClipLimit ? ClipLimit : (x < -ClipLimit ? -ClipLimit : x);
             float y = x + state;
@@ -72,10 +135,11 @@ internal static class CeltEncoderKernels
     /// </summary>
     internal static float BandEnergyScalar(ReadOnlySpan<float> samples)
     {
+        ref float values = ref MemoryMarshal.GetReference(samples);
         float sum = 1e-27f;
         for (int j = 0; j < samples.Length; j++)
         {
-            float value = samples[j];
+            float value = Unsafe.Add(ref values, j);
             sum += value * value;
         }
 
@@ -131,26 +195,42 @@ internal static class CeltEncoderKernels
     /// The transient detector of RFC 6716 §4.3.1 (RFC 6716 Appendix A, celt/celt.c:
     /// transient_analysis), working on the pre-emphasized signal.
     /// </summary>
-    /// <param name="input">The pre-emphasized frame, including the overlap look-ahead.</param>
-    /// <param name="tmp">Scratch of at least <c>input.Length</c> samples.</param>
-    /// <param name="bins">Scratch of at least <c>input.Length / 60</c> samples.</param>
+    /// <param name="input">Channel-major pre-emphasized frame, including the overlap look-ahead.</param>
+    /// <param name="channels">The number of channels.</param>
+    /// <param name="frameSamples">The number of 48 kHz samples per channel in the frame.</param>
     /// <param name="overlap">The CELT overlap (120 samples).</param>
+    /// <param name="tmp">Scratch of at least <c>frameSamples + overlap</c> samples.</param>
+    /// <param name="bins">Scratch of at least <c>(frameSamples + overlap) / (overlap / 2)</c> samples.</param>
     /// <returns>True when the reference detector declares the frame transient.</returns>
-    internal static bool AnalyzeTransient(ReadOnlySpan<float> input, Span<float> tmp, Span<float> bins, int overlap)
+    internal static bool AnalyzeTransient(
+        ReadOnlySpan<float> input,
+        int channels,
+        int frameSamples,
+        int overlap,
+        Span<float> tmp,
+        Span<float> bins)
     {
+        int len = frameSamples + overlap;
         int block = overlap / 2;
-        int binCount = input.Length / block;
+        int binCount = len / block;
         float memory0 = 0f;
         float memory1 = 0f;
         bool isTransient = false;
 
-        for (int i = 0; i < input.Length; i++)
+        // The reference adds the channels together before the high-pass filter.
+        for (int i = 0; i < len; i++)
         {
-            tmp[i] = input[i];
+            float sum = 0f;
+            for (int c = 0; c < channels; c++)
+            {
+                sum += input[(c * len) + i];
+            }
+
+            tmp[i] = sum;
         }
 
         // High-pass filter: (1 - 2*z^-1 + z^-2) / (1 - z^-1 + .5*z^-2).
-        for (int i = 0; i < tmp.Length; i++)
+        for (int i = 0; i < len; i++)
         {
             float x = tmp[i];
             float y = memory0 + x;
@@ -160,7 +240,7 @@ internal static class CeltEncoderKernels
         }
 
         // First few samples are bad because the filter memory is not propagated.
-        for (int i = 0; i < 12 && i < tmp.Length; i++)
+        for (int i = 0; i < 12 && i < len; i++)
         {
             tmp[i] = 0f;
         }
@@ -243,7 +323,14 @@ internal static class CeltEncoderKernels
     /// <param name="n">The vector dimension, at least 2.</param>
     /// <param name="k">The number of pulses, at least 1.</param>
     /// <returns>The total squared norm of the integer vector.</returns>
-    internal static float PvqSearch(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static float PvqSearch(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k) =>
+        SimdConfig.UseSimd && Vector128.IsHardwareAccelerated
+            ? EncPvqKernel.Search(x, iy, signs, y, n, k)
+            : PvqSearchScalar(x, iy, signs, y, n, k);
+
+    /// <summary>Scalar reference for <see cref="PvqSearch"/>.</summary>
+    internal static float PvqSearchScalar(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k)
     {
         for (int j = 0; j < n; j++)
         {

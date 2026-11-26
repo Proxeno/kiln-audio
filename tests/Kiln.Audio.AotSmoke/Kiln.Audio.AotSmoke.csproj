@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Native AOT smoke test for Proxeno.Kiln.Audio.
+    Encodes and decodes one second of audio entirely through the public API and checks the
+    round trip, so a trim/AOT regression fails a real published native binary rather than
+    only an analyzer.
+
+      dotnet publish tests/Kiln.Audio.AotSmoke -c Release -r osx-arm64 -o artifacts/aot-smoke
+      ./artifacts/aot-smoke/Kiln.Audio.AotSmoke
+
+    It is a plain project in the solution, so ordinary CI builds compile it; the native
+    publish is a documented manual/optional step (see docs/releasing.md) because it needs a
+    native toolchain.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Kiln.Audio/Kiln.Audio.csproj" />
+  </ItemGroup>
+
+</Project>

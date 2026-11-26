@@ -8,16 +8,21 @@ namespace Kiln.Audio.Tests.Encoder;
 internal static class EncoderOracle
 {
     /// <summary>Encodes mono PCM with <c>opus_demo -e restricted-lowdelay</c> and returns the <c>.bit</c> bytes.</summary>
-    internal static byte[] EncodeRestrictedLowDelay(short[] mono, int bitrate, int frameMilliseconds, int complexity)
+    internal static byte[] EncodeRestrictedLowDelay(short[] mono, int bitrate, int frameMilliseconds, int complexity) =>
+        EncodeRestrictedLowDelay(mono, channels: 1, bitrate, frameMilliseconds, complexity);
+
+    /// <summary>Encodes interleaved PCM with <c>opus_demo -e restricted-lowdelay</c> and returns the <c>.bit</c> bytes.</summary>
+    internal static byte[] EncodeRestrictedLowDelay(
+        short[] pcm, int channels, int bitrate, int frameMilliseconds, int complexity)
     {
         string input = Path.Combine(Path.GetTempPath(), $"kiln-enc-{Guid.NewGuid():N}.pcm");
         string output = Path.Combine(Path.GetTempPath(), $"kiln-enc-{Guid.NewGuid():N}.bit");
         try
         {
-            Pcm16.Write(input, mono);
+            Pcm16.Write(input, pcm);
             var result = Run("opus_demo", new[]
             {
-                "-e", "restricted-lowdelay", "48000", "1",
+                "-e", "restricted-lowdelay", "48000", channels.ToString(CultureInfo.InvariantCulture),
                 bitrate.ToString(CultureInfo.InvariantCulture),
                 "-framesize", frameMilliseconds.ToString(CultureInfo.InvariantCulture),
                 "-cbr",
@@ -76,6 +81,45 @@ internal static class EncoderOracle
         finally
         {
             Delete(path);
+        }
+    }
+
+    /// <summary>Decodes a <c>.bit</c> byte array to the given channel count with <c>opus_demo</c>.</summary>
+    internal static (short[] Pcm, string Diagnostics) Decode(byte[] bitFile, int channels)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"kiln-dec-{Guid.NewGuid():N}.bit");
+        try
+        {
+            File.WriteAllBytes(path, bitFile);
+            return Decode(path, channels);
+        }
+        finally
+        {
+            Delete(path);
+        }
+    }
+
+    /// <summary>Decodes a <c>.bit</c> stream to the given channel count with <c>opus_demo -d 48000</c>.</summary>
+    internal static (short[] Pcm, string Diagnostics) Decode(string bitPath, int channels)
+    {
+        string output = Path.Combine(Path.GetTempPath(), $"kiln-dec-{Guid.NewGuid():N}.pcm");
+        try
+        {
+            var result = Run("opus_demo", new[]
+            {
+                "-d", "48000", channels.ToString(CultureInfo.InvariantCulture), bitPath, output,
+            });
+            string diagnostics = result.StandardOutput + result.StandardError;
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"opus_demo decode failed ({result.ExitCode}): {diagnostics}");
+            }
+
+            return (Pcm16.Read(output), diagnostics);
+        }
+        finally
+        {
+            Delete(output);
         }
     }
 

@@ -6,7 +6,7 @@ namespace Kiln.Audio.Tests.Encoder;
 /// <summary>The supported option surface and its explicit rejections.</summary>
 public class EncoderOptionTests
 {
-    private static OpusEncoderOptions Supported(int frameSamples = 960) => new()
+    private static OpusEncoderOptions Supported() => new()
     {
         Application = OpusApplication.RestrictedLowDelay,
         BitrateBps = 32000,
@@ -15,50 +15,64 @@ public class EncoderOptionTests
     };
 
     [Fact]
-    public void The_default_options_are_rejected_because_they_select_voip()
+    public void The_default_options_are_accepted()
     {
-        ((Action)(() => new OpusEncoder(new OpusEncoderOptions()))).Should()
-            .Throw<NotSupportedException>()
-            .WithMessage("*RestrictedLowDelay*");
+        using var encoder = new OpusEncoder(new OpusEncoderOptions());
+        encoder.Options.Should().Be(new OpusEncoderOptions());
     }
 
     [Theory]
     [InlineData(OpusApplication.Voip)]
     [InlineData(OpusApplication.Audio)]
-    public void Non_restricted_low_delay_applications_are_rejected(OpusApplication application)
+    [InlineData(OpusApplication.RestrictedLowDelay)]
+    public void Every_application_is_accepted(OpusApplication application)
     {
         var options = Supported() with { Application = application };
-        ((Action)(() => new OpusEncoder(options))).Should().Throw<NotSupportedException>();
+        using var encoder = new OpusEncoder(options);
+        encoder.Options.Application.Should().Be(application);
     }
 
     [Theory]
     [InlineData(8000)]
+    [InlineData(12000)]
     [InlineData(16000)]
     [InlineData(24000)]
-    public void Other_sample_rates_are_rejected(int rate)
+    [InlineData(48000)]
+    public void Every_sample_rate_is_supported(int rate)
     {
         var options = Supported() with { SampleRate = rate };
-        ((Action)(() => new OpusEncoder(options))).Should()
-            .Throw<NotSupportedException>()
-            .WithMessage("*48 kHz*");
+        using var encoder = new OpusEncoder(options);
+        var packet = new byte[1276];
+        int samples = rate / 50;
+        int written = encoder.Encode(new short[samples], packet);
+        written.Should().BeGreaterThan(1);
     }
 
     [Fact]
-    public void Stereo_is_rejected()
+    public void Stereo_is_supported()
     {
-        var options = Supported() with { Channels = 2 };
-        ((Action)(() => new OpusEncoder(options))).Should()
-            .Throw<NotSupportedException>()
-            .WithMessage("*mono*");
+        var options = Supported() with { Channels = 2, BitrateBps = 64000 };
+        using var encoder = new OpusEncoder(options);
+        var packet = new byte[1276];
+        int written = encoder.Encode(new short[960 * 2], packet);
+        written.Should().BeGreaterThan(1);
     }
 
     [Theory]
-    [InlineData(OpusFrameDuration.Ms40)]
-    [InlineData(OpusFrameDuration.Ms60)]
-    public void Silk_frame_durations_are_rejected(OpusFrameDuration duration)
+    [InlineData(OpusFrameDuration.Ms40, 2, 1)]
+    [InlineData(OpusFrameDuration.Ms60, 3, 3)]
+    public void Long_celt_frames_are_split_into_20_ms_frames(OpusFrameDuration duration, int frameCount, int code)
     {
-        var options = Supported() with { FrameDuration = duration };
-        ((Action)(() => new OpusEncoder(options))).Should().Throw<NotSupportedException>();
+        using var encoder = new OpusEncoder(Supported() with { FrameDuration = duration });
+        var packet = new byte[1276];
+        int written = encoder.Encode(new short[frameCount * 960], packet);
+
+        var frames = new Range[OpusPacket.MaxFrames];
+        OpusPacket.TryParse(packet.AsSpan(0, written), frames, out int count, out OpusToc toc, out _)
+            .Should().Be(OpusStatus.Ok);
+        count.Should().Be(frameCount);
+        (packet[0] & 0x03).Should().Be(code);
+        toc.FrameDuration.Should().Be(OpusFrameDuration.Ms20);
     }
 
     [Fact]

@@ -12,16 +12,18 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <PackageId>Proxeno.Kiln.Audio</PackageId>
-    <Authors>Kiln contributors</Authors>
+    <Authors>Proxeno</Authors>
     <Description>Pure-managed SIMD Opus (RFC 6716) encoder and decoder for real-time voice. No native dependencies.</Description>
-    <Copyright>Copyright (c) Kiln contributors</Copyright>
-    <PackageReleaseNotes>0.0.x — skeleton; no codec yet.</PackageReleaseNotes>
+    <Copyright>Copyright (c) Proxeno</Copyright>
+    <PackageReleaseNotes>See https://github.com/Proxeno/kiln-audio/releases for the release notes.</PackageReleaseNotes>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Proxeno/kiln-audio</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Proxeno/kiln-audio</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>opus;audio;codec;voice;webrtc;simd;realtime</PackageTags>
+    <RepositoryCommit Condition="'$(RepositoryCommit)' == ''">$(SourceRevisionId)</RepositoryCommit>
+    <PackageTags>opus;codec;audio;simd;rfc6716</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <!-- SourceLink + symbols -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
@@ -32,13 +34,44 @@
     <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
   </PropertyGroup>
 
+  <!-- Documentation: CS1591 (undocumented public member) is an error via TreatWarningsAsErrors. -->
+  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!--
+    AOT/trim safety: IsAotCompatible turns on the trim, AOT and single-file analyzers.
+    Kiln.Audio is pure managed, so this is expected to stay warning-free; any hit must be
+    fixed with trim/AOT annotations rather than by silencing the analyzer.
+  -->
+  <PropertyGroup>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <!--
+    Public API lock: RS0016 (symbol missing from the API files) and RS0017 (stale entry)
+    are errors, so any change to the public surface has to edit PublicAPI.Shipped.txt.
+  -->
+  <PropertyGroup>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591;RS0016;RS0017</WarningsAsErrors>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="/" />
+    <None Include="../../assets/icon.png" Pack="true" PackagePath="/" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="All" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.CodeAnalysis.PublicApiAnalyzers" Version="5.6.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="PublicAPI.Shipped.txt" />
+    <AdditionalFiles Include="PublicAPI.Unshipped.txt" />
   </ItemGroup>
 
   <ItemGroup>

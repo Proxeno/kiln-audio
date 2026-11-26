@@ -1,5 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Kiln.Audio.Entropy;
 
 namespace Kiln.Audio.Celt.Encoder;
@@ -20,6 +22,8 @@ internal static class CeltEncoderAnalysis
     internal static int TfAnalysis(
         ReadOnlySpan<short> eBands,
         int len,
+        int channels,
+        int channelStride,
         bool isTransient,
         Span<int> tfResolution,
         int nbCompressedBytes,
@@ -31,7 +35,7 @@ internal static class CeltEncoderAnalysis
         Span<int> path1,
         Span<float> tmp)
     {
-        if (nbCompressedBytes < 15)
+        if (nbCompressedBytes < 15 * channels)
         {
             tfSum = 0;
             for (int i = 0; i < len; i++)
@@ -55,9 +59,16 @@ internal static class CeltEncoderAnalysis
         {
             int bandStart = eBands[i] << lm;
             int samples = (eBands[i + 1] - eBands[i]) << lm;
-            for (int j = 0; j < samples; j++)
+            if (channels == 1)
             {
-                tmp[j] = spectrum[bandStart + j];
+                spectrum.Slice(bandStart, samples).CopyTo(tmp);
+            }
+            else
+            {
+                for (int j = 0; j < samples; j++)
+                {
+                    tmp[j] = spectrum[bandStart + j] + spectrum[channelStride + bandStart + j];
+                }
             }
 
             float best = L1Metric(tmp, samples, isTransient ? lm : 0, samples >> lm);
@@ -136,13 +147,16 @@ internal static class CeltEncoderAnalysis
 
     private static float L1Metric(ReadOnlySpan<float> tmp, int n, int lm, int width)
     {
+        ref float values = ref MemoryMarshal.GetReference(tmp);
+        int groups = 1 << lm;
+        int perGroup = n >> lm;
         float l1 = 0f;
-        for (int i = 0; i < 1 << lm; i++)
+        for (int i = 0; i < groups; i++)
         {
             float l2 = 0f;
-            for (int j = 0; j < n >> lm; j++)
+            for (int j = 0; j < perGroup; j++)
             {
-                float value = tmp[(j << lm) + i];
+                float value = Unsafe.Add(ref values, (j << lm) + i);
                 l2 += value * value;
             }
 
@@ -222,6 +236,8 @@ internal static class CeltEncoderAnalysis
     internal static int SpreadingDecision(
         ReadOnlySpan<short> eBands,
         ReadOnlySpan<float> spectrum,
+        int channels,
+        int channelStride,
         ref int average,
         int lastDecision,
         ref int hfAverage,
@@ -238,53 +254,57 @@ internal static class CeltEncoderAnalysis
         int sum = 0;
         int bandCount = 0;
         int hfSum = 0;
-        for (int i = 0; i < end; i++)
+        for (int c = 0; c < channels; c++)
         {
-            int bandSamples = m * (eBands[i + 1] - eBands[i]);
-            if (bandSamples <= 8)
+            int channelOffset = c * channelStride;
+            for (int i = 0; i < end; i++)
             {
-                continue;
-            }
-
-            int t0 = 0;
-            int t1 = 0;
-            int t2 = 0;
-            int offset = m * eBands[i];
-            for (int j = 0; j < bandSamples; j++)
-            {
-                float value = spectrum[offset + j];
-                float x2N = value * value * bandSamples;
-                if (x2N < 0.25f)
+                int bandSamples = m * (eBands[i + 1] - eBands[i]);
+                if (bandSamples <= 8)
                 {
-                    t0++;
+                    continue;
                 }
 
-                if (x2N < 0.0625f)
+                int t0 = 0;
+                int t1 = 0;
+                int t2 = 0;
+                int offset = channelOffset + (m * eBands[i]);
+                for (int j = 0; j < bandSamples; j++)
                 {
-                    t1++;
+                    float value = spectrum[offset + j];
+                    float x2N = value * value * bandSamples;
+                    if (x2N < 0.25f)
+                    {
+                        t0++;
+                    }
+
+                    if (x2N < 0.0625f)
+                    {
+                        t1++;
+                    }
+
+                    if (x2N < 0.015625f)
+                    {
+                        t2++;
+                    }
                 }
 
-                if (x2N < 0.015625f)
+                if (i > BandCount - 4)
                 {
-                    t2++;
+                    hfSum += 32 * (t1 + t0) / bandSamples;
                 }
-            }
 
-            if (i > BandCount - 4)
-            {
-                hfSum += 32 * (t1 + t0) / bandSamples;
+                int tmp = ((2 * t2 >= bandSamples ? 1 : 0) + (2 * t1 >= bandSamples ? 1 : 0) + (2 * t0 >= bandSamples ? 1 : 0));
+                sum += tmp * 256;
+                bandCount++;
             }
-
-            int tmp = ((2 * t2 >= bandSamples ? 1 : 0) + (2 * t1 >= bandSamples ? 1 : 0) + (2 * t0 >= bandSamples ? 1 : 0));
-            sum += tmp * 256;
-            bandCount++;
         }
 
         if (updateHf)
         {
             if (hfSum != 0)
             {
-                hfSum /= 4 - BandCount + end;
+                hfSum /= channels * (4 - BandCount + end);
             }
 
             hfAverage = (hfAverage + hfSum) >> 1;
@@ -324,17 +344,66 @@ internal static class CeltEncoderAnalysis
     }
 
     /// <summary>Chooses the allocation trim (RFC 6716 Appendix A, celt/celt.c: alloc_trim_analysis).</summary>
-    internal static int AllocTrimAnalysis(ReadOnlySpan<float> bandLogE, int end)
+    internal static int AllocTrimAnalysis(
+        ReadOnlySpan<float> bandLogE,
+        ReadOnlySpan<float> spectrum,
+        int channels,
+        int channelStride,
+        int end,
+        int lm,
+        int n)
     {
-        float diff = 0f;
-        for (int i = 0; i < end - 1; i++)
+        int trim = 5;
+        if (channels == 2)
         {
-            diff += bandLogE[i] * (2 + (2 * i) - BandCount);
+            ReadOnlySpan<short> eBands = CeltTables.EBands;
+            float sum = 0f;
+            for (int i = 0; i < 8; i++)
+            {
+                float partial = 0f;
+                int start = eBands[i] << lm;
+                int stop = eBands[i + 1] << lm;
+                for (int j = start; j < stop; j++)
+                {
+                    partial += spectrum[j] * spectrum[channelStride + j];
+                }
+
+                sum += partial;
+            }
+
+            sum *= 1f / 8f;
+            if (sum > 0.995f)
+            {
+                trim -= 4;
+            }
+            else if (sum > 0.92f)
+            {
+                trim -= 3;
+            }
+            else if (sum > 0.85f)
+            {
+                trim -= 2;
+            }
+            else if (sum > 0.8f)
+            {
+                trim -= 1;
+            }
+
+            _ = n;
         }
 
-        diff /= 2 * (end - 1);
+        float diff = 0f;
+        for (int c = 0; c < channels; c++)
+        {
+            int offset = c * BandCount;
+            for (int i = 0; i < end - 1; i++)
+            {
+                diff += bandLogE[offset + i] * (2 + (2 * i) - BandCount);
+            }
+        }
 
-        int trim = 5;
+        diff /= 2 * channels * (end - 1);
+
         if (diff > 2f)
         {
             trim--;
@@ -372,14 +441,20 @@ internal static class CeltEncoderAnalysis
     internal static void Haar1(Span<float> x, int n0, int stride)
     {
         n0 >>= 1;
+        ref float values = ref MemoryMarshal.GetReference(x);
         for (int i = 0; i < stride; i++)
         {
+            int even = i;
+            int odd = stride + i;
+            int advance = 2 * stride;
             for (int j = 0; j < n0; j++)
             {
-                float first = 0.70710678f * x[(stride * 2 * j) + i];
-                float second = 0.70710678f * x[(stride * ((2 * j) + 1)) + i];
-                x[(stride * 2 * j) + i] = first + second;
-                x[(stride * ((2 * j) + 1)) + i] = first - second;
+                float first = 0.70710678f * Unsafe.Add(ref values, even);
+                float second = 0.70710678f * Unsafe.Add(ref values, odd);
+                Unsafe.Add(ref values, even) = first + second;
+                Unsafe.Add(ref values, odd) = first - second;
+                even += advance;
+                odd += advance;
             }
         }
     }
