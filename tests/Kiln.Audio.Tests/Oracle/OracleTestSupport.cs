@@ -32,6 +32,22 @@ internal static class OracleTestSupport
         return false;
     }
 
+    /// <summary>Returns true when the range-coder probe is present; otherwise returns false (or fails).</summary>
+    internal static bool RangeProbeAvailable()
+    {
+        if (LibOpusOracle.RangeProbeAvailable)
+        {
+            return true;
+        }
+
+        if (RequireOracle)
+        {
+            Assert.Fail("libopus ec_probe not found; run scripts/build-libopus-oracle.sh");
+        }
+
+        return false;
+    }
+
     /// <summary>Returns true when the oracle is present; otherwise returns false (or fails).</summary>
     internal static bool OracleAvailable()
     {
