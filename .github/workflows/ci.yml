@@ -38,6 +38,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+        env:
+          # Self-hosted fleet: the default global install prefix is not writable ("mkdir: Permission denied").
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
       - name: Cache RFC 8251 test vectors
         uses: actions/cache@v4
         with:
