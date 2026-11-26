@@ -14,12 +14,13 @@ namespace Kiln.Audio;
 /// 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10, 20, 40 or 60 ms frames, constant or variable
 /// bitrate, and the pitch pre-filter. A 40 or 60 ms frame is encoded as two or three 20 ms frames
 /// in one code 1 or code 3 packet, exactly as the reference handles CELT durations above 20 ms.
-/// <see cref="OpusApplication.Voip"/> selects the SILK-only encoder (mono, 10, 20, 40 or 60 ms,
-/// at <see cref="OpusEncoderOptions.Bandwidth"/> narrowband, mediumband or wideband).
+/// <see cref="OpusApplication.Voip"/> selects the SILK-only encoder (mono or stereo, 10, 20, 40 or
+/// 60 ms, at <see cref="OpusEncoderOptions.Bandwidth"/> narrowband, mediumband or wideband), with
+/// optional in-band FEC and DTX. <see cref="OpusApplication.Audio"/> keeps its CELT mapping.
 /// </para>
 /// <para>
-/// Hybrid mode, SILK stereo, in-band FEC, DTX and automatic mode switching are not implemented
-/// and are rejected with <see cref="NotSupportedException"/>.
+/// Hybrid mode and automatic mode switching are not implemented and are rejected with
+/// <see cref="NotSupportedException"/>.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
@@ -29,7 +30,7 @@ namespace Kiln.Audio;
 public sealed class OpusEncoder : IDisposable
 {
     private readonly CeltEncoder? _encoder;
-    private readonly SilkEncoderCore? _silk;
+    private readonly SilkStereoPacketEncoder? _silk;
     private readonly OpusFrameDuration _tocDuration;
     private readonly int _subFrameSamples;
     private readonly int _subFrameCount;
@@ -39,6 +40,9 @@ public sealed class OpusEncoder : IDisposable
     private readonly short[] _conversionBuffer;
     private readonly byte[] _subFrameData;
     private bool _disposed;
+
+    /// <summary>The length of a DTX packet: the TOC byte and an empty payload (RFC 6716 §3.2.1).</summary>
+    private const int DtxPacketLength = 1;
 
     /// <summary>Creates an encoder after validating and checking <paramref name="options"/>.</summary>
     /// <param name="options">Encoder configuration.</param>
@@ -52,22 +56,6 @@ public sealed class OpusEncoder : IDisposable
 
         if (options.Application == OpusApplication.Voip)
         {
-            if (options.Channels != 1)
-            {
-                throw new NotSupportedException(
-                    FormattableString.Invariant($"SILK supports mono input only; got {options.Channels} channels."));
-            }
-
-            if (options.UseInbandFec)
-            {
-                throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
-            }
-
-            if (options.UseDtx)
-            {
-                throw new NotSupportedException("Discontinuous transmission is not implemented.");
-            }
-
             if (options.FrameDuration is OpusFrameDuration.Ms2_5 or OpusFrameDuration.Ms5)
             {
                 throw new NotSupportedException(
@@ -94,14 +82,18 @@ public sealed class OpusEncoder : IDisposable
             };
 
             Options = options;
-            _silk = new SilkEncoderCore(
+            _silk = new SilkStereoPacketEncoder(
                 options.SampleRate,
                 internalRate,
                 frameDurationMs,
                 options.BitrateBps,
                 options.Complexity,
-                options.UseCbr);
-            _silkFrameSamples = options.SampleRate * frameDurationMs / 1000;
+                options.UseCbr,
+                options.Channels,
+                options.UseInbandFec,
+                options.PacketLossPercent,
+                options.UseDtx);
+            _silkFrameSamples = options.SampleRate * frameDurationMs / 1000 * options.Channels;
             _conversionBuffer = new short[_silkFrameSamples];
             _subFrameData = [];
 
@@ -120,15 +112,16 @@ public sealed class OpusEncoder : IDisposable
                 _ => 3,
             };
             _silkToc = (byte)(((bandwidthIndex * 4) + durationIndex) << 3);
+            if (options.Channels == 2)
+            {
+                // RFC 6716 §3.1: bit 2 of the TOC is the SILK/hybrid stereo flag.
+                _silkToc |= 0x04;
+            }
+
             return;
         }
 
-        if (options.Application != OpusApplication.RestrictedLowDelay)
-        {
-            throw new NotSupportedException(
-                "Only OpusApplication.Voip (SILK) and OpusApplication.RestrictedLowDelay (CELT) are supported.");
-        }
-
+        // Audio and RestrictedLowDelay both select the CELT path, as before the SILK encoder.
         if (options.UseInbandFec)
         {
             throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
@@ -205,15 +198,22 @@ public sealed class OpusEncoder : IDisposable
                     nameof(pcm));
             }
 
-            if (packet.Length < 2)
+            if (packet.Length < DtxPacketLength)
             {
                 throw new ArgumentException(
-                    FormattableString.Invariant($"The packet buffer must hold at least 2 bytes; got {packet.Length}."),
+                    FormattableString.Invariant($"The packet buffer must hold at least 1 byte; got {packet.Length}."),
                     nameof(packet));
             }
 
             packet[0] = _silkToc;
-            return _silk.Encode(pcm, packet[1..]) + 1;
+            int silkPayload = _silk.Encode(pcm, packet[1..]);
+            if (silkPayload == 0)
+            {
+                // RFC 6716 Appendix A: an all-DTX packet carries the TOC byte and no payload.
+                return DtxPacketLength;
+            }
+
+            return silkPayload + 1;
         }
 
         if (pcm.Length != _inputFrameSamples)

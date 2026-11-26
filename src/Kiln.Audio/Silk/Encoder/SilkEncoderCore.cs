@@ -53,6 +53,14 @@ internal sealed class SilkEncoderCore
 
     private readonly SilkNsqState _nsqStart = new();
     private readonly SilkNsqState _nsqLower = new();
+    private readonly SilkNsqState _nsqLbrr = new();
+    private readonly SilkNsqDelayedDecision _nsqDelayed = new();
+    private readonly SilkNsqDelayedDecision _nsqDelayedStart = new();
+    private readonly SilkNsqDelayedDecision _nsqDelayedLower = new();
+    private readonly SilkNsqDelayedDecision _nsqDelayedLbrr = new();
+    private readonly sbyte[] _delayedPulses = new sbyte[SilkEncoderMath.MaxFrameLength];
+    private readonly short[] _delayedOutput = new short[SilkEncoderMath.MaxFrameLength];
+    private readonly int[] _quantizerGains = new int[4];
     private readonly SilkSideInfo _lastEncodedIndices = new();
     private readonly SilkSideInfo[] _encodedPerFrame =
     [
@@ -69,6 +77,8 @@ internal sealed class SilkEncoderCore
     private readonly int _complexity;
     private readonly bool _useCbr;
     private const int BitReservoirDecayTimeMs = 500;
+    private const int WarpingMultiplierQ16 = 983; // SILK_FIX_CONST(0.015, 16)
+    private const int LbrrSpeechActivityThresholdQ8 = 77; // SILK_FIX_CONST(0.3, 8)
     private int _bitsExceeded;
 
     // Variable high-pass filter (opus_encode_native hp_cutoff and silk_HP_variable_cutoff).
@@ -112,30 +122,12 @@ internal sealed class SilkEncoderCore
     /// <returns>The number of payload bytes written; the final range is in <see cref="FinalRange"/>.</returns>
     internal int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
-        ApplyInputHighPass(pcm);
-        _resampler.Process(_hpBuffer.AsSpan(0, pcm.Length), _resampled);
+        LoadPacket(pcm);
 
-        int frameLength = _state.FrameLength;
         for (int f = 0; f < _silkFrames; f++)
         {
-            _resampled.AsSpan(f * frameLength, frameLength).CopyTo(_state.InputBuf.AsSpan(1, frameLength));
-            SilkVad.GetSpeechActivity(_state, _state.InputBuf.AsSpan(1, frameLength));
-            _speechActivity[f] = _state.SpeechActivityQ8;
-            _inputTilt[f] = _state.InputTiltQ15;
-            _state.InputQualityBandsQ15.AsSpan().CopyTo(_bandQuality[f]);
-
-            // RFC 6716 Appendix A, silk_encode_do_VAD_FIX: inactivity is signal type 0, activity
-            // starts as unvoiced and the pitch search may upgrade it to voiced.
-            if (_state.SpeechActivityQ8 < 13)
-            {
-                _vadSignalType[f] = 0;
-                _state.NoSpeechCounter++;
-            }
-            else
-            {
-                _state.NoSpeechCounter = 0;
-                _vadSignalType[f] = 1;
-            }
+            SetInputFromResampled(f);
+            AnalyzeInput(f);
         }
 
         var rangeEncoder = new RangeEncoder(_rangeBuffer);
@@ -172,14 +164,7 @@ internal sealed class SilkEncoderCore
         int packetBits = silkBitrate * _durationMs / 1000;
         for (int f = 0; f < _silkFrames; f++)
         {
-            HpVariableCutoff();
-            _resampled.AsSpan(f * frameLength, frameLength).CopyTo(_state.InputBuf.AsSpan(1, frameLength));
-            _state.SpeechActivityQ8 = _speechActivity[f];
-            _state.InputTiltQ15 = _inputTilt[f];
-            _bandQuality[f].AsSpan().CopyTo(_state.InputQualityBandsQ15);
-            _state.Indices.SignalType = _vadSignalType[f];
-            _state.VadFlags[f] = _vadSignalType[f];
-
+            PrepareFrame(f);
             int framesLeft = _silkFrames - f;
             int frameBits = (packetBits - (rangeEncoder.Tell() >> 1)) / framesLeft;
             int targetRate = frameBits * (_durationMs == 10 ? 100 : 50);
@@ -237,6 +222,170 @@ internal sealed class SilkEncoderCore
         _bitsExceeded = Math.Clamp(_bitsExceeded + (written * 8) - packetBits, 0, 10000);
         return written;
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Frame-level hooks used by the multi-channel packet encoder. They expose the same steps
+    // <see cref="Encode"/> runs, so one packet can interleave mid and side frames.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Number of SILK frames in one packet.</summary>
+    internal int FrameCount => _silkFrames;
+
+    /// <summary>Samples in one SILK frame at the internal rate.</summary>
+    internal int FrameLength => _state.FrameLength;
+
+    /// <summary>The SILK encoder state (analysis output and quantizer state).</summary>
+    internal SilkEncoderState State => _state;
+
+    /// <summary>The per-frame analysis output.</summary>
+    internal SilkEncoderControl Control => _control;
+
+    /// <summary>Prefilters, resamples the high-passed input and stores the internal-rate frame.</summary>
+    /// <param name="pcm">One channel's input at the API rate for exactly one Opus frame.</param>
+    internal void LoadPacket(ReadOnlySpan<short> pcm)
+    {
+        ApplyInputHighPass(pcm);
+        _resampler.Process(_hpBuffer.AsSpan(0, pcm.Length), _resampled);
+    }
+
+    /// <summary>Copies one resampled frame into the frame input buffer.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal void SetInputFromResampled(int frameIndex)
+    {
+        int frameLength = _state.FrameLength;
+        _resampled.AsSpan(frameIndex * frameLength, frameLength).CopyTo(_state.InputBuf.AsSpan(1, frameLength));
+    }
+
+    /// <summary>Replaces the frame input buffer, for the stereo mixer's mid or side signal.</summary>
+    /// <param name="frame">One internal-rate frame.</param>
+    internal void SetInputFrame(ReadOnlySpan<short> frame) =>
+        frame.CopyTo(_state.InputBuf.AsSpan(1, frame.Length));
+
+    /// <summary>Returns the resampled input of one frame.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal ReadOnlySpan<short> ResampledFrame(int frameIndex) =>
+        _resampled.AsSpan(frameIndex * _state.FrameLength, _state.FrameLength);
+
+    /// <summary>
+    /// Runs the VAD on the current frame input and records the activity the packet header needs
+    /// (RFC 6716 Appendix A, <c>silk_VAD_GetSA_Q8</c> and <c>silk_encode_do_VAD_FIX</c>).
+    /// </summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal void AnalyzeInput(int frameIndex)
+    {
+        int frameLength = _state.FrameLength;
+        SilkVad.GetSpeechActivity(_state, _state.InputBuf.AsSpan(1, frameLength));
+        _speechActivity[frameIndex] = _state.SpeechActivityQ8;
+        _inputTilt[frameIndex] = _state.InputTiltQ15;
+        _state.InputQualityBandsQ15.AsSpan().CopyTo(_bandQuality[frameIndex]);
+
+        // RFC 6716 Appendix A, silk_encode_do_VAD_FIX: inactivity is signal type 0, activity
+        // starts as unvoiced and the pitch search may upgrade it to voiced.
+        if (_state.SpeechActivityQ8 < 13)
+        {
+            _vadSignalType[frameIndex] = 0;
+            _state.NoSpeechCounter++;
+        }
+        else
+        {
+            _state.NoSpeechCounter = 0;
+            _vadSignalType[frameIndex] = 1;
+            _state.InDtx = 0;
+        }
+    }
+
+    /// <summary>Gets one frame's speech activity, Q8.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal int SpeechActivityQ8(int frameIndex) => _speechActivity[frameIndex];
+
+    /// <summary>Gets one frame's VAD signal type: 0 inactive, 1 active.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal int VadSignalType(int frameIndex) => _vadSignalType[frameIndex];
+
+    /// <summary>Resets the side channel's encoder memory after a mid-only interval
+    /// (RFC 6716 Appendix A, <c>silk_Encode</c>).</summary>
+    internal void ResetAfterMidOnly()
+    {
+        _state.Shape.Reset();
+        _state.Prefilt.Reset();
+        _state.Nsq.Reset();
+        _nsqDelayed.Reset();
+        _state.PrevNlsfQ15.AsSpan().Clear();
+        _state.Lp.InLpState.AsSpan().Clear();
+        _state.PrevLag = 100;
+        _state.Nsq.LagPrev = 100;
+        _state.Shape.LastGainIndex = 10;
+        _state.PrevSignalType = 0;
+        _state.Nsq.PrevGainQ16 = 65536;
+        _state.FirstFrameAfterReset = 1;
+    }
+
+    /// <summary>Prepares one frame's state before quantization (high-pass adaptation and VAD fields).</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    /// <param name="refreshInput">Whether to copy this frame's resampled signal into the input buffer.</param>
+    internal void PrepareFrame(int frameIndex, bool refreshInput = true)
+    {
+        HpVariableCutoff();
+        if (refreshInput)
+        {
+            SetInputFromResampled(frameIndex);
+        }
+
+        _state.SpeechActivityQ8 = _speechActivity[frameIndex];
+        _state.InputTiltQ15 = _inputTilt[frameIndex];
+        _bandQuality[frameIndex].AsSpan().CopyTo(_state.InputQualityBandsQ15);
+        _state.Indices.SignalType = _vadSignalType[frameIndex];
+        _state.VadFlags[frameIndex] = _vadSignalType[frameIndex];
+    }
+
+    /// <summary>Updates the high-pass adaptation memory after a frame.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal void FinishFrame(int frameIndex)
+    {
+        _hpPrevActivityQ8 = _speechActivity[frameIndex];
+        _hpPrevBand0Q15 = _bandQuality[frameIndex][0];
+    }
+
+    /// <summary>Encodes one channel's frame into an existing range coder.</summary>
+    /// <param name="rangeEncoder">The packet's range encoder.</param>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    /// <param name="conditionalCoding">0 independent, 2 conditional.</param>
+    /// <param name="maxBits">The frame's bit budget.</param>
+    /// <param name="useCbr">Whether the frame must hit the budget exactly.</param>
+    internal void EncodeFrameInto(
+        ref RangeEncoder rangeEncoder, int frameIndex, int conditionalCoding, int maxBits, int useCbr) =>
+        EncodeFrame(ref rangeEncoder, frameIndex, conditionalCoding, maxBits, useCbr);
+
+    /// <summary>Runs the SNR control for a channel target rate (Appendix A, <c>silk_control_SNR</c>).</summary>
+    /// <param name="targetRateBps">The channel's target bitrate.</param>
+    internal void SetTargetRate(int targetRateBps) => ControlSnr(targetRateBps);
+
+    /// <summary>Writes a stored LBRR frame's side information and excitation.</summary>
+    /// <param name="rangeEncoder">The packet's range encoder.</param>
+    /// <param name="frameIndex">The SILK frame index the redundancy describes.</param>
+    /// <param name="conditionalCoding">0 independent, 2 conditional.</param>
+    internal void WriteLbrrFrame(ref RangeEncoder rangeEncoder, int frameIndex, int conditionalCoding)
+    {
+        SilkSideInfo saved = _state.Indices;
+        int savedVad = _state.VadFlags[frameIndex];
+        try
+        {
+            _state.Indices = _state.LbrrIndices[frameIndex];
+            _state.VadFlags[frameIndex] = 1;
+            SilkEntropyEncoder.EncodeIndices(ref rangeEncoder, _state, frameIndex, conditionalCoding);
+            SilkEntropyEncoder.EncodePulses(
+                ref rangeEncoder, _state.Indices.SignalType, _state.Indices.QuantOffsetType,
+                _state.LbrrPulses[frameIndex], _state.FrameLength);
+        }
+        finally
+        {
+            _state.Indices = saved;
+            _state.VadFlags[frameIndex] = savedVad;
+        }
+    }
+
+    /// <summary>Clears the LBRR flags after their frames have been written.</summary>
+    internal void ClearLbrrFlags() => _state.LbrrFlags.AsSpan(0, _silkFrames).Clear();
 
     /// <summary>
     /// Applies the Opus-level variable high-pass to the input frame (<c>hp_cutoff</c> in
@@ -437,6 +586,12 @@ internal sealed class SilkEncoderCore
             _state.WarpingQ16 = 0;
         }
 
+        // The delayed-decision trellis widens with complexity, and its warped shaping filters
+        // become valid from two states up (RFC 6716 Appendix A, silk_setup_complexity). One state
+        // keeps the unwarped greedy quantizer, which is what it assumes.
+        _state.NStatesDelayedDecision = SilkNsqDelayedDecision.StatesForComplexity(complexity);
+        _state.WarpingQ16 = _state.NStatesDelayedDecision > 1 ? fsKhz * WarpingMultiplierQ16 : 0;
+
         _state.PitchEstimationLpcOrder = Math.Min(_state.PitchEstimationLpcOrder, _state.PredictLpcOrder);
         _state.ShapeWinLength = (5 * fsKhz) + (2 * _state.LaShape);
 
@@ -476,6 +631,101 @@ internal sealed class SilkEncoderCore
         }
     }
 
+    /// <summary>
+    /// Runs the frame quantizer, choosing the delayed-decision trellis when the complexity asks
+    /// for more than one state or the shaping filters are warped (RFC 6716 Appendix A,
+    /// <c>silk_encode_frame_FIX</c>).
+    /// </summary>
+    private void Quantize(
+        SilkEncoderState state,
+        SilkEncoderControl control,
+        SilkSideInfo indices,
+        ReadOnlySpan<int> inputQ3,
+        Span<short> pulses,
+        SilkNsqState nsq,
+        SilkNsqDelayedDecision delayed)
+    {
+        if (state.NStatesDelayedDecision <= 1 && state.WarpingQ16 == 0)
+        {
+            SilkNsq.Process(
+                state, nsq, indices, inputQ3, pulses,
+                control.PredCoefQ12[0], control.PredCoefQ12[1], control.LtpCoefQ14, control.Ar2Q13,
+                control.HarmShapeGainQ14, control.TiltQ14, control.LfShpQ14,
+                control.GainsQ16, control.PitchL, control.LambdaQ10, control.LtpScaleQ14);
+            return;
+        }
+
+        Span<int> gains = _quantizerGains;
+        control.GainsQ16.AsSpan(0, state.SubframeCount).CopyTo(gains);
+        Span<short> prediction = stackalloc short[2 * SilkEncoderMath.MaxLpcOrder];
+        control.PredCoefQ12[0].AsSpan().CopyTo(prediction);
+        control.PredCoefQ12[1].AsSpan().CopyTo(prediction[SilkEncoderMath.MaxLpcOrder..]);
+
+        var parameters = new SilkNsqParameters(
+            inputQ3[..state.FrameLength],
+            prediction[..(2 * SilkEncoderMath.MaxLpcOrder)],
+            control.LtpCoefQ14,
+            control.Ar2Q13,
+            control.HarmShapeGainQ14,
+            control.TiltQ14,
+            control.LfShpQ14,
+            gains,
+            control.PitchL,
+            indices.SignalType,
+            indices.QuantOffsetType,
+            control.LambdaQ10,
+            control.LtpScaleQ14,
+            indices.Seed,
+            indices.NlsfInterpCoefQ2,
+            state.SubframeCount,
+            state.SubframeLength,
+            state.LtpMemLength,
+            state.PredictLpcOrder,
+            state.ShapingLpcOrder,
+            state.WarpingQ16);
+
+        delayed.Run(parameters, state.NStatesDelayedDecision, _delayedPulses, _delayedOutput, out int seed);
+        indices.Seed = seed;
+        for (int i = 0; i < state.FrameLength; i++)
+        {
+            pulses[i] = _delayedPulses[i];
+        }
+    }
+
+    /// <summary>
+    /// Encodes this frame's low-bitrate redundancy at a raised gain
+    /// (RFC 6716 Appendix A, <c>silk_LBRR_encode_FIX</c>).
+    /// </summary>
+    private void EncodeLbrrFrame(int frameIndex, int conditionalCoding)
+    {
+        SilkEncoderState state = _state;
+        SilkEncoderControl control = _control;
+        state.LbrrFlags[frameIndex] = 1;
+
+        SilkSideInfo lbrr = state.LbrrIndices[frameIndex];
+        lbrr.CopyFrom(state.Indices);
+
+        Span<int> savedGains = stackalloc int[state.SubframeCount];
+        control.GainsQ16.AsSpan(0, state.SubframeCount).CopyTo(savedGains);
+
+        if (frameIndex == 0 || state.LbrrFlags[frameIndex - 1] == 0)
+        {
+            state.LbrrPrevLastGainIndex = state.Shape.LastGainIndex;
+            lbrr.GainsIndices[0] = Math.Min(
+                lbrr.GainsIndices[0] + state.LbrrGainIncreases, 63);
+        }
+
+        SilkEncoderAnalysis.DequantizeGains(
+            control.GainsQ16, lbrr.GainsIndices, ref state.LbrrPrevLastGainIndex,
+            conditionalCoding == ConditionalCoding ? 1 : 0, state.SubframeCount);
+
+        _nsqLbrr.CopyFrom(state.Nsq);
+        _nsqDelayedLbrr.CopyFrom(_nsqDelayed);
+        Quantize(state, control, lbrr, _xfwQ3, state.LbrrPulses[frameIndex], _nsqLbrr, _nsqDelayedLbrr);
+
+        savedGains.CopyTo(control.GainsQ16);
+    }
+
     private void EncodeFrame(ref RangeEncoder rangeEncoder, int frameIndex, int conditionalCoding, int maxBits, int useCbr)
     {
         SilkEncoderState state = _state;
@@ -488,7 +738,7 @@ internal sealed class SilkEncoderCore
 
         // Copy the new frame next to the shape look-ahead, then run the analysis.
         int frameOffset = state.LtpMemLength;
-        _resampled.AsSpan(frameIndex * frameLength, frameLength)
+        state.InputBuf.AsSpan(1, frameLength)
             .CopyTo(state.XBuf.AsSpan(frameOffset + (5 * state.FsKhz)));
 
         _pitchAnalysis.FindPitchLags(state, control, _residual, state.XBuf, frameOffset);
@@ -498,6 +748,13 @@ internal sealed class SilkEncoderCore
             state, control, _residual, state.XBuf, frameOffset, conditionalCoding);
         SilkEncoderAnalysis.ProcessGains(state, control, conditionalCoding);
         SilkEncoderAnalysis.Prefilter(state, control, _xfwQ3, state.XBuf, frameOffset);
+
+        // Low-bitrate redundancy reuses this frame's parameters at a higher gain
+        // (RFC 6716 Appendix A, silk_LBRR_encode_FIX).
+        if (state.LbrrEnabled != 0 && state.SpeechActivityQ8 > LbrrSpeechActivityThresholdQ8)
+        {
+            EncodeLbrrFrame(frameIndex, conditionalCoding);
+        }
 
         int gainMultiplierQ8 = 256;
         bool foundLower = false;
@@ -515,6 +772,7 @@ internal sealed class SilkEncoderCore
         RangeEncoder savedStart = rangeEncoder;
         RangeEncoder savedLower = default;
         _nsqStart.CopyFrom(state.Nsq);
+        _nsqDelayedStart.CopyFrom(_nsqDelayed);
         int seedStart = state.Indices.Seed;
         int ecPrevLagStart = state.EcPrevLagIndex;
         int ecPrevSignalStart = state.EcPrevSignalType;
@@ -535,16 +793,13 @@ internal sealed class SilkEncoderCore
                 {
                     rangeEncoder = savedStart;
                     state.Nsq.CopyFrom(_nsqStart);
+                    _nsqDelayed.CopyFrom(_nsqDelayedStart);
                     state.Indices.Seed = seedStart;
                     state.EcPrevLagIndex = ecPrevLagStart;
                     state.EcPrevSignalType = ecPrevSignalStart;
                 }
 
-                SilkNsq.Process(
-                    state, state.Nsq, state.Indices, _xfwQ3, state.Pulses,
-                    control.PredCoefQ12[0], control.PredCoefQ12[1], control.LtpCoefQ14, control.Ar2Q13,
-                    control.HarmShapeGainQ14, control.TiltQ14, control.LfShpQ14,
-                    control.GainsQ16, control.PitchL, control.LambdaQ10, control.LtpScaleQ14);
+                Quantize(state, control, state.Indices, _xfwQ3, state.Pulses, state.Nsq, _nsqDelayed);
 
                 SilkEntropyEncoder.EncodeIndices(ref rangeEncoder, state, frameIndex, conditionalCoding);
                 _lastEncodedIndices.CopyFrom(state.Indices);
@@ -567,6 +822,7 @@ internal sealed class SilkEncoderCore
                     rangeEncoder = savedLower;
                     _rangeLowerBytes.AsSpan(0, _rangeLowerCount).CopyTo(_rangeBuffer);
                     state.Nsq.CopyFrom(_nsqLower);
+                    _nsqDelayed.CopyFrom(_nsqDelayedLower);
                     state.Shape.LastGainIndex = lastGainIndexLower;
                 }
 
@@ -601,6 +857,7 @@ internal sealed class SilkEncoderCore
                     _rangeLowerCount = rangeEncoder.RangeBytes;
                     _rangeBuffer.AsSpan(0, _rangeLowerCount).CopyTo(_rangeLowerBytes);
                     _nsqLower.CopyFrom(state.Nsq);
+                    _nsqDelayedLower.CopyFrom(_nsqDelayed);
                     lastGainIndexLower = state.Shape.LastGainIndex;
                 }
             }

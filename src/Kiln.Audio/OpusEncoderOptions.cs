@@ -38,7 +38,17 @@ public sealed record OpusEncoderOptions
     public bool ConstrainedVbr { get; init; } = true;
 
     /// <summary>Whether to emit in-band forward error correction (LBRR). Default false.</summary>
+    /// <remarks>
+    /// LBRR is only emitted when <see cref="PacketLossPercent"/> is positive and the bitrate is
+    /// above the reference's LBRR threshold; otherwise enabling the flag has no effect.
+    /// </remarks>
     public bool UseInbandFec { get; init; }
+
+    /// <summary>
+    /// Expected packet loss in percent, 0 to 100. Default 0, which disables LBRR. Also lowers the
+    /// LBRR rate when loss is high (RFC 6716 Appendix A, <c>silk_setup_LBRR</c>).
+    /// </summary>
+    public int PacketLossPercent { get; init; }
 
     /// <summary>Whether to enable discontinuous transmission. Default false.</summary>
     public bool UseDtx { get; init; }
@@ -81,6 +91,12 @@ public sealed record OpusEncoderOptions
         if (Complexity is < 0 or > 10)
         {
             throw new ArgumentOutOfRangeException(nameof(Complexity), Complexity, "Complexity must be between 0 and 10.");
+        }
+
+        if (PacketLossPercent is < 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(PacketLossPercent), PacketLossPercent, "Packet loss must be between 0 and 100 percent.");
         }
     }
 }

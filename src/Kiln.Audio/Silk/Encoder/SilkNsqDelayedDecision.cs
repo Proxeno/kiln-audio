@@ -141,6 +141,38 @@ internal sealed class SilkNsqDelayedDecision
         _ => MaxStates,
     };
 
+    /// <summary>Copies the complete quantizer state, so the rate-control loop can roll back.</summary>
+    /// <param name="other">The state to copy from; it must have the same geometry.</param>
+    internal void CopyFrom(SilkNsqDelayedDecision other)
+    {
+        other._xq.AsSpan().CopyTo(_xq);
+        other._sLtpShpQ14.AsSpan().CopyTo(_sLtpShpQ14);
+        other._sLpcQ14.AsSpan().CopyTo(_sLpcQ14);
+        other._sAr2Q14.AsSpan().CopyTo(_sAr2Q14);
+        for (int k = 0; k < MaxStates; k++)
+        {
+            other._stateLpcQ14[k].AsSpan().CopyTo(_stateLpcQ14[k]);
+            other._stateRandState[k].AsSpan().CopyTo(_stateRandState[k]);
+            other._stateQQ10[k].AsSpan().CopyTo(_stateQQ10[k]);
+            other._stateXqQ14[k].AsSpan().CopyTo(_stateXqQ14[k]);
+            other._statePredQ15[k].AsSpan().CopyTo(_statePredQ15[k]);
+            other._stateShapeQ14[k].AsSpan().CopyTo(_stateShapeQ14[k]);
+            other._stateAr2Q14[k].AsSpan().CopyTo(_stateAr2Q14[k]);
+        }
+
+        other._stateLfArQ14.AsSpan().CopyTo(_stateLfArQ14);
+        other._stateSeed.AsSpan().CopyTo(_stateSeed);
+        other._stateSeedInit.AsSpan().CopyTo(_stateSeedInit);
+        other._stateRdQ10.AsSpan().CopyTo(_stateRdQ10);
+        _sLfArShpQ14 = other._sLfArShpQ14;
+        _lagPrev = other._lagPrev;
+        _sLtpBufIdx = other._sLtpBufIdx;
+        _sLtpShpBufIdx = other._sLtpShpBufIdx;
+        _prevGainQ16 = other._prevGainQ16;
+        _rewhiteFlag = other._rewhiteFlag;
+        LastCostQ10 = other.LastCostQ10;
+    }
+
     /// <summary>Gets the previous frame's pitch lag (Appendix A <c>NSQ-&gt;lagPrev</c>).</summary>
     internal int LagPrev => _lagPrev;
 
