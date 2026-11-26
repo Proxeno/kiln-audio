@@ -7,7 +7,7 @@
 #
 # Default (no arguments) decodes the six PERF comparison vectors:
 #   01/07/11  CELT, 48 kHz stereo
-#   02/03/04  SILK, decoded at the SILK internal rate (8/12/16 kHz) stereo
+#   02/03/04  SILK, decoded at the SILK internal rate (8/12/16 kHz), mono like the stream
 #
 # Usage:
 #   scripts/bench-libopus-inproc.sh                 # the six default vectors
@@ -68,9 +68,11 @@ if [[ $# -eq 0 ]]; then
     run_vector 01 48000 2
     run_vector 07 48000 2
     run_vector 11 48000 2
-    run_vector 02 8000 2
-    run_vector 03 12000 2
-    run_vector 04 16000 2
+    # Vectors 02/03/04 are mono (TOC byte bit 2 clear), so decode one channel to match the
+    # Kiln benchmark, which uses the TOC channel count.
+    run_vector 02 8000 1
+    run_vector 03 12000 1
+    run_vector 04 16000 1
     exit 0
 fi
 
@@ -82,9 +84,9 @@ case "$1" in
         for number in "$@"; do
             case "${number}" in
                 01 | 07 | 11) run_vector "${number}" 48000 2 ;;
-                02) run_vector 02 8000 2 ;;
-                03) run_vector 03 12000 2 ;;
-                04) run_vector 04 16000 2 ;;
+                02) run_vector 02 8000 1 ;;
+                03) run_vector 03 12000 1 ;;
+                04) run_vector 04 16000 1 ;;
                 *)
                     echo "unknown vector '${number}' (expected 01 02 03 04 07 11)" >&2
                     exit 2

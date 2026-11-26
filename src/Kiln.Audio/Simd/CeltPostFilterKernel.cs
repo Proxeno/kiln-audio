@@ -89,6 +89,12 @@ internal static class CeltPostFilterKernel
         float g11 = gain1 * taps1[1];
         float g12 = gain1 * taps1[2];
 
+        // A period is only meaningful when its gains are non-zero: the decoder passes the newly
+        // decoded pitch through unchanged even when it is zero, so a zero gain set must also skip
+        // the read (the reference does the same). This is load-bearing for the index bounds.
+        bool use0 = g00 != 0f || g01 != 0f || g02 != 0f;
+        bool use1 = g10 != 0f || g11 != 0f || g12 != 0f;
+
         int fadeEnd = Math.Min(overlap, count);
         int index = 0;
 
@@ -102,7 +108,7 @@ internal static class CeltPostFilterKernel
             {
                 FadeBlock(
                     history, frameStart + index, index, period0, period1,
-                    g00, g01, g02, g10, g11, g12, windowSquare);
+                    g00, g01, g02, g10, g11, g12, use0, use1, windowSquare);
             }
         }
 
@@ -110,10 +116,10 @@ internal static class CeltPostFilterKernel
         {
             FadeSample(
                 history, frameStart + index, index, period0, period1,
-                g00, g01, g02, g10, g11, g12, windowSquare);
+                g00, g01, g02, g10, g11, g12, use0, use1, windowSquare);
         }
 
-        if (vector)
+        if (vector && use1)
         {
             for (; index + VectorWidth <= count; index += VectorWidth)
             {
@@ -123,7 +129,7 @@ internal static class CeltPostFilterKernel
 
         for (; index < count; index++)
         {
-            SteadySample(history, frameStart + index, period1, g10, g11, g12);
+            SteadySample(history, frameStart + index, period1, g10, g11, g12, use1);
         }
     }
 
@@ -139,30 +145,32 @@ internal static class CeltPostFilterKernel
         float g10,
         float g11,
         float g12,
+        bool use0,
+        bool use1,
         ReadOnlySpan<float> windowSquare)
     {
-        var g00v = Vector128.Create(g00);
-        var g01v = Vector128.Create(g01);
-        var g02v = Vector128.Create(g02);
-        var g10v = Vector128.Create(g10);
-        var g11v = Vector128.Create(g11);
-        var g12v = Vector128.Create(g12);
         Vector128<float> value = Load(history, position);
 
         Vector128<float> fade = Load(windowSquare, fadeIndex);
         Vector128<float> weight = Vector128.Create(1f) - fade;
 
-        Vector128<float> sum0 =
-            (g00v * Load(history, position - period0))
-            + (g01v * (Load(history, position - period0 - 1) + Load(history, position - period0 + 1)))
-            + (g02v * (Load(history, position - period0 - 2) + Load(history, position - period0 + 2)));
-        value += weight * sum0;
+        if (use0)
+        {
+            Vector128<float> sum0 =
+                (Vector128.Create(g00) * Load(history, position - period0))
+                + (Vector128.Create(g01) * (Load(history, position - period0 - 1) + Load(history, position - period0 + 1)))
+                + (Vector128.Create(g02) * (Load(history, position - period0 - 2) + Load(history, position - period0 + 2)));
+            value += weight * sum0;
+        }
 
-        Vector128<float> sum1 =
-            (g10v * Load(history, position - period1))
-            + (g11v * (Load(history, position - period1 - 1) + Load(history, position - period1 + 1)))
-            + (g12v * (Load(history, position - period1 - 2) + Load(history, position - period1 + 2)));
-        value += fade * sum1;
+        if (use1)
+        {
+            Vector128<float> sum1 =
+                (Vector128.Create(g10) * Load(history, position - period1))
+                + (Vector128.Create(g11) * (Load(history, position - period1 - 1) + Load(history, position - period1 + 1)))
+                + (Vector128.Create(g12) * (Load(history, position - period1 - 2) + Load(history, position - period1 + 2)));
+            value += fade * sum1;
+        }
 
         Store(history, position, value);
     }
@@ -179,19 +187,29 @@ internal static class CeltPostFilterKernel
         float g10,
         float g11,
         float g12,
+        bool use0,
+        bool use1,
         ReadOnlySpan<float> windowSquare)
     {
         float fade = windowSquare[fadeIndex];
         float value = history[position];
-        float weight = 1f - fade;
-        value += weight * (
-            (g00 * history[position - period0])
-            + (g01 * (history[position - period0 - 1] + history[position - period0 + 1]))
-            + (g02 * (history[position - period0 - 2] + history[position - period0 + 2])));
-        value += fade * (
-            (g10 * history[position - period1])
-            + (g11 * (history[position - period1 - 1] + history[position - period1 + 1]))
-            + (g12 * (history[position - period1 - 2] + history[position - period1 + 2])));
+        if (use0)
+        {
+            float weight = 1f - fade;
+            value += weight * (
+                (g00 * history[position - period0])
+                + (g01 * (history[position - period0 - 1] + history[position - period0 + 1]))
+                + (g02 * (history[position - period0 - 2] + history[position - period0 + 2])));
+        }
+
+        if (use1)
+        {
+            value += fade * (
+                (g10 * history[position - period1])
+                + (g11 * (history[position - period1 - 1] + history[position - period1 + 1]))
+                + (g12 * (history[position - period1 - 2] + history[position - period1 + 2])));
+        }
+
         history[position] = value;
     }
 
@@ -220,8 +238,14 @@ internal static class CeltPostFilterKernel
         int period,
         float g10,
         float g11,
-        float g12)
+        float g12,
+        bool use1)
     {
+        if (!use1)
+        {
+            return;
+        }
+
         history[position] +=
             (g10 * history[position - period])
             + (g11 * (history[position - period - 1] + history[position - period + 1]))

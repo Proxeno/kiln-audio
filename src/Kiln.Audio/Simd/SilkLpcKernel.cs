@@ -17,7 +17,7 @@ namespace Kiln.Audio.Simd;
 /// </para>
 /// <para>
 /// The vector path is bit-exact with the scalar path: each term is an independently rounded
-/// integer contribution and integer addition is associative modulo 2^32, so widening, multiplying,
+/// integer contribution and integer addition is associative modulo 2^32, so splitting, multiplying,
 /// shifting and summing the lanes gives the same wrapped result as the sequential scalar chain.
 /// </para>
 /// </remarks>

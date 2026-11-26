@@ -258,6 +258,32 @@ public class SimdParityTests
         Assert.Equal(scalarHistory, vectorHistory);
     }
 
+    [Fact]
+    public void Celt_post_filter_skips_an_unused_out_of_range_period()
+    {
+        // The decoder passes the newly decoded pitch through even when its gain is zero, so an
+        // unused period can be larger than the history. Both paths must skip the read rather
+        // than throw.
+        const int HistorySize = 512;
+        const int FrameStart = 400;
+        const int Overlap = 120;
+        var history = new float[HistorySize];
+        FillRandom(history, 77);
+        var windowSquare = new float[Overlap];
+        FillRandom(windowSquare, 78);
+        var vectorHistory = (float[])history.Clone();
+        var scalarHistory = (float[])history.Clone();
+
+        CeltPostFilterKernel.CombFilter(
+            vectorHistory, FrameStart, 100, 30, 4000, 0.5f, 0f, 0, 1,
+            windowSquare, Overlap, useVector: true);
+        CeltPostFilterKernel.CombFilter(
+            scalarHistory, FrameStart, 100, 30, 4000, 0.5f, 0f, 0, 1,
+            windowSquare, Overlap, useVector: false);
+
+        Assert.Equal(scalarHistory, vectorHistory);
+    }
+
     [Theory]
     [InlineData(10)]
     [InlineData(16)]
