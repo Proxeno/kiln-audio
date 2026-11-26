@@ -141,5 +141,10 @@ committed sequences in `Robustness/FuzzSequenceRegressionTests`.
 | 2026-11-26 | pre-fix | 1 | 60 s | 305,466 | 5 SILK PLC buffer mismatches, 1 CELT PLC out-of-range |
 | 2026-11-26 | SILK PLC fixed | 2 | 60 s | 267,177 | 5 SILK PLC sequences (same defect) |
 | 2026-11-26 | pre-CELT-fix | 3 | 600 s | 12,273,783 | 1 CELT PLC out-of-range (same defect) |
+| 2026-11-26 | fixed | 4–15 | 12 × 600 s | 139,006,359 | 0 |
 
-The post-fix sessions are recorded in the pull request.
+Post-fix total: **139,006,359 executions in 2 hours** (seeds 4 to 15, ten minutes each,
+single-threaded under `nice -n 19`), no findings. Across all sessions: 151,923,344 executions in
+7,940 s (2 h 12 min), 14 raw findings from two distinct root causes. The first session's nine
+additional findings were defects in the harness's own parser validator, fixed before the runs
+tabulated above.
