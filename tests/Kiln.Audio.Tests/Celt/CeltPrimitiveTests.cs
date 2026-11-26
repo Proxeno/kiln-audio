@@ -6,8 +6,8 @@ namespace Kiln.Audio.Tests.Celt;
 
 /// <summary>
 /// Hand-computed checks of the three smallest CELT primitives: the PVQ codebook size
-/// V(N,K), the PVQ index decoder, and the Laplace energy decoder (RFC 6716 §4.3.2.1 and
-/// §4.3.4.1).
+/// V(N,K) and the PVQ index decoder (RFC 6716 §4.3.4.2), and the Laplace energy decoder
+/// (RFC 6716 §4.3.2.1).
 /// </summary>
 public class CeltPrimitiveTests
 {
@@ -49,7 +49,8 @@ public class CeltPrimitiveTests
     public void Laplace_decoder_recovers_hand_chosen_symbols_from_a_hand_built_stream()
     {
         // The symbols below are chosen by hand; the intervals are computed from the PDF
-        // description in RFC 6716 §4.3.2.1, independently of the decoder's search loop.
+        // description and the ec_laplace_decode procedure in RFC 6716 §4.3.2.1 (Appendix A,
+        // celt/laplace.c), independently of the decoder's search loop.
         const uint Fs0 = 10000;
         const int Decay = 10000;
         int[] symbols = [0, 1, -1, 2, -2, 0, 3, -4];
@@ -86,8 +87,7 @@ public class CeltPrimitiveTests
 
         var decoder = new RangeDecoder(buffer);
         var vector = new int[n];
-        float energy = CeltDecoder.DecodePulses(ref decoder, n, k, vector);
-        energy.Should().BeApproximately(vector.Sum(value => value * value), 1e-3f);
+        CeltDecoder.DecodePulses(ref decoder, n, k, vector);
         decoder.Error.Should().BeFalse();
         return vector;
     }

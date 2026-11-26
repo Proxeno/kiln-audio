@@ -85,6 +85,12 @@ internal sealed class CeltFrameResult
 /// post-filter parameters, and the folding seed derived from the previous final range.
 /// </para>
 /// <para>
+/// The symbol order is Table 56 of RFC 6716. Procedures that Section 4.3 specifies only by
+/// naming the reference implementation are taken from the complete source embedded in
+/// Appendix A of RFC 6716. RFC 8251 Section 9 (hybrid folding) is applied; its other changes
+/// concern SILK, packet parsing or synthesis, not this layer.
+/// </para>
+/// <para>
 /// The hot path is allocation-free. All working buffers are owned by the decoder instance or
 /// by the caller's <see cref="CeltFrameResult"/>.
 /// </para>
@@ -98,7 +104,7 @@ internal sealed class CeltDecoder
     private const int SpreadNormal = 2;
     private const int SpreadAggressive = 3;
 
-    // Fine-allocation offsets (RFC 6716 §4.3.3).
+    // Fine-allocation offsets (RFC 6716 §4.3.3; Appendix A, celt/rate.h).
     private const int FineOffset = 21;
     private const int QThetaOffset = 4;
     private const int QThetaOffsetTwoPhase = 16;
@@ -109,7 +115,7 @@ internal sealed class CeltDecoder
     private readonly float[] _backgroundLogE = new float[2 * BandCount];
 
     private readonly float[] _spectrum = new float[2 * CeltTables.MaxFrameSamples];
-    private readonly float[] _norm = new float[2 * (8 * 78)];
+    private readonly float[] _norm = new float[2 * (8 * 100)];
     private readonly float[] _lowbandScratch = new float[CeltTables.MaxFrameSamples];
     private readonly float[] _reorderScratch = new float[CeltTables.MaxFrameSamples];
     private readonly float[] _coarsePrevious = new float[2];
@@ -213,6 +219,7 @@ internal sealed class CeltDecoder
             throw new ArgumentOutOfRangeException(nameof(endBand), endBand, "End band must be after the start band and at most 21.");
         }
 
+        // Symbols are decoded in the order of RFC 6716 Table 56.
         ReadOnlySpan<short> eBands = CeltTables.EBands;
         int m = 1 << lm;
         int n = m * CeltTables.ShortBlockSamples;
@@ -423,6 +430,11 @@ internal sealed class CeltDecoder
         {
             Array.Copy(_oldLogE, _oldLogE2, 2 * BandCount);
             Array.Copy(_oldBandE, _oldLogE, 2 * BandCount);
+            float backgroundIncrease = m * 0.001f;
+            for (int i = 0; i < 2 * BandCount; i++)
+            {
+                _backgroundLogE[i] = Math.Min(_backgroundLogE[i] + backgroundIncrease, _oldBandE[i]);
+            }
         }
         else
         {
@@ -430,12 +442,6 @@ internal sealed class CeltDecoder
             {
                 _oldLogE[i] = Math.Min(_oldLogE[i], _oldBandE[i]);
             }
-        }
-
-        float maxBackgroundIncrease = Math.Min(160, m) * 0.001f;
-        for (int i = 0; i < 2 * BandCount; i++)
-        {
-            _backgroundLogE[i] = Math.Min(_backgroundLogE[i] + maxBackgroundIncrease, _oldBandE[i]);
         }
 
         for (int ch = 0; ch < 2; ch++)
@@ -846,7 +852,7 @@ internal sealed class CeltDecoder
 
             int left = total - psumFinal;
             int bandStart = eBands[start];
-            int perCoefficient = Udiv(left, eBands[codedBands] - bandStart);
+            int perCoefficient = left / (eBands[codedBands] - bandStart);
             left -= (eBands[codedBands] - bandStart) * perCoefficient;
             int remainder = Math.Max(left - (eBands[j] - bandStart), 0);
             int bandWidth = eBands[codedBands] - eBands[j];
@@ -898,7 +904,7 @@ internal sealed class CeltDecoder
         dualStereo = dualStereoReserve > 0 && dec.DecodeBitLogp(1) ? 1 : 0;
 
         int left2 = total - psumFinal;
-        int perCoefficient2 = Udiv(left2, eBands[codedBands] - eBands[start]);
+        int perCoefficient2 = left2 / (eBands[codedBands] - eBands[start]);
         left2 -= (eBands[codedBands] - eBands[start]) * perCoefficient2;
         for (int j = start; j < codedBands; j++)
         {
@@ -942,8 +948,9 @@ internal sealed class CeltDecoder
                     offset += ncLogN >> 3;
                 }
 
-                int ebits = Math.Max(0, _pulses[jj] + offset + (den << (CeltTables.BitRes - 1)));
-                ebits = Udiv(ebits, den) >> CeltTables.BitRes;
+                int ebits = Math.Max(
+                    0,
+                    (_pulses[jj] + offset + (den << (CeltTables.BitRes - 1))) / (den << CeltTables.BitRes));
                 if (c * ebits > _pulses[jj] >> CeltTables.BitRes)
                 {
                     ebits = _pulses[jj] >> stereo >> CeltTables.BitRes;
@@ -1049,12 +1056,22 @@ internal sealed class CeltDecoder
         int m = 1 << lm;
         int blocks = shortBlocks ? m : 1;
         int normOffset = m * eBands[start];
-        int normLength = (m * eBands[BandCount - 1]) - normOffset;
+        int normLength = (m * eBands[BandCount]) - normOffset;
 
         Span<float> norm = _norm.AsSpan(0, normLength);
         Span<float> norm2 = _norm.AsSpan(normLength, normLength);
         Span<float> spectrum = _spectrum.AsSpan(0, c * n);
         Span<float> scratch = _lowbandScratch.AsSpan(0, n);
+
+        // RFC 6716 §4.3.4 (reference: celt.c zeroes X before decoding): only
+        // [eBands[start], eBands[end]) is coded.
+        int firstCoded = m * eBands[start];
+        int lastCoded = m * eBands[end];
+        for (int ch = 0; ch < c; ch++)
+        {
+            spectrum.Slice(ch * n, firstCoded).Clear();
+            spectrum.Slice((ch * n) + lastCoded, n - lastCoded).Clear();
+        }
 
         _ctx.Band = 0;
         _ctx.Intensity = intensity;
@@ -1069,7 +1086,6 @@ internal sealed class CeltDecoder
         for (int i = start; i < end; i++)
         {
             _ctx.Band = i;
-            bool last = i == end - 1;
             int bandSamples = m * (eBands[i + 1] - eBands[i]);
             int tell = (int)dec.TellFrac();
 
@@ -1165,7 +1181,7 @@ internal sealed class CeltDecoder
                     blocks,
                     effective >= 0 ? norm.Slice(effective, bandSamples) : default,
                     lm,
-                    last ? default : norm.Slice((m * eBands[i]) - normOffset, bandSamples),
+                    norm.Slice((m * eBands[i]) - normOffset, bandSamples),
                     1f,
                     scratch,
                     xMask);
@@ -1177,7 +1193,7 @@ internal sealed class CeltDecoder
                     blocks,
                     effective >= 0 ? norm2.Slice(effective, bandSamples) : default,
                     lm,
-                    last ? default : norm2.Slice((m * eBands[i]) - normOffset, bandSamples),
+                    norm2.Slice((m * eBands[i]) - normOffset, bandSamples),
                     1f,
                     scratch,
                     yMask);
@@ -1185,7 +1201,7 @@ internal sealed class CeltDecoder
             else
             {
                 Span<float> lowband = effective >= 0 ? norm.Slice(effective, bandSamples) : default;
-                Span<float> lowbandOut = last ? default : norm.Slice((m * eBands[i]) - normOffset, bandSamples);
+                Span<float> lowbandOut = norm.Slice((m * eBands[i]) - normOffset, bandSamples);
                 if (c == 2)
                 {
                     xCollapse = QuantBandStereo(
@@ -1240,7 +1256,7 @@ internal sealed class CeltDecoder
         int recombine = 0;
         int tfChange = _ctx.TfChange;
 
-        nB = Udiv(nB, blocks);
+        nB /= blocks;
         if (n == 1)
         {
             return QuantBandN1(ref dec, x, default, lowbandOut);
@@ -1798,7 +1814,7 @@ internal sealed class CeltDecoder
                 dec.Update((uint)fl, (uint)(fl + fs), (uint)ft);
             }
 
-            localTheta = Udiv(localTheta * 16384, qn);
+            localTheta = localTheta * 16384 / qn;
         }
         else if (stereo)
         {
@@ -1871,11 +1887,18 @@ internal sealed class CeltDecoder
         return qn;
     }
 
-    /// <summary>Decodes a PVQ vector and produces the normalized shape (RFC 6716 §4.3.4.1).</summary>
+    /// <summary>Decodes a PVQ vector and produces the normalized shape (RFC 6716 §4.3.4.2).</summary>
     private int AlgUnquant(ref RangeDecoder dec, Span<float> x, int n, int k, int blocks, float gain)
     {
+        // RFC 6716 Appendix A, celt/vq.c: decode_pulses(), then Ryy = sum(iy[i]**2).
         Span<int> iy = _iy.AsSpan(0, n);
-        float energy = DecodePulses(ref dec, n, k, iy);
+        DecodePulses(ref dec, n, k, iy);
+        float energy = 0;
+        for (int i = 0; i < n; i++)
+        {
+            energy += iy[i] * iy[i];
+        }
+
         float g = (1f / (float)Math.Sqrt(energy)) * gain;
         for (int i = 0; i < n; i++)
         {
@@ -1886,123 +1909,60 @@ internal sealed class CeltDecoder
         return ExtractCollapseMask(iy, n, blocks);
     }
 
-    /// <summary>Decodes a PVQ codeword index into its integer vector (RFC 6716 §4.3.4.1).</summary>
-    internal static float DecodePulses(ref RangeDecoder dec, int n, int k, Span<int> y)
+    /// <summary>Decodes a PVQ codeword index into its integer vector (RFC 6716 §4.3.4.2).</summary>
+    internal static void DecodePulses(ref RangeDecoder dec, int n, int k, Span<int> y)
     {
-        uint ft = PvqV(n, k);
-        uint index = dec.DecodeUInt(ft);
-        return Cwrsi(n, k, index, y);
+        uint index = dec.DecodeUInt(PvqV(n, k));
+        Cwrsi(n, k, index, y);
     }
 
-    /// <summary>Returns the number of PVQ codewords <c>V(N,K)</c> (RFC 6716 §4.3.4.1).</summary>
-    internal static uint PvqV(int n, int k) => U(n, k) + U(n, k + 1);
+    /// <summary>
+    /// Returns the number of PVQ codewords <c>V(N,K)</c> (RFC 6716 §4.3.4.2: "V(N,K) =
+    /// V(N-1,K) + V(N,K-1) + V(N-1,K-1), with V(N,0) = 1 and V(0,K) = 0, K != 0").
+    /// </summary>
+    internal static uint PvqV(int n, int k) => PvqTable[n, k];
 
-    /// <summary>Returns the <c>U(N,K)</c> combinatorial term (RFC 6716 §4.3.4.1).</summary>
-    private static uint U(int n, int k)
-    {
-        if (n == 0)
-        {
-            return k == 0 ? 1u : 0u;
-        }
-
-        if (k == 0)
-        {
-            return 0u;
-        }
-
-        // U(n,k) = U(n-1,k) + U(n,k-1) + U(n-1,k-1), evaluated with 64-bit
-        // intermediates and saturated outside the 32-bit PVQ range.
-        return (uint)UTable[n, k];
-    }
-
-    /// <summary>Maps a PVQ codeword index back to its integer vector.</summary>
-    private static float Cwrsi(int n, int k, uint index, Span<int> y)
+    /// <summary>
+    /// Recovers the integer pulse vector from its codeword index using the five steps of
+    /// RFC 6716 §4.3.4.2.
+    /// </summary>
+    private static void Cwrsi(int n, int k, uint index, Span<int> y)
     {
         uint i = index;
-        float energy = 0;
-        int position = 0;
-        while (n > 2)
+        for (int j = 0; j < n; j++)
         {
-            if (k >= n)
-            {
-                uint p = U(n, k + 1);
-                int sign = i >= p ? -1 : 0;
-                i -= p & (uint)sign;
-                int k0 = k;
-                uint q = U(n, n);
-                if (q > i)
-                {
-                    k = n;
-                    do
-                    {
-                        k--;
-                        p = U(k, n);
-                    }
-                    while (p > i);
-                }
-                else
-                {
-                    for (p = U(n, k); p > i; p = U(n, k))
-                    {
-                        k--;
-                    }
-                }
+            int remaining = n - j;
 
-                i -= p;
-                int value = (k0 - k + sign) ^ sign;
-                y[position++] = value;
-                energy += value * value;
+            // 1. p = (V(N-j-1,k) + V(N-j,k)) / 2.
+            uint p = (PvqV(remaining - 1, k) + PvqV(remaining, k)) / 2;
+
+            // 2. If i < p, sgn = 1; otherwise sgn = -1 and i = i - p.
+            int sgn;
+            if (i < p)
+            {
+                sgn = 1;
             }
             else
             {
-                uint p = U(k, n);
-                uint q = U(k + 1, n);
-                if (p <= i && i < q)
-                {
-                    i -= p;
-                    y[position++] = 0;
-                }
-                else
-                {
-                    int sign = i >= q ? -1 : 0;
-                    i -= q & (uint)sign;
-                    int k0 = k;
-                    do
-                    {
-                        k--;
-                        p = U(k, n);
-                    }
-                    while (p > i);
-
-                    i -= p;
-                    int value = (k0 - k + sign) ^ sign;
-                    y[position++] = value;
-                    energy += value * value;
-                }
+                sgn = -1;
+                i -= p;
             }
 
-            n--;
+            // 3. k0 = k and p = p - V(N-j-1,k).
+            int k0 = k;
+            p -= PvqV(remaining - 1, k);
+
+            // 4. While p > i, set k = k - 1 and p = p - V(N-j-1,k).
+            while (p > i && k > 0)
+            {
+                k--;
+                p -= PvqV(remaining - 1, k);
+            }
+
+            // 5. X[j] = sgn*(k0 - k) and i = i - p.
+            y[j] = sgn * (k0 - k);
+            i -= p;
         }
-
-        uint tail = (2 * (uint)k) + 1;
-        int tailSign = i >= tail ? -1 : 0;
-        i -= tail & (uint)tailSign;
-        int tailK0 = k;
-        k = (int)((i + 1) >> 1);
-        if (k != 0)
-        {
-            i -= (2 * (uint)k) - 1;
-        }
-
-        int first = (tailK0 - k + tailSign) ^ tailSign;
-        y[position++] = first;
-        energy += first * first;
-
-        int lastSign = -(int)i;
-        int last = (k + lastSign) ^ lastSign;
-        y[position] = last;
-        energy += last * last;
-        return energy;
     }
 
     /// <summary>Decodes the second half of the band splitter's angle (RFC 6716 §4.3.4.2).</summary>
@@ -2088,7 +2048,10 @@ internal sealed class CeltDecoder
         }
     }
 
-    /// <summary>Builds the collapse mask from the decoded pulse vector (RFC 6716 §4.3.4.1).</summary>
+    /// <summary>
+    /// Builds the collapse mask from the decoded pulse vector (RFC 6716 Appendix A,
+    /// celt/vq.c: extract_collapse_mask).
+    /// </summary>
     private static int ExtractCollapseMask(ReadOnlySpan<int> iy, int n, int blocks)
     {
         if (blocks <= 1)
@@ -2100,13 +2063,10 @@ internal sealed class CeltDecoder
         int mask = 0;
         for (int i = 0; i < blocks; i++)
         {
-            int nonzero = 0;
             for (int j = 0; j < perBlock; j++)
             {
-                nonzero |= iy[(i * perBlock) + j];
+                mask |= (iy[(i * perBlock) + j] != 0 ? 1 : 0) << i;
             }
-
-            mask |= (nonzero != 0 ? 1 : 0) << i;
         }
 
         return mask;
@@ -2153,7 +2113,7 @@ internal sealed class CeltDecoder
         for (int i = start; i < end; i++)
         {
             int n0 = eBands[i + 1] - eBands[i];
-            int depth = Udiv(1 + _pulses[i], n0) >> lm;
+            int depth = (1 + _pulses[i]) / (n0 << lm);
             float threshold = 0.5f * (float)Math.Exp(0.6931471805599453094 * (-0.125f * depth));
             float sqrt1 = 1f / (float)Math.Sqrt(n0 << lm);
             for (int ch = 0; ch < c; ch++)
@@ -2248,10 +2208,10 @@ internal sealed class CeltDecoder
         Array.Copy(_oldLogE, _oldLogE2, 2 * BandCount);
         Array.Copy(_oldBandE, _oldLogE, 2 * BandCount);
 
-        float maxBackgroundIncrease = Math.Min(160, m) * 0.001f;
+        float backgroundIncrease = m * 0.001f;
         for (int i = 0; i < 2 * BandCount; i++)
         {
-            _backgroundLogE[i] = Math.Min(_backgroundLogE[i] + maxBackgroundIncrease, _oldBandE[i]);
+            _backgroundLogE[i] = Math.Min(_backgroundLogE[i] + backgroundIncrease, _oldBandE[i]);
         }
 
         for (int ch = 0; ch < 2; ch++)
@@ -2442,58 +2402,63 @@ internal sealed class CeltDecoder
     /// <summary>Q15 fractional multiply of two 16-bit values (RFC 6716 §4.3.4.2).</summary>
     private static int FracMul16(int a, int b) => (16384 + ((short)a * (short)b)) >> 15;
 
-    /// <summary>Integer square root, exact for the full 32-bit range (RFC 6716 §4.3.4.2).</summary>
+    /// <summary>
+    /// Integer square root, exact for the full 32-bit range (RFC 6716 Appendix A,
+    /// celt/mathops.c: isqrt32).
+    /// </summary>
     private static int Isqrt32(uint value)
     {
-        uint result = (uint)Math.Sqrt(value);
-        while ((ulong)result * result > value)
+        uint g = 0;
+        int bShift = (CeltTables.Ilog((int)value) - 1) >> 1;
+        uint b = 1u << bShift;
+        do
         {
-            result--;
-        }
+            uint t = (((uint)g << 1) + b) << bShift;
+            if (t <= value)
+            {
+                g += b;
+                value -= t;
+            }
 
-        while ((ulong)(result + 1) * (result + 1) <= value)
-        {
-            result++;
+            b >>= 1;
+            bShift--;
         }
+        while (bShift >= 0);
 
-        return (int)result;
+        return (int)g;
     }
 
     /// <summary>The linear congruential generator used for spectral folding (RFC 6716 §4.3.4).</summary>
     private static uint Lcg(uint seed) => (1664525 * seed) + 1013904223;
 
-    /// <summary>Unsigned division matching the RFC's <c>celt_udiv</c>.</summary>
-    private static int Udiv(int n, int d) => unchecked((int)((uint)n / (uint)d));
-
-    /// <summary>Truncating signed division matching the RFC's <c>celt_sudiv</c>.</summary>
+    /// <summary>Truncating division, as the RFC reference's integer semantics specify.</summary>
     private static int IntDiv(int n, int d) => n / d;
 
-    private static readonly ulong[,] UTable = BuildUTable();
+    /// <summary>
+    /// <c>V(N,K)</c> from the recurrence in RFC 6716 §4.3.4.2, tabulated for the largest
+    /// band (176 bins at 20 ms) and the largest pulse count (128).
+    /// </summary>
+    private static readonly uint[,] PvqTable = BuildPvqTable();
 
-    private static ulong[,] BuildUTable()
+    private static uint[,] BuildPvqTable()
     {
-        // The RFC's U(N,K) satisfies U(n,k) = U(n-1,k) + U(n,k-1) + U(n-1,k-1), with
-        // U(0,0)=1 and U(n,0)=U(0,k)=0. Values above 32 bits cannot occur in a valid PVQ
-        // codeword, but they are saturated so the recurrence never overflows.
-        // Both arguments can be as large as the widest band (176 bins), because the
-        // decoder evaluates U(k,n) for a small pulse count k and a large dimension n.
         const int MaxN = 177;
-        const int MaxK = 178;
-        ulong[,] table = new ulong[MaxN, MaxK];
-        table[0, 0] = 1;
+        const int MaxK = 129;
+        uint[,] table = new uint[MaxN, MaxK];
         for (int n = 0; n < MaxN; n++)
+        {
+            table[n, 0] = 1;
+        }
+
+        // V(0,K) = 0 for K != 0. Values above 32 bits cannot occur in a valid codeword and are
+        // saturated, which keeps the recurrence inside 32 bits; the saturation cannot affect
+        // any V(N,K) that fits the 32-bit index space.
+        for (int n = 1; n < MaxN; n++)
         {
             for (int k = 1; k < MaxK; k++)
             {
-                if (n == 0)
-                {
-                    table[n, k] = 0;
-                }
-                else
-                {
-                    ulong value = table[n - 1, k] + table[n, k - 1] + table[n - 1, k - 1];
-                    table[n, k] = value > uint.MaxValue ? uint.MaxValue : value;
-                }
+                ulong value = (ulong)table[n - 1, k] + table[n, k - 1] + table[n - 1, k - 1];
+                table[n, k] = value > uint.MaxValue ? uint.MaxValue : (uint)value;
             }
         }
 

@@ -5,14 +5,18 @@ namespace Kiln.Audio.Celt;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The tables are transcribed from the RFC prose and tables. All indices are the ones the
-/// RFC uses: band index <c>i</c> runs over the 21 critical bands, channel <c>c</c> runs over
-/// the one or two stream channels, and <c>LM</c> is the base-2 logarithm of the number of
-/// short MDCT blocks (0 for 2.5 ms up to 3 for 20 ms).
+/// The tables are transcribed from RFC 6716: the numbered tables in the prose of Section 4.3
+/// and the normative reference implementation in Appendix A (whose C source is embedded in
+/// Section A.3 of the RFC). All indices are the ones the RFC uses: band index <c>i</c> runs
+/// over the 21 critical bands, channel <c>c</c> runs over the one or two stream channels, and
+/// <c>LM</c> is the base-2 logarithm of the number of short MDCT blocks (0 for 2.5 ms up to 3
+/// for 20 ms).
 /// </para>
 /// <para>
-/// The values are fixed-point integers at the resolutions the RFC states; nothing in this
-/// class is a floating-point approximation made by this implementation.
+/// Where Section 4.3 describes a table only by naming it in the reference source, the table is
+/// transcribed from that Appendix A source and the comment says so. RFC 8251 updates the
+/// decoder in Appendix A; the only CELT change relevant here is the hybrid folding fix in its
+/// Section 9, applied in <see cref="CeltDecoder"/>.
 /// </para>
 /// </remarks>
 internal static class CeltTables
@@ -29,48 +33,64 @@ internal static class CeltTables
     /// <summary>Resolution of the bit accounting, in bits per unit (RFC 6716 §4.1.6.2).</summary>
     internal const int BitRes = 3;
 
-    /// <summary>Largest number of fine energy bits per band (RFC 6716 §4.3.2.2).</summary>
+    /// <summary>
+    /// Largest number of fine energy bits per band (RFC 6716 §4.3.2.2; Appendix A,
+    /// celt/rate.h: MAX_FINE_BITS).
+    /// </summary>
     internal const int MaxFineBits = 8;
 
-    /// <summary>Number of pulse values representable by the allocation cache.</summary>
+    /// <summary>
+    /// Number of pulse values representable by the allocation cache
+    /// (RFC 6716 Appendix A, celt/rate.h: MAX_PSEUDO).
+    /// </summary>
     internal const int MaxPseudo = 40;
 
-    /// <summary>Number of bits in the base-2 index of the pulse cache.</summary>
+    /// <summary>
+    /// Number of bits in the base-2 index of the pulse cache
+    /// (RFC 6716 Appendix A, celt/rate.h: LOG_MAX_PSEUDO).
+    /// </summary>
     internal const int LogMaxPseudo = 6;
 
-    /// <summary>Number of interleaved steps used by the allocation search (RFC 6716 §4.3.3).</summary>
+    /// <summary>
+    /// Number of interpolation steps used by the allocation bisection (RFC 6716 §4.3.3;
+    /// Appendix A, celt/rate.c: ALLOC_STEPS).
+    /// </summary>
     internal const int AllocSteps = 6;
 
     /// <summary>Number of allocation vectors (RFC 6716 §4.3.3, Table 56).</summary>
     internal const int AllocVectorCount = 11;
 
     /// <summary>
-    /// Band edges in units of 2.5 ms MDCT bins, for the 48 kHz mode (RFC 6716 §4.3.1,
+    /// Band edges in units of 2.5 ms MDCT bins, for the 48 kHz mode (RFC 6716 §4.3,
     /// Table 55). Band <c>i</c> spans <c>[eBands[i], eBands[i+1])</c> bins, and the values are
     /// scaled by the number of short blocks for the frame.
     /// </summary>
     internal static ReadOnlySpan<short> EBands =>
     [
-        // RFC 6716 §4.3.1, Table 55.
+        // RFC 6716 §4.3, Table 55: cumulative MDCT bins at the 2.5 ms frame size.
         0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 34, 40, 48, 60, 78, 100,
     ];
 
     /// <summary>
-    /// Base-2 logarithm of each band width, in 1/8 bit (RFC 6716 §4.3.3, Table 59).
+    /// Base-2 logarithm of each band width, in 1/8 bit, used by the fine-energy split
+    /// (RFC 6716 §4.3.3).
     /// </summary>
     internal static ReadOnlySpan<short> LogN =>
     [
-        // RFC 6716 §4.3.3, Table 59: log2_frac (band width, 3 fractional bits).
+        // RFC 6716 Appendix A, celt/static_modes_float.h: logN400[].
         0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 16, 16, 16, 21, 21, 24, 29, 34, 36,
     ];
 
     /// <summary>
     /// Bit allocation vectors in units of 1/32 bit per sample (RFC 6716 §4.3.3, Table 56).
     /// </summary>
-    /// <remarks>Eleven vectors of 21 entries each, indexed <c>vector * BandCount + band</c>.</remarks>
+    /// <remarks>
+    /// Eleven vectors of 21 entries each, indexed <c>vector * BandCount + band</c>. The RFC
+    /// prints Table 57 band-major (one row per band); this array is the transpose.
+    /// </remarks>
     internal static ReadOnlySpan<byte> BandAllocation =>
     [
-        // RFC 6716 §4.3.3, Table 56.
+        // RFC 6716 §4.3.3, Table 57, transposed to q-major order.
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         90, 80, 75, 69, 63, 56, 49, 40, 34, 29, 20, 18, 10, 0, 0, 0, 0, 0, 0, 0, 0,
         110, 100, 90, 84, 78, 71, 65, 58, 51, 45, 39, 32, 26, 20, 12, 0, 0, 0, 0, 0, 0,
@@ -85,17 +105,34 @@ internal static class CeltTables
     ];
 
     /// <summary>
-    /// Coarse-energy prediction coefficients, in Q15 (RFC 6716 §4.3.2.1, Table 57).
+    /// Coarse-energy time-prediction coefficients, in Q15, indexed by <c>LM</c>
+    /// (RFC 6716 §4.3.2.1).
     /// </summary>
-    /// <remarks>Indexed by <c>LM</c>; the values are 0.9, 0.8, 0.65 and 0.5.</remarks>
-    internal static ReadOnlySpan<short> PredictionCoefficient => [29440, 26112, 21248, 16384];
+    /// <remarks>
+    /// Section 4.3.2.1 states that the alpha values depend on the frame size and refers to the
+    /// reference source; the values are 0.9, 0.8, 0.65 and 0.5 as in Appendix A
+    /// (celt/quant_bands.c, pred_coef[]).
+    /// </remarks>
+    internal static ReadOnlySpan<short> PredictionCoefficient =>
+    [
+        // RFC 6716 Appendix A, celt/quant_bands.c: pred_coef[].
+        29440, 26112, 21248, 16384,
+    ];
 
     /// <summary>
-    /// Intra-frame coarse-energy leakage coefficients, in Q15 (RFC 6716 §4.3.2.1, Table 57).
+    /// Coarse-energy in-band leakage coefficients, in Q15, indexed by <c>LM</c>
+    /// (RFC 6716 §4.3.2.1).
     /// </summary>
-    internal static ReadOnlySpan<short> BetaCoefficient => [30147, 22282, 12124, 6554];
+    internal static ReadOnlySpan<short> BetaCoefficient =>
+    [
+        // RFC 6716 Appendix A, celt/quant_bands.c: beta_coef[].
+        30147, 22282, 12124, 6554,
+    ];
 
-    /// <summary>Inter-band coarse-energy leak for intra frames, in Q15 (RFC 6716 §4.3.2.1, Table 57).</summary>
+    /// <summary>
+    /// Inter-band coarse-energy leak for intra frames, in Q15 (RFC 6716 §4.3.2.1 states
+    /// beta = 4915/32768 for intra energy).
+    /// </summary>
     internal const short BetaIntra = 4915;
 
     /// <summary>
@@ -108,7 +145,8 @@ internal static class CeltTables
     /// </remarks>
     internal static ReadOnlySpan<byte> EnergyProbabilityModel =>
     [
-        // RFC 6716 §4.3.2.1, Table 58: 120-sample frames, inter then intra.
+        // RFC 6716 §4.3.2.1 names this e_prob_model in quant_bands.c; values from
+        // Appendix A, celt/quant_bands.c. 120-sample frames, inter then intra.
         72, 127, 65, 129, 66, 128, 65, 128, 64, 128, 62, 128, 64, 128,
         64, 128, 92, 78, 92, 79, 92, 78, 90, 79, 116, 41, 115, 40,
         114, 40, 132, 26, 132, 26, 145, 17, 161, 12, 176, 10, 177, 11,
@@ -140,17 +178,18 @@ internal static class CeltTables
 
     /// <summary>
     /// Inverse CDF for the three-state coarse-energy fallback model, in 1/4 bit
-    /// (RFC 6716 §4.3.2.1).
+    /// (RFC 6716 §4.3.2.1; Appendix A, celt/quant_bands.c: small_energy_icdf[]).
     /// </summary>
     internal static ReadOnlySpan<byte> SmallEnergyIcdf => [2, 1, 0];
 
     /// <summary>
     /// Pulse cache: the offset into <see cref="CacheBits"/> for each (LM, band)
-    /// (RFC 6716 §4.3.3, Table 60). A value of -1 marks a band with no coefficients.
+    /// (RFC 6716 §4.3.3). A value of -1 marks a band with no coefficients.
     /// </summary>
     internal static ReadOnlySpan<short> CacheIndex =>
     [
-        // RFC 6716 §4.3.3, Table 60: 5 rows (LM -1..3) of 21 bands.
+        // RFC 6716 Appendix A, celt/static_modes_float.h: cache_index50[]; §4.3.3
+        // requires implementations to use these precomputed tables. 5 rows of 21 bands.
         -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 41, 41, 41,
         82, 82, 123, 164, 200, 222, 0, 0, 0, 0, 0, 0, 0, 0, 41,
         41, 41, 41, 123, 123, 123, 164, 164, 240, 266, 283, 295, 41, 41, 41,
@@ -162,11 +201,11 @@ internal static class CeltTables
 
     /// <summary>
     /// Pulse cache: bit cost of each pulse count minus one, prefixed by the largest pulse
-    /// index (RFC 6716 §4.3.3, Table 61).
+    /// index (RFC 6716 §4.3.3).
     /// </summary>
     internal static ReadOnlySpan<byte> CacheBits =>
     [
-        // RFC 6716 §4.3.3, Table 61.
+        // RFC 6716 Appendix A, celt/static_modes_float.h: cache_bits50[].
         40, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
         7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
         7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 40, 15, 23, 28,
@@ -197,12 +236,16 @@ internal static class CeltTables
     ];
 
     /// <summary>
-    /// Pulse cache: maximum useful bit count per band, minus 64
-    /// (RFC 6716 §4.3.3, Table 62), indexed <c>21 * (2*LM + C - 1) + band</c>.
+    /// Pulse cache: maximum useful bit count per band, minus 64 (RFC 6716 §4.3.3), indexed
+    /// <c>21 * (2*LM + C - 1) + band</c>.
     /// </summary>
+    /// <remarks>
+    /// Section 4.3.3 explicitly names cache_caps50[] in static_modes_float.h and specifies the
+    /// conversion to <c>cap[]</c> that <see cref="CeltDecoder"/> implements.
+    /// </remarks>
     internal static ReadOnlySpan<byte> CacheCaps =>
     [
-        // RFC 6716 §4.3.3, Table 62.
+        // RFC 6716 Appendix A, celt/static_modes_float.h: cache_caps50[].
         224, 224, 224, 224, 224, 224, 224, 224, 160, 160, 160, 160, 185, 185, 185,
         178, 178, 168, 134, 61, 37, 224, 224, 224, 224, 224, 224, 224, 224, 240,
         240, 240, 240, 207, 207, 207, 198, 198, 183, 144, 66, 40, 160, 160, 160,
@@ -218,36 +261,50 @@ internal static class CeltTables
     ];
 
     /// <summary>
-    /// Time/frequency resolution change table (RFC 6716 §4.3.1, Table 63).
+    /// Time/frequency resolution change table (RFC 6716 §4.3.1 and §4.3.4.5,
+    /// Tables 60-63).
     /// </summary>
     /// <remarks>
-    /// Row is <c>LM</c>; column is <c>4*isTransient + 2*tf_select + band_change</c>.
-    /// Positive values mean more frequency resolution, negative values more time resolution.
+    /// Row is <c>LM</c>; column is <c>4*isTransient + 2*tf_select + band_change</c>. Positive
+    /// values mean more frequency resolution, negative values more time resolution. The four
+    /// two-column views of this table are Tables 60 (non-transient, tf_select=0), 61
+    /// (non-transient, tf_select=1), 62 (transient, tf_select=0) and 63 (transient,
+    /// tf_select=1).
     /// </remarks>
     internal static ReadOnlySpan<sbyte> TfSelectTable =>
     [
-        // RFC 6716 §4.3.1, Table 63.
+        // RFC 6716 §4.3.4.5, Tables 60-63.
         0, -1, 0, -1, 0, -1, 0, -1,
         0, -1, 0, -2, 1, 0, 1, -1,
         0, -2, 0, -3, 2, 0, 1, -1,
         0, -2, 0, -3, 3, 0, 1, -1,
     ];
 
-    /// <summary>Spread decision inverse CDF, 1/32 bit (RFC 6716 §4.3.4.3, Table 64).</summary>
-    /// <remarks>The four states are none, light, normal and aggressive.</remarks>
+    /// <summary>
+    /// Spread decision inverse CDF, 1/32 bit (RFC 6716 Table 56 gives the PDF
+    /// {7, 2, 21, 2}/32; §4.3.4.3 defines the four states).
+    /// </summary>
     internal static ReadOnlySpan<byte> SpreadIcdf => [25, 23, 2, 0];
 
-    /// <summary>Allocation trim inverse CDF, 1/128 bit (RFC 6716 §4.3.3, Table 65).</summary>
+    /// <summary>Allocation trim inverse CDF, 1/128 bit (RFC 6716 §4.3.3, Table 58).</summary>
     internal static ReadOnlySpan<byte> TrimIcdf => [126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0];
 
-    /// <summary>Post-filter tap-set inverse CDF, 1/4 bit (RFC 6716 §4.3.7.1, Table 66).</summary>
+    /// <summary>
+    /// Post-filter tap-set inverse CDF, 1/4 bit (RFC 6716 §4.3.7.1 specifies the PDF
+    /// {2, 1, 1}/4).
+    /// </summary>
     internal static ReadOnlySpan<byte> TapsetIcdf => [2, 1, 0];
 
-    /// <summary>Spread rotation factors (RFC 6716 §4.3.4.3), indexed by spread minus one.</summary>
+    /// <summary>
+    /// Spread rotation factors <c>f_r</c> (RFC 6716 §4.3.4.3, Table 59), indexed by spread
+    /// minus one.
+    /// </summary>
     internal static ReadOnlySpan<int> SpreadFactor => [15, 10, 5];
 
     /// <summary>
-    /// <c>exp2</c> lookup for the theta resolution (RFC 6716 §4.3.4.1), in Q14.
+    /// <c>exp2</c> lookup for the split-angle resolution, in Q14 (RFC 6716
+    /// Appendix A, celt/bands.c: compute_qn()). Section 4.3.4.4 specifies the split only by
+    /// referring to the reference implementation.
     /// </summary>
     internal static ReadOnlySpan<short> Exp2Table8 =>
     [
@@ -255,8 +312,8 @@ internal static class CeltTables
     ];
 
     /// <summary>
-    /// 1/8-bit logarithm table used to reserve stereo side information
-    /// (RFC 6716 §4.3.3, Table 67).
+    /// 1/8-bit logarithm table used to reserve intensity-stereo side information
+    /// (RFC 6716 §4.3.3 names LOG2_FRAC_TABLE in rate.c; values from Appendix A).
     /// </summary>
     internal static ReadOnlySpan<byte> Log2FracTable =>
     [
@@ -266,7 +323,7 @@ internal static class CeltTables
 
     /// <summary>
     /// Collapse-mask bit interleave table used when bands are recombined
-    /// (RFC 6716 §4.3.4.4).
+    /// (RFC 6716 §4.3.4.5; Appendix A, celt/bands.c: bit_interleave_table).
     /// </summary>
     internal static ReadOnlySpan<byte> BitInterleaveTable =>
     [
@@ -275,7 +332,7 @@ internal static class CeltTables
 
     /// <summary>
     /// Collapse-mask bit de-interleave table used when bands are recombined
-    /// (RFC 6716 §4.3.4.4).
+    /// (RFC 6716 §4.3.4.5; Appendix A, celt/bands.c: bit_deinterleave_table).
     /// </summary>
     internal static ReadOnlySpan<byte> BitDeinterleaveTable =>
     [
@@ -284,8 +341,8 @@ internal static class CeltTables
     ];
 
     /// <summary>
-    /// Hadamard ordering table for the long-block transform (RFC 6716 §4.3.4.4); rows are
-    /// for N=2, 4, 8 and 16.
+    /// Hadamard ordering table for the long-block transform (RFC 6716 §4.3.4.5;
+    /// Appendix A, celt/bands.c: ordery_table); rows are for N=2, 4, 8 and 16.
     /// </summary>
     internal static ReadOnlySpan<int> OrderyTable =>
     [
