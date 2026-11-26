@@ -1,3 +1,4 @@
+// Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
@@ -59,12 +60,6 @@ internal sealed class Mdct
     private readonly float[] _rotCos;
     private readonly float[] _rotSin;
 
-    // The half-sample-free phase used by the inverse pre-rotation: phi = 2*pi*p/N.
-    private readonly float[] _phiCos;
-    private readonly float[] _phiSin;
-    private readonly float _cosSine;
-    private readonly float _sinSine;
-
     // Scratch: the fold, the FFT output, and the de-shuffled inverse sequence.
     private readonly float[] _foldReal;
     private readonly float[] _foldImaginary;
@@ -121,20 +116,13 @@ internal sealed class Mdct
         int quarter = count / 2;
         double modulus = 2.0 * count;
         double sine = 2.0 * Math.PI * 0.125 / modulus;
-        _cosSine = (float)Math.Cos(sine);
-        _sinSine = (float)Math.Sin(sine);
         _rotCos = new float[quarter];
         _rotSin = new float[quarter];
-        _phiCos = new float[quarter];
-        _phiSin = new float[quarter];
         for (int p = 0; p < quarter; p++)
         {
-            double phase = 2.0 * Math.PI * p / modulus;
-            double theta = phase + sine;
+            double theta = (2.0 * Math.PI * p / modulus) + sine;
             _rotCos[p] = (float)Math.Cos(theta);
             _rotSin[p] = (float)Math.Sin(theta);
-            _phiCos[p] = (float)Math.Cos(phase);
-            _phiSin[p] = (float)Math.Sin(phase);
         }
 
         _foldReal = new float[quarter];
@@ -298,22 +286,19 @@ internal sealed class Mdct
         float[] foldReal = _foldReal;
         float[] foldImaginary = _foldImaginary;
 
-        // Pre-rotation: pair coefficient 2p with coefficient N-1-2p, rotate by phi and the
-        // half-sample correction, and write the complex FFT input.
+        // Pre-rotation: pair coefficient 2p with coefficient N-1-2p. The two exact rotations of the
+        // reference (phi and the half-sample correction) collapse into one linear map with the
+        // same combined twiddles as the forward post-rotation.
         int even = 0;
         int odd = count - 1;
-        float cosSine = _cosSine;
-        float sinSine = _sinSine;
         for (int p = 0; p < half; p++)
         {
             float a = coefficients[even * stride];
             float b = coefficients[odd * stride];
-            float phiCos = _phiCos[p];
-            float phiSin = _phiSin[p];
-            float real = (a * phiSin) - (b * phiCos);
-            float imaginary = -(b * phiSin) - (a * phiCos);
-            foldReal[p] = (real * cosSine) - (imaginary * sinSine);
-            foldImaginary[p] = (imaginary * cosSine) + (real * sinSine);
+            float cos = _rotCos[p];
+            float sin = _rotSin[p];
+            foldReal[p] = (a * sin) - (b * cos);
+            foldImaginary[p] = -((a * cos) + (b * sin));
             even += 2;
             odd -= 2;
         }

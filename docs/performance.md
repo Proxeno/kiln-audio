@@ -293,6 +293,78 @@ de-emphasis; for SILK it is NLSF→LPC, excitation reconstruction, LTP and LPC s
    targets are the NLSF→LPC conversion and the excitation reconstruction, neither of which is in
    this lane's file set, plus vectorizing the LPC analysis filter.
 
+## PERF-3: real-input MDCT and SILK decode hot paths
+
+PERF-3 replaces the CELT MDCT/IMDCT with the reference's real-input structure: **one
+size-`N/4` complex FFT per direction** instead of the two size-`N/2` DCT-IV FFTs of PERF-1
+(`N` is the doubled block length, so the FFT sizes are 60/120/240/480 for 120/240/480/960
+coefficients). The windowed input is folded around the block centre into the complex sequence the
+FFT consumes, each half-sample phase rotation is folded into a single precomputed complex twiddle,
+and the forward post-rotation writes coefficient `2p` from the real part and `N-1-2p` from the
+imaginary part. The inverse is the mirrored path (pre-rotation, conjugate FFT, post-rotation,
+de-shuffle, windowed TDAC mirror). The structure follows `celt/mdct.c` from the RFC 6716
+Appendix A reference; the two exact rotations are combined into single-precision twiddles rather
+than the reference's small-angle `sine` shortcut, so the float path matches the double-precision
+definition to float rounding. `Mdct.cs` is now listed under THIRD-PARTY-NOTICES.md.
+
+**Correctness.** `MdctTests` (naive double reference), `SimdParityTests` (vector versus scalar),
+`CeltVectorConformanceTests` and `OpusDecoderConformanceTests` all pass. SILK is untouched in this
+lane, so `SilkPcmOracleTests` output is unchanged and bit-exact. Every MDCT path allocates 0 B.
+
+### MDCT kernel cost
+
+`Perf3Measure` (`dotnet run -c Release -p:RollForward=Major --project bench/Kiln.Audio.Benchmarks
+-- micro mdct`) times the kernels with a Stopwatch best-of-25 batch after a 250 ms warm-up, which
+is the statistic the shared machine's load leaves intact. The PERF-2 column is BenchmarkDotNet's
+mean from the previous lane, on the same machine.
+
+| Kernel | PERF-2 µs | PERF-3 µs | Change |
+| --- | --- | --- | --- |
+| Forward 960 | 6.05 | **2.28** | 2.7x |
+| Inverse 960 | 5.42 | **2.58** | 2.1x |
+| Forward 8 x 120 | 4.75 | **2.42** | 2.0x |
+| Inverse 8 x 120 | 4.53 | **3.02** | 1.5x |
+| Forward 120 | not measured | **0.25** | - |
+| Inverse 120 | not measured | **0.35** | - |
+
+The 960 forward meets the ≤ 2.5 µs target; the 960 inverse is within ~3% of it after the inverse
+pre-rotation was collapsed to a single 2x2 twiddle multiply. The 120 targets (≤ 0.4 µs) are met.
+The size-480 complex FFT alone is 1.31/1.40 µs (forward/inverse), so the FFT is now roughly half
+of the 960-block cost.
+
+### Decode ratios
+
+Same-session measurements under heavy shared-machine load: libopus from
+`scripts/bench-libopus-inproc.sh`, Kiln from `... -- micro decode` (tier-1 warmed; decode + synthesis
++ int16). The two runs were not interleaved, so treat the ratios as ±20%.
+
+| Vector | libopus µs/frame | Kiln µs/frame | Ratio |
+| --- | --- | --- | --- |
+| 01 | 10.49 | 12.01 | 1.15 |
+| 07 | 7.10 | 9.96 | 1.40 |
+| 11 | 27.42 | 32.37 | 1.18 |
+| 02 | 6.38 | 7.57 | 1.19 |
+| 03 | 7.98 | 9.38 | 1.18 |
+| 04 | 9.90 | 11.39 | 1.15 |
+
+CELT 11 was dominated by the inverse MDCT in PERF-2 (ratio 1.52) and is now 1.18. The SILK rows
+were not optimised in this lane; their movement against PERF-2's 1.09/1.24/1.54 is noise.
+
+### Remaining gaps
+
+1. **CELT decode is now bitstream/frequency-domain bound.** The per-frame split is 8.36/3.26/0.39 µs
+   for vector 01 and 20.65/10.61/1.11 µs for 11 (bitstream+frequency / synthesis / int16). The
+   synthesizer is no longer the largest stage; the range decoder, PVQ codeword read and band
+   bookkeeping are.
+2. **MDCT inverse is ~2.6 µs against the ≤ 2.5 µs target.** The next step is vectorising the
+   inverse pre-rotation and de-shuffle (both stride-two gathers), and a split-radix FFT.
+3. **SILK was not optimised here.** The remaining SILK cost is the same as PERF-2 described:
+   NLSF→LPC (0.14 µs order 10, 0.32 µs order 16 per call) and LPC synthesis (0.29/0.55 µs per
+   80-sample subframe), plus the LTP and excitation reconstruction. Vector 04's synthesis is
+   7.34 µs/frame. No SILK target (≤ 1.0) was attempted or met in this lane.
+4. **`Vector256` is emulated on the arm64 target**, so the existing `Vector128` radix butterflies
+   stay; the measured FFT does not benefit from a 256-bit path here.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
