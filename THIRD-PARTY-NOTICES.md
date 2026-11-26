@@ -42,6 +42,19 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Silk/SilkPlc.cs`
 - `src/Kiln.Audio/Silk/SilkSynthesis.cs`
 - `src/Kiln.Audio/Silk/SilkSynthesisTables.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkEncoderAnalysis.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkEncoderCore.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkEncoderMath.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkEncoderState.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkEncoderTables.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkEntropyEncoder.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkNlsfEncoder.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkNsq.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkPitchAnalysis.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkVad.cs`
+
+`src/Kiln.Audio/Silk/Encoder/SilkInputResampler.cs` is original work, not derived
+from the reference implementation.
 
 The reference implementation is distributed under the Simplified BSD license below,
 copied verbatim from the `COPYING` file included with the Appendix A source

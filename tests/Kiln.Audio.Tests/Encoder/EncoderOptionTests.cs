@@ -15,10 +15,15 @@ public class EncoderOptionTests
     };
 
     [Fact]
-    public void The_default_options_are_accepted()
+    public void The_default_options_select_the_silk_voip_encoder()
     {
         using var encoder = new OpusEncoder(new OpusEncoderOptions());
-        encoder.Options.Should().Be(new OpusEncoderOptions());
+        var packet = new byte[1276];
+        int written = encoder.Encode(new short[960], packet);
+
+        written.Should().BeGreaterThan(1);
+        // RFC 6716 §3.1, Table 2: configs 0..11 are SILK-only.
+        (packet[0] >> 3).Should().BeLessThan(12);
     }
 
     [Theory]
