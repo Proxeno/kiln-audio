@@ -27,6 +27,12 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Encoder/OpusTransitionEncoder.cs`
 - `src/Kiln.Audio/OpusDecoder.cs`
 - `src/Kiln.Audio/OpusEncoder.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkDtxEncoder.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkLbrrEncoder.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkNsqDelayedDecision.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkNsqDelayedDecisionKernel.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkNsqParameters.cs`
+- `src/Kiln.Audio/Silk/Encoder/SilkStereoEncoder.cs`
 - `src/Kiln.Audio/Silk/SilkDecoder.cs`
 - `src/Kiln.Audio/Silk/SilkFixedPoint.cs`
 - `src/Kiln.Audio/Silk/SilkNlsf.cs`
