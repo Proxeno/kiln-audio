@@ -79,19 +79,18 @@ internal sealed class Mdct
     private readonly float[] _postCos;
     private readonly float[] _postSin;
 
-    // Scratch. The pack/unpack helpers use _z and _spectrum; Forward uses _low .. _temp2.
-    private readonly Complex32[] _z;
-    private readonly Complex32[] _spectrum;
+    // Scratch. The DCT-IV packing and FFT output are structure-of-arrays so the pre/post twiddle
+    // stages are contiguous and vectorizable; Forward uses _low, _high, _dct*.
+    private readonly float[] _packReal;
+    private readonly float[] _packImaginary;
+    private readonly float[] _spectrumReal;
+    private readonly float[] _spectrumImaginary;
     private readonly float[] _low;
     private readonly float[] _high;
-    private readonly float[] _lowFlip;
-    private readonly float[] _highFlip;
-    private readonly float[] _dct0;
+        private readonly float[] _dct0;
     private readonly float[] _dct1;
     private readonly float[] _dct0Reverse;
     private readonly float[] _dct1Reverse;
-    private readonly float[] _dct2;
-    private readonly float[] _dct3;
 
     /// <summary>
     /// Initializes a transform for one CELT block size.
@@ -158,18 +157,16 @@ internal sealed class Mdct
             _postSin[p] = (float)Math.Sin(post);
         }
 
-        _z = new Complex32[quarter];
-        _spectrum = new Complex32[quarter];
+        _packReal = new float[quarter];
+        _packImaginary = new float[quarter];
+        _spectrumReal = new float[quarter];
+        _spectrumImaginary = new float[quarter];
         _low = new float[count];
         _high = new float[count];
-        _lowFlip = new float[count];
-        _highFlip = new float[count];
         _dct0 = new float[count];
         _dct1 = new float[count];
         _dct0Reverse = new float[count];
         _dct1Reverse = new float[count];
-        _dct2 = new float[count];
-        _dct3 = new float[count];
     }
 
     /// <summary>Gets the number of MDCT coefficients produced per block.</summary>
@@ -221,40 +218,30 @@ internal sealed class Mdct
 
         int count = _coefficientCount;
         float[] window = _window;
+        int length = _length;
 
+        // The forward MDCT needs two real DCT-IVs, not four: fold the windowed input around the
+        // block centre into the difference and sum sequences
+        //   u(n) = a(n) - a(2N-1-n),  v(n) = a(n) + a(2N-1-n),
+        // with a zero outside [0, N+O). The MDCT is then
+        //   X(k) = cos(beta_k) DCT-IV(u)(k) - sin(beta_k) DST-IV(v)(k),
+        // and DST-IV(v) = DCT-IV((-1)^n v)(N-1-k), so one DCT-IV of the sign-flipped sum supplies
+        // the whole transform (see docs/performance.md).
         for (int n = 0; n < count; n++)
         {
-            float value = window[n] * input[n];
-            _low[n] = value;
-            _lowFlip[n] = (n & 1) == 0 ? value : -value;
+            float lower = window[n] * input[n];
+            int mirror = (2 * count) - 1 - n;
+            float upper = mirror < length ? window[mirror] * input[mirror] : 0f;
+            _low[n] = lower - upper;
+            float sum = lower + upper;
+            _high[n] = (n & 1) == 0 ? sum : -sum;
         }
 
-        for (int n = 0; n < count; n++)
-        {
-            int index = count + n;
-            float value = index < _length ? window[index] * input[index] : 0f;
-            _high[n] = value;
-            _highFlip[n] = (n & 1) == 0 ? value : -value;
-        }
+        DctIv(_low, _dct0, _dct0Reverse, useVector);
+        DctIv(_high, _dct1, _dct1Reverse, useVector);
 
-        DctIv(_low, _dct0, null, useVector);
-        DctIv(_lowFlip, _dct1, null, useVector);
-        DctIv(_high, _dct2, null, useVector);
-        DctIv(_highFlip, _dct3, null, useVector);
-
-        int last = count - 1;
-        for (int k = 0; k < count; k++)
-        {
-            float cos = _betaCos[k];
-            float sin = _betaSin[k];
-            float sign = (k & 1) == 0 ? 1f : -1f;
-            float value =
-                (cos * _dct0[k])
-                - (sin * _dct1[last - k])
-                - (sign * cos * _dct3[last - k])
-                - (sign * sin * _dct2[k]);
-            coefficients[k * stride] = value;
-        }
+        MdctKernels.CombineForward(
+            coefficients, _dct0, _dct1Reverse, _betaCos, _betaSin, count, stride, useVector);
     }
 
     /// <summary>Computes the windowed inverse MDCT of one block.</summary>
@@ -359,40 +346,20 @@ internal sealed class Mdct
     private void DctIv(ReadOnlySpan<float> input, Span<float> output, float[]? outputReverse, bool useVector)
     {
         int count = _coefficientCount;
-        int quarter = count / 2;
-        for (int p = 0; p < quarter; p++)
-        {
-            float a = input[2 * p];
-            float b = input[count - 1 - (2 * p)];
-            float cos = _preCos[p];
-            float sin = _preSin[p];
-            _z[p] = new Complex32((a * cos) + (b * sin), (b * cos) - (a * sin));
-        }
 
-        if (useVector)
-        {
-            _fft.Forward(_z, _spectrum);
-        }
-        else
-        {
-            _fft.ForwardScalar(_z, _spectrum);
-        }
+        MdctTwiddleKernel.PreTwiddle(
+            input, count, _preCos, _preSin, _packReal, _packImaginary);
 
-        int last = count - 1;
-        for (int k = 0; k < quarter; k++)
-        {
-            Complex32 spectrum = _spectrum[k];
-            float cos = _postCos[k];
-            float sin = _postSin[k];
-            float real = (spectrum.Real * cos) + (spectrum.Imag * sin);
-            float imaginary = (spectrum.Imag * cos) - (spectrum.Real * sin);
-            output[2 * k] = real;
-            output[last - (2 * k)] = -imaginary;
-            if (outputReverse is not null)
-            {
-                outputReverse[last - (2 * k)] = real;
-                outputReverse[2 * k] = -imaginary;
-            }
-        }
+        _fft.Transform(
+            _packReal, _packImaginary, _spectrumReal, _spectrumImaginary, inverse: false, useVector);
+
+        MdctTwiddleKernel.PostTwiddle(
+            _spectrumReal,
+            _spectrumImaginary,
+            count,
+            _postCos,
+            _postSin,
+            output,
+            outputReverse);
     }
 }

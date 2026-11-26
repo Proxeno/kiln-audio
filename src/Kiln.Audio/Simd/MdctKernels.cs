@@ -16,6 +16,52 @@ namespace Kiln.Audio.Simd;
 internal static class MdctKernels
 {
     /// <summary>
+    /// Combines the two forward DCT-IV results: <c>coefficients[k*stride] = cos(beta_k)*first[k] - sin(beta_k)*secondReversed[k]</c>.
+    /// </summary>
+    /// <param name="coefficients">Receives the coefficients.</param>
+    /// <param name="first">The DCT-IV of the difference sequence.</param>
+    /// <param name="secondReversed">The DCT-IV of the sign-flipped sum, in reverse order.</param>
+    /// <param name="betaCos">The cosine table.</param>
+    /// <param name="betaSin">The sine table.</param>
+    /// <param name="count">The number of coefficients.</param>
+    /// <param name="stride">The coefficient stride.</param>
+    /// <param name="useVector">Whether the vector path may be used.</param>
+    public static void CombineForward(
+        Span<float> coefficients,
+        ReadOnlySpan<float> first,
+        ReadOnlySpan<float> secondReversed,
+        ReadOnlySpan<float> betaCos,
+        ReadOnlySpan<float> betaSin,
+        int count,
+        int stride,
+        bool useVector)
+    {
+        if (useVector && stride == 1)
+        {
+            int k = 0;
+            for (; k + 4 <= count; k += 4)
+            {
+                Vector128<float> value =
+                    (Load(betaCos, k) * Load(first, k))
+                    - (Load(betaSin, k) * Load(secondReversed, k));
+                Store(coefficients, k, value);
+            }
+
+            for (; k < count; k++)
+            {
+                coefficients[k] = (betaCos[k] * first[k]) - (betaSin[k] * secondReversed[k]);
+            }
+
+            return;
+        }
+
+        for (int k = 0; k < count; k++)
+        {
+            coefficients[k * stride] = (betaCos[k] * first[k]) - (betaSin[k] * secondReversed[k]);
+        }
+    }
+
+    /// <summary>
     /// Writes the first region: <c>output[n] = window[n] * scale * (direct[n] - reversed[n])</c>.
     /// </summary>
     /// <param name="output">Destination, at least <paramref name="count"/> samples.</param>

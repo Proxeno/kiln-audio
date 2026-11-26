@@ -42,8 +42,10 @@ public class KernelBenchmarks
     private readonly Mdct _shortMdct = new(ShortCount, Overlap);
     private readonly float[] _longCoefficients = new float[LongCount];
     private readonly float[] _longOutput = new float[LongCount + Overlap];
+    private readonly float[] _longInput = new float[LongCount + Overlap];
     private readonly float[] _shortCoefficients = new float[ShortBlocks * ShortCount];
     private readonly float[] _shortOutput = new float[ShortBlocks * (ShortCount + Overlap)];
+    private readonly float[] _shortInput = new float[ShortBlocks * (ShortCount + Overlap)];
 
     private readonly byte[] _pvqBytes = new byte[128];
     private readonly int[] _pvq = new int[PvqBandSamples];
@@ -77,6 +79,16 @@ public class KernelBenchmarks
         for (int i = 0; i < _shortCoefficients.Length; i++)
         {
             _shortCoefficients[i] = (float)Math.Cos(0.53 * i);
+        }
+
+        for (int i = 0; i < _longInput.Length; i++)
+        {
+            _longInput[i] = (float)Math.Sin(0.29 * i);
+        }
+
+        for (int i = 0; i < _shortInput.Length; i++)
+        {
+            _shortInput[i] = (float)Math.Cos(0.61 * i);
         }
 
         for (int i = 0; i < _pvqBytes.Length; i++)
@@ -125,6 +137,23 @@ public class KernelBenchmarks
     /// <summary>One 480-point complex forward FFT, the size one 960-coefficient MDCT uses per DCT-IV.</summary>
     [Benchmark]
     public void Fft480() => _fft480.Forward(_fftInput, _fftOutput);
+
+    /// <summary>One forward MDCT of a 20 ms (960-coefficient) block.</summary>
+    [Benchmark]
+    public void MdctForward960() => _longMdct.Forward(_longInput, _longCoefficients, 1);
+
+    /// <summary>Eight interleaved 2.5 ms (120-coefficient) forward MDCTs.</summary>
+    [Benchmark]
+    public void MdctForward8x120()
+    {
+        for (int block = 0; block < ShortBlocks; block++)
+        {
+            _shortMdct.Forward(
+                _shortInput.AsSpan(block * (ShortCount + Overlap)),
+                _shortCoefficients.AsSpan(block),
+                stride: ShortBlocks);
+        }
+    }
 
     /// <summary>One inverse MDCT of a 20 ms (960-coefficient) block.</summary>
     [Benchmark]

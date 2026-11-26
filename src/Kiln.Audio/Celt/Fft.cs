@@ -263,6 +263,41 @@ internal sealed class Fft
             sourceImaginary[i] = value.Imag;
         }
 
+        TransformCore(sourceReal, sourceImaginary, outputReal, outputImaginary, inverse, useVector);
+
+        for (int i = 0; i < _size; i++)
+        {
+            output[i] = new Complex32(outputReal[i], outputImaginary[i]);
+        }
+    }
+
+    /// <summary>
+    /// Runs the transform on separate real and imaginary buffers, so callers that already hold
+    /// structure-of-arrays data (the MDCT twiddle stages) avoid the interleave/deinterleave copies.
+    /// </summary>
+    /// <param name="sourceReal">The input real parts.</param>
+    /// <param name="sourceImaginary">The input imaginary parts.</param>
+    /// <param name="outputReal">Receives the output real parts.</param>
+    /// <param name="outputImaginary">Receives the output imaginary parts.</param>
+    /// <param name="inverse">Whether to compute the inverse transform.</param>
+    /// <param name="useVector">Whether the vector combine path may be used.</param>
+    internal void Transform(
+        ReadOnlySpan<float> sourceReal,
+        ReadOnlySpan<float> sourceImaginary,
+        Span<float> outputReal,
+        Span<float> outputImaginary,
+        bool inverse,
+        bool useVector) =>
+        TransformCore(sourceReal, sourceImaginary, outputReal, outputImaginary, inverse, useVector);
+
+    private void TransformCore(
+        ReadOnlySpan<float> sourceReal,
+        ReadOnlySpan<float> sourceImaginary,
+        Span<float> outputReal,
+        Span<float> outputImaginary,
+        bool inverse,
+        bool useVector)
+    {
         // Place the input in the decimation-in-time leaf order, then run the combine stages
         // bottom-up. This is the recursion of a mixed-radix Cooley-Tukey transform written as
         // loops: leaf `l` has digits (s0, s1, ...) with l = s0 + s1*r0 + ..., reads source
@@ -293,11 +328,6 @@ internal sealed class Fft
                 twiddleImaginary,
                 inverse,
                 useVector);
-        }
-
-        for (int i = 0; i < _size; i++)
-        {
-            output[i] = new Complex32(outputReal[i], outputImaginary[i]);
         }
     }
 
