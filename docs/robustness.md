@@ -21,7 +21,8 @@ band index or an entropy-coded value beyond the bounds the rules establish.
 `OpusValidation` throws only `ArgumentOutOfRangeException`, so the full set of exception types
 reachable from the public API is:
 
-- `System.ArgumentException` and its `ArgumentOutOfRangeException` subclass,
+- `System.ArgumentException` and its `ArgumentNullException` and
+  `ArgumentOutOfRangeException` subclasses,
 - `System.InvalidDataException`,
 - `System.NotSupportedException`,
 - `System.ObjectDisposedException`.
