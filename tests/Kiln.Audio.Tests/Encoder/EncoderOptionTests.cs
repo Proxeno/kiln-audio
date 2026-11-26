@@ -15,19 +15,21 @@ public class EncoderOptionTests
     };
 
     [Fact]
-    public void The_default_options_are_rejected_because_they_select_voip()
+    public void The_default_options_select_the_silk_voip_encoder()
     {
-        ((Action)(() => new OpusEncoder(new OpusEncoderOptions()))).Should()
-            .Throw<NotSupportedException>()
-            .WithMessage("*RestrictedLowDelay*");
+        using var encoder = new OpusEncoder(new OpusEncoderOptions());
+        var packet = new byte[1276];
+        int written = encoder.Encode(new short[960], packet);
+
+        written.Should().BeGreaterThan(1);
+        // RFC 6716 §3.1, Table 2: configs 0..11 are SILK-only.
+        (packet[0] >> 3).Should().BeLessThan(12);
     }
 
-    [Theory]
-    [InlineData(OpusApplication.Voip)]
-    [InlineData(OpusApplication.Audio)]
-    public void Non_restricted_low_delay_applications_are_rejected(OpusApplication application)
+    [Fact]
+    public void The_audio_application_is_rejected()
     {
-        var options = Supported() with { Application = application };
+        var options = Supported() with { Application = OpusApplication.Audio };
         ((Action)(() => new OpusEncoder(options))).Should().Throw<NotSupportedException>();
     }
 
