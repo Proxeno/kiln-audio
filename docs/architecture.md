@@ -1,20 +1,21 @@
-# Architecture (planned)
+# Architecture
 
-Kiln.Audio is a skeleton. Only the public API stubs and the TOC parser (RFC 6716 §3.1) exist in
-`src/`; the test-only conformance oracle is in place. Planned modules, all pure managed C# on
-.NET 10:
+Kiln.Audio is a pure managed C# (.NET 10) Opus decoder; the encoder is planned. The status of
+each module is below. Everything in `src/` is managed code, and the test-only conformance oracle
+is in place.
 
 | Module | Purpose | Status |
 |---|---|---|
 | Oracle (test-only) | Pinned libopus `opus_demo` / `opus_compare`, the RFC 8251 test vectors, and the managed RFC 6716 §6 quality metric | done |
 | Range coder | Entropy coder shared by SILK and CELT (RFC 6716 §4.1, §5.1) | done (decoder + encoder, round-trip tested) |
 | Packet framing | TOC parsing, packet splitting, length/padding validation (RFC 6716 §3.2, §3.4) | done |
-| SILK | LPC-based speech layer, NB/MB/WB (§4.2) | partial: bitstream (symbol) decode and bit-exact synthesis to PCM at the internal rate, mono and stereo (§4.2.3–§4.2.9); no PLC/FEC, resampling is the separate module |
+| SILK | LPC-based speech layer, NB/MB/WB (§4.2) | done: bitstream decode and bit-exact synthesis at the internal rate, mono and stereo (§4.2.3–§4.2.9); no PLC/FEC |
 | SILK output resampler | Polyphase minimum-phase FIR, 8/12/16 kHz to 8–48 kHz, streaming and allocation-free | done |
-| CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | partial: bitstream (symbol) decode through anti-collapse, final-range exact on CELT-only packets (§4.3.1–§4.3.5); synthesis not started |
+| CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | done: bitstream decode through synthesis, mono/stereo, every duration and bandwidth, including the band limit before API-rate decimation (§4.3.1–§4.3.7) |
 | CELT / MDCT kernel | Low-overlap MDCT/IMDCT and the §4.3.7 window, scalar reference | done (scalar; SIMD pending) |
-| Hybrid | SILK + CELT combined mode (§3.1, Table 2) | not started |
-| PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | not started |
+| Hybrid | SILK + CELT combined mode (§3.1, Table 2) | done: SILK WB at 16 kHz plus CELT from band 17, with the §4.5 transition handling |
+| Top-level decoder | Public `OpusDecoder`: packet decode, mode dispatch, transition redundancy, resets, `FinalRange` | done: all 12 RFC 8251 vectors pass `opus_compare` and the final range through the public API |
+| PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | partial: minimal concealment (CELT `DecodeLost`, SILK/hybrid decaying repeat); no LBRR FEC |
 | Resampler-free 48 kHz path | Native 48 kHz operation without a separate resampler stage | not started |
 | SIMD kernels | NEON / AVX2 / SSSE3 kernels with scalar parity tests | not started |
 
