@@ -57,7 +57,10 @@ public class Enc2PhaseBTests
         var data = new TheoryData<OpusBandwidth, OpusFrameDuration, int>();
         foreach (OpusBandwidth bandwidth in new[] { OpusBandwidth.Narrowband, OpusBandwidth.Wideband })
         {
-            foreach (OpusFrameDuration duration in new[] { OpusFrameDuration.Ms20, OpusFrameDuration.Ms60 })
+            foreach (OpusFrameDuration duration in new[]
+                     {
+                         OpusFrameDuration.Ms10, OpusFrameDuration.Ms20, OpusFrameDuration.Ms60,
+                     })
             {
                 data.Add(bandwidth, duration, bandwidth == OpusBandwidth.Narrowband ? 12000 : 24000);
             }
@@ -87,7 +90,13 @@ public class Enc2PhaseBTests
             (packet[0] & 0x04).Should().NotBe(0, "the stereo flag must be set");
         }
 
-        int frameSamples = 48000 * (duration == OpusFrameDuration.Ms20 ? 20 : 60) / 1000;
+        int ms = duration switch
+        {
+            OpusFrameDuration.Ms10 => 10,
+            OpusFrameDuration.Ms20 => 20,
+            _ => 60,
+        };
+        int frameSamples = 48000 * ms / 1000;
         using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 2 });
         var pcm = new short[frameSamples * 2];
         foreach ((byte[] packet, uint expectedRange) in packets)
@@ -447,7 +456,6 @@ public class Enc2PhaseBTests
     /// <summary>Segmental SNR of the stereo signal's mid component at the internal rate.</summary>
     private static double StereoSegmentalSnr(short[] reference, short[] decoded, int frames, int internalRate)
     {
-        int frameSamples = reference.Length / frames;
         var referenceMid = new short[frames * 960];
         var decodedMid = new short[frames * 960];
         for (int frame = 0; frame < frames; frame++)
@@ -460,7 +468,6 @@ public class Enc2PhaseBTests
             }
         }
 
-        _ = frameSamples;
         short[] referenceRate = DownsampleToInternal(referenceMid, internalRate, frames);
         short[] decodedRate = DownsampleToInternal(decodedMid, internalRate, frames);
         return SegmentalSnr(referenceRate, decodedRate, internalRate / 50);
@@ -521,7 +528,12 @@ public class Enc2PhaseBTests
             UseDtx = useDtx,
         };
 
-        int ms = duration == OpusFrameDuration.Ms20 ? 20 : 60;
+        int ms = duration switch
+        {
+            OpusFrameDuration.Ms10 => 10,
+            OpusFrameDuration.Ms20 => 20,
+            _ => 60,
+        };
         int frameSamples = 48000 * ms / 1000 * 2;
         using var encoder = new OpusEncoder(options);
         var packets = new List<(byte[], uint)>();
@@ -582,36 +594,6 @@ public class Enc2PhaseBTests
     }
 
     private const int DtxPacketLength = 1;
-
-    private static double EncodeAndMeasureSnr(
-        OpusBandwidth bandwidth, OpusFrameDuration duration, int bitrate, int complexity)
-    {
-        short[] stereo = SyntheticStereo.Value;
-        List<(byte[] Packet, uint Range)> packets = EncodeStereo(
-            stereo, bandwidth, duration, bitrate,
-            useInbandFec: false, packetLossPercent: 0, useDtx: false, complexity);
-
-        int ms = duration == OpusFrameDuration.Ms20 ? 20 : 60;
-        int frameSamples = 48000 * ms / 1000 * 2;
-        int frameCount = packets.Count;
-        using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 2 });
-        var pcm = new short[frameSamples];
-        double signal = 0;
-        double noise = 0;
-        for (int frame = 0; frame < frameCount; frame++)
-        {
-            decoder.Decode(packets[frame].Packet, pcm);
-            for (int i = 0; i < frameSamples; i++)
-            {
-                double sample = stereo[(frame * frameSamples) + i];
-                signal += sample * sample;
-                double error = sample - pcm[i];
-                noise += error * error;
-            }
-        }
-
-        return 10 * Math.Log10((signal + 1) / (noise + 1));
-    }
 
     private static void WriteBitFile(string path, IReadOnlyList<(byte[] Packet, uint Range)> packets)
     {

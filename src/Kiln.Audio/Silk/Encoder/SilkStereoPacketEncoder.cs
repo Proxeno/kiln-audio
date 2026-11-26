@@ -43,6 +43,8 @@ internal sealed class SilkStereoPacketEncoder
     private readonly short[] _sideFrameBuffer;
     private readonly byte[] _predictionIndices = new byte[MaxFramesPerPacket * 6];
     private readonly bool[] _midOnlyFlags = new bool[MaxFramesPerPacket];
+    private readonly byte[] _previousPredictionIndices = new byte[MaxFramesPerPacket * 6];
+    private readonly bool[] _previousMidOnlyFlags = new bool[MaxFramesPerPacket];
     private readonly int[] _midRates = new int[MaxFramesPerPacket];
     private readonly int[] _sideRates = new int[MaxFramesPerPacket];
     private int _midVadMask;
@@ -155,6 +157,11 @@ internal sealed class SilkStereoPacketEncoder
 
         _mid.LoadPacket(_left);
         _side?.LoadPacket(_right);
+
+        // The LBRR frames written in this packet describe the previous packet's intervals, so
+        // they must use that packet's stereo prediction indices and mid-only flags.
+        _predictionIndices.AsSpan().CopyTo(_previousPredictionIndices);
+        _midOnlyFlags.AsSpan().CopyTo(_previousMidOnlyFlags);
 
         _midDtx.BeginPacket();
         _sideDtx.BeginPacket();
@@ -355,7 +362,8 @@ internal sealed class SilkStereoPacketEncoder
                 _predictionIndices.AsSpan(f * 6, 6),
                 out bool midOnly,
                 out int midRate,
-                out int sideRate);
+                out int sideRate,
+                frameLength);
 
             _midOnlyFlags[f] = midOnly;
             _midRates[f] = Math.Max(midRate, 1);
@@ -405,8 +413,8 @@ internal sealed class SilkStereoPacketEncoder
             _silkFrames,
             midMask,
             sideMask,
-            _predictionIndices,
-            _midOnlyFlags,
+            _previousPredictionIndices,
+            _previousMidOnlyFlags,
             _writer);
     }
 
