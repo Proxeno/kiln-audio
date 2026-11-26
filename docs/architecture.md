@@ -9,7 +9,7 @@ Kiln.Audio is a skeleton. Only the public API stubs and the TOC parser (RFC 6716
 | Oracle (test-only) | Pinned libopus `opus_demo` / `opus_compare`, the RFC 8251 test vectors, and the managed RFC 6716 §6 quality metric | done |
 | Range coder | Entropy coder shared by SILK and CELT (RFC 6716 §4.1, §5.1) | done (decoder + encoder, round-trip tested) |
 | Packet framing | TOC parsing, packet splitting, length/padding validation (RFC 6716 §3.2, §3.4) | done |
-| SILK | LPC-based speech layer, NB/MB/WB (§4.2) | partial: bitstream (symbol) decode, final-range exact on SILK-only packets (§4.2.3–§4.2.7.8); synthesis not started |
+| SILK | LPC-based speech layer, NB/MB/WB (§4.2) | partial: bitstream (symbol) decode and bit-exact synthesis to PCM at the internal rate, mono and stereo (§4.2.3–§4.2.9); no PLC/FEC, resampling is the separate module |
 | SILK output resampler | Polyphase minimum-phase FIR, 8/12/16 kHz to 8–48 kHz, streaming and allocation-free | done |
 | CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | partial: bitstream (symbol) decode through anti-collapse, final-range exact on CELT-only packets (§4.3.1–§4.3.5); synthesis not started |
 | CELT / MDCT kernel | Low-overlap MDCT/IMDCT and the §4.3.7 window, scalar reference | done (scalar; SIMD pending) |
@@ -17,6 +17,32 @@ Kiln.Audio is a skeleton. Only the public API stubs and the TOC parser (RFC 6716
 | PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | not started |
 | Resampler-free 48 kHz path | Native 48 kHz operation without a separate resampler stage | not started |
 | SIMD kernels | NEON / AVX2 / SSSE3 kernels with scalar parity tests | not started |
+
+## SILK synthesis
+
+`Kiln.Audio.Silk.SilkSynthesis` reconstructs PCM from the parameters `SilkDecoder` produces
+(RFC 6716 §4.2.7.5.2–§4.2.9). It is a direct port of the fixed-point reference decoder, so its
+output is bit-exact with libopus: NLSF reconstruction, stabilization (with the RFC 8251 §7
+saturating addition), interpolation, NLSF-to-LPC conversion, LPC range and prediction-gain
+limiting, LTP synthesis with rewhitening, LPC synthesis, and stereo mid/side unmixing. It carries
+the LPC/LTP histories, previous NLSFs and gains, and the stereo mid/side state across frames, and
+resets them on a bandwidth or channel change (RFC 6716 §4.5.2, RFC 8251 §3). Synthesizing a
+frame allocates nothing.
+
+The output is the signal libopus feeds to its internal-rate resampler. libopus always runs that
+resampler, even when the requested rate equals the internal rate; its copy path delays the signal
+by a fixed number of samples. `SilkPcmOracleTests` measures these delays by exact search and
+asserts every sample after alignment:
+
+| Internal rate | Mono delay (samples/channel) | Stereo delay (samples/channel) |
+|---|---|---|
+| 8 kHz | 5 | 4 |
+| 12 kHz | 10 | 9 |
+| 16 kHz | 13 | 12 |
+
+Mono is delayed by one sample more than stereo because the mono path buffers the two-sample mid
+history before the resampler (`dec_API.c`). In an interleaved stereo stream the measured delay is
+twice the per-channel value (8, 18 and 24 samples).
 
 ## SILK output resampler
 
