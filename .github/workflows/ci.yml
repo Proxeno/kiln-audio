@@ -22,11 +22,29 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Cache RFC 8251 test vectors
+        uses: actions/cache@v4
+        with:
+          path: tests/Kiln.Audio.Tests/Fixtures/opus_testvectors
+          key: opus-testvectors-${{ hashFiles('scripts/fetch-test-vectors.sh') }}
+      - name: Cache libopus oracle
+        uses: actions/cache@v4
+        with:
+          path: .oracle/bin
+          key: libopus-oracle-${{ runner.os }}-${{ hashFiles('scripts/build-libopus-oracle.sh') }}
+      - name: Fetch RFC 8251 test vectors
+        shell: bash
+        run: bash scripts/fetch-test-vectors.sh
+      - name: Build libopus oracle
+        shell: bash
+        run: bash scripts/build-libopus-oracle.sh
       - name: Restore
         run: dotnet restore
       - name: Build (warnings are errors)
         run: dotnet build --no-restore -c Release
       - name: Test
+        env:
+          KILN_AUDIO_REQUIRE_ORACLE: ${{ (matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest') && '1' || '0' }}
         run: dotnet test --no-build -c Release --logger "trx" --results-directory artifacts/test-results
       - name: Upload test results
         if: always()
