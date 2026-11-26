@@ -1080,7 +1080,8 @@ internal static class SilkEncoderAnalysis
             else
             {
                 index -= previousIndex;
-                int doubleStepThreshold = (2 * SilkEncoderTables.MaxDeltaGainQuant) - 63 + previousIndex;
+                int doubleStepThreshold = (2 * SilkEncoderTables.MaxDeltaGainQuant)
+                    - SilkEncoderMath.GainLevels + previousIndex;
                 if (index > doubleStepThreshold)
                 {
                     index = doubleStepThreshold + ((index - doubleStepThreshold + 1) >> 1);
@@ -1380,8 +1381,11 @@ internal static class SilkEncoderAnalysis
 
             state.SHarmHpQ2 = shortTermResidualQ2[subframeLength - 1];
 
+            // Each subframe writes its own slice of the quantizer input (silk_prefilter_FIX
+            // advances pxw_Q3 by subfr_length per subframe).
             PrefilterInner(
-                state, filteredQ12, xwQ3, harmShapeFirPackedQ12, tiltQ14, lfShapeQ14, lag, subframeLength);
+                state, filteredQ12, xwQ3[(k * subframeLength)..],
+                harmShapeFirPackedQ12, tiltQ14, lfShapeQ14, lag, subframeLength);
         }
 
         state.LagPrev = control.PitchL[subframeCount - 1];

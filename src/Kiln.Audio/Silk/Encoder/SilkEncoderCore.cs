@@ -197,6 +197,9 @@ internal sealed class SilkEncoderCore
     /// <summary>Exposes the most recent prefiltered input for diagnostics.</summary>
     internal int[] PrefilteredInput => _xfwQ3;
 
+    /// <summary>Exposes the resampled API-rate input for diagnostics.</summary>
+    internal short[] ResampledInput => _resampled;
+
     private void Configure()
     {
         int fsKhz = _internalRate / 1000;
