@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
@@ -20,43 +19,27 @@ namespace Kiln.Audio.Celt;
 /// <see cref="CeltWindow"/> and falls over <c>[N, N+O)</c> as the mirror of the rising half. The
 /// phase <c>N - O/2</c> is the low-overlap generalisation of the textbook MDCT phase <c>N/2</c>
 /// (which is recovered for <c>O = N</c>); it is what makes the window power-complementary after
-/// overlap-add. The inverse is the transpose:
-/// </para>
-/// <code>
-/// y(n) = (2/N) sum_{k=0}^{N-1} X(k) cos(pi/N * (n + 1/2 + N - O/2) * (k + 1/2)), 0 &lt;= n &lt; N+O
-/// </code>
-/// <para>
-/// followed by multiplication by <c>w(n)</c>. Consequently overlap-add of consecutive frames
-/// (hop <c>N</c>) reconstructs the input with unity gain: the last <c>O</c> output samples of a
-/// frame are added to the first <c>O</c> samples of the next frame.
+/// overlap-add. The inverse is the transpose, followed by multiplication by <c>w(n)</c>, and
+/// overlap-add of consecutive frames (hop <c>N</c>) reconstructs the input with unity gain.
 /// </para>
 /// <para>
-/// <b>Scaling.</b> For one isolated frame, <c>Inverse(Forward(x))</c> returns
-/// <c>w(n)^2 x(n) + a(n)</c>, where <c>a(n)</c> is the MDCT time-domain alias (the cosine basis at
-/// <c>n</c> also collects the mirrored samples). The overlap-add above cancels <c>a(n)</c> and
-/// leaves <c>(w(n)^2 + w(n+N)^2) x(n) = x(n)</c>. In other words the forward transform is the
-/// unnormalised RFC 6716 §4.3.7 sum, the inverse carries the <c>2/N</c> factor, and a decoder that
-/// supplies coefficients at the corresponding gain reconstructs the signal with unity gain - no
-/// further normalisation is applied.
+/// <b>PERF-3 structure (real-input MDCT with one complex FFT).</b> The transform is the direct
+/// <c>2N</c>-point MDCT evaluated with a single size-<c>N/4</c> complex FFT instead of the two
+/// size-<c>N/2</c> DCT-IV FFTs of the PERF-1 structure. The windowed input is folded around the
+/// block centre into the structure-of-arrays complex sequence the FFT consumes (with the window
+/// ramps applied inside the fold), each half-sample phase rotation is folded into a single
+/// precomputed complex twiddle, and the post-rotation writes coefficient <c>2p</c> from the real
+/// part and <c>N-1-2p</c> from the imaginary part. The inverse runs the mirrored path: a
+/// pre-rotation, the same complex FFT with the conjugate twiddles, a post-rotation, the
+/// de-shuffle and the windowed TDAC mirror. The structure follows the RFC 6716 Appendix A
+/// reference (<c>celt/mdct.c</c>); the two forward/post rotations are combined into exact
+/// single-precision twiddles rather than the reference's small-angle <c>sine</c> shortcut, so the
+/// result matches the double-precision definition to float rounding.
 /// </para>
 /// <para>
-/// <b>Short-block interleaving.</b> An instance transforms one block. For a transient frame CELT
-/// splits it into <c>B</c> short blocks (each a 2.5 ms, <c>N = 120</c> transform) and interleaves
-/// their coefficients: coefficient <c>k</c> of short block <c>b</c> is stored at
-/// <c>X[k * B + b]</c>. To produce that layout call <see cref="Forward"/> once per block with
-/// <c>stride = B</c> and the output span advanced by <c>b</c>; <see cref="Inverse"/> consumes the
-/// same layout with the same stride.
-/// </para>
-/// <para>
-/// <b>PERF-1 structure.</b> Each DCT-IV runs one size-<c>N/2</c> complex FFT, and both directions
-/// need two of them. The forward folds the windowed input around the block centre into the
-/// difference and sum sequences and combines <c>DCT-IV(u)</c> with the reversed
-/// <c>DST-IV(v) = DCT-IV((-1)^n v)</c>; the inverse runs the cosine and sine coefficient sequences.
-/// The gain over PERF-0 comes from the FFT itself: the generic <c>r * r</c> small-DFT loop is
-/// replaced by specialised radix-2/3/4/5 butterflies over separate real and imaginary arrays (see
-/// <see cref="FftKernels"/>), so the combine stage vectorises with <c>Vector128</c>. The DCT-IV
-/// pack and FFT output are structure-of-arrays in <see cref="MdctTwiddleKernel"/>, and the final
-/// window multiply is a contiguous elementwise pass vectorised in <see cref="MdctKernels"/>.
+/// Both directions use the shared mixed-radix <see cref="Fft"/>, whose combine stage has a scalar
+/// reference path and a <c>Vector128</c> path. The pre/post rotations are elementwise
+/// structure-of-arrays complex multiplies vectorised in <see cref="MdctKernels"/>.
 /// </para>
 /// <para>
 /// Instances hold mutable scratch buffers and are therefore not thread-safe. Allocate one per
@@ -68,29 +51,26 @@ internal sealed class Mdct
     private readonly int _coefficientCount;
     private readonly int _overlap;
     private readonly int _length;
+    private readonly int _half;      // N/4: the complex FFT size.
     private readonly float[] _window;
     private readonly Fft _fft;
 
-    // Phase and twiddle tables, computed once in double and stored as float.
-    private readonly float[] _betaCos;
-    private readonly float[] _betaSin;
-    private readonly float[] _preCos;
-    private readonly float[] _preSin;
-    private readonly float[] _postCos;
-    private readonly float[] _postSin;
+    // Combined pre/post rotations. theta = 2*pi*(p + 1/8)/N with N = 2*coefficientCount.
+    private readonly float[] _rotCos;
+    private readonly float[] _rotSin;
 
-    // Scratch. The DCT-IV packing and FFT output are structure-of-arrays so the pre/post twiddle
-    // stages are contiguous and vectorizable; Forward uses _low, _high, _dct*.
-    private readonly float[] _packReal;
-    private readonly float[] _packImaginary;
+    // The half-sample-free phase used by the inverse pre-rotation: phi = 2*pi*p/N.
+    private readonly float[] _phiCos;
+    private readonly float[] _phiSin;
+    private readonly float _cosSine;
+    private readonly float _sinSine;
+
+    // Scratch: the fold, the FFT output, and the de-shuffled inverse sequence.
+    private readonly float[] _foldReal;
+    private readonly float[] _foldImaginary;
     private readonly float[] _spectrumReal;
     private readonly float[] _spectrumImaginary;
-    private readonly float[] _low;
-    private readonly float[] _high;
-    private readonly float[] _dct0;
-    private readonly float[] _dct1;
-    private readonly float[] _dct0Reverse;
-    private readonly float[] _dct1Reverse;
+    private readonly float[] _deshuffle;
 
     /// <summary>
     /// Initializes a transform for one CELT block size.
@@ -118,55 +98,50 @@ internal sealed class Mdct
                 nameof(overlap), "The overlap cannot exceed the coefficient count.");
         }
 
-        if ((coefficientCount & 1) != 0)
+        if ((coefficientCount & 3) != 0)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(coefficientCount), "The coefficient count must be even.");
+                nameof(coefficientCount), "The coefficient count must be a multiple of four.");
+        }
+
+        if ((overlap & 3) != 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(overlap), "The overlap must be a multiple of four.");
         }
 
         _coefficientCount = coefficientCount;
         _overlap = overlap;
         _length = coefficientCount + overlap;
-        _fft = Fft.Get(coefficientCount / 2);
-        _window = BuildWindow(coefficientCount, overlap);
+        _half = coefficientCount / 2;
+        _fft = Fft.Get(_half);
+        _window = CeltWindow.Create(overlap);
 
         int count = coefficientCount;
         int quarter = count / 2;
-        _betaCos = new float[count];
-        _betaSin = new float[count];
-        double phaseOffset = count - (overlap / 2.0);
-        for (int k = 0; k < count; k++)
-        {
-            double beta = Math.PI * phaseOffset * (k + 0.5) / count;
-            _betaCos[k] = (float)Math.Cos(beta);
-            _betaSin[k] = (float)Math.Sin(beta);
-        }
-
-        _preCos = new float[quarter];
-        _preSin = new float[quarter];
-        _postCos = new float[quarter];
-        _postSin = new float[quarter];
+        double modulus = 2.0 * count;
+        double sine = 2.0 * Math.PI * 0.125 / modulus;
+        _cosSine = (float)Math.Cos(sine);
+        _sinSine = (float)Math.Sin(sine);
+        _rotCos = new float[quarter];
+        _rotSin = new float[quarter];
+        _phiCos = new float[quarter];
+        _phiSin = new float[quarter];
         for (int p = 0; p < quarter; p++)
         {
-            double pre = Math.PI * ((4.0 * p) + 1.0) / (4.0 * count);
-            _preCos[p] = (float)Math.Cos(pre);
-            _preSin[p] = (float)Math.Sin(pre);
-
-            double post = Math.PI * p / count;
-            _postCos[p] = (float)Math.Cos(post);
-            _postSin[p] = (float)Math.Sin(post);
+            double phase = 2.0 * Math.PI * p / modulus;
+            double theta = phase + sine;
+            _rotCos[p] = (float)Math.Cos(theta);
+            _rotSin[p] = (float)Math.Sin(theta);
+            _phiCos[p] = (float)Math.Cos(phase);
+            _phiSin[p] = (float)Math.Sin(phase);
         }
 
-        _packReal = new float[quarter];
-        _packImaginary = new float[quarter];
+        _foldReal = new float[quarter];
+        _foldImaginary = new float[quarter];
         _spectrumReal = new float[quarter];
         _spectrumImaginary = new float[quarter];
-        _low = new float[count];
-        _high = new float[count];
-        _dct0 = new float[count];
-        _dct1 = new float[count];
-        _dct0Reverse = new float[count];
-        _dct1Reverse = new float[count];
+        _deshuffle = new float[count];
     }
 
     /// <summary>Gets the number of MDCT coefficients produced per block.</summary>
@@ -204,44 +179,79 @@ internal sealed class Mdct
     private void ForwardCore(ReadOnlySpan<float> input, Span<float> coefficients, int stride, bool useVector)
     {
         ValidateStride(stride);
-        if (input.Length < _length)
-        {
-            throw new ArgumentException(
-                $"The input must contain {_length} samples.", nameof(input));
-        }
-
-        if (coefficients.Length < (((long)_coefficientCount - 1) * stride) + 1)
+        ValidateInput(input);
+        long required = (((long)_coefficientCount - 1) * stride) + 1;
+        if (coefficients.Length < required)
         {
             throw new ArgumentException(
                 "The coefficient buffer is too short for the requested stride.", nameof(coefficients));
         }
 
         int count = _coefficientCount;
+        int half = _half;
+        int preHalf = _overlap / 2;
+        int preQuarter = _overlap / 4;
         float[] window = _window;
-        int length = _length;
+        float[] foldReal = _foldReal;
+        float[] foldImaginary = _foldImaginary;
 
-        // The forward MDCT needs two real DCT-IVs, not four: fold the windowed input around the
-        // block centre into the difference and sum sequences
-        //   u(n) = a(n) - a(2N-1-n),  v(n) = a(n) + a(2N-1-n),
-        // with a zero outside [0, N+O). The MDCT is then
-        //   X(k) = cos(beta_k) DCT-IV(u)(k) - sin(beta_k) DST-IV(v)(k),
-        // and DST-IV(v) = DCT-IV((-1)^n v)(N-1-k), so one DCT-IV of the sign-flipped sum supplies
-        // the whole transform (see docs/performance.md).
-        for (int n = 0; n < count; n++)
+        // Fold the windowed input around the block centre into N/4 complex values. The first and
+        // last overlap/4 pairs carry the window ramps; the middle block is the un-windowed fold.
+        int source1 = preHalf;
+        int source2 = count - 1 + preHalf;
+        int window1 = preHalf;
+        int window2 = preHalf - 1;
+        for (int i = 0; i < preQuarter; i++)
         {
-            float lower = window[n] * input[n];
-            int mirror = (2 * count) - 1 - n;
-            float upper = mirror < length ? window[mirror] * input[mirror] : 0f;
-            _low[n] = lower - upper;
-            float sum = lower + upper;
-            _high[n] = (n & 1) == 0 ? sum : -sum;
+            foldReal[i] =
+                (window[window2] * input[source1 + count]) + (window[window1] * input[source2]);
+            foldImaginary[i] =
+                (window[window1] * input[source1]) - (window[window2] * input[source2 - count]);
+            source1 += 2;
+            source2 -= 2;
+            window1 += 2;
+            window2 -= 2;
         }
 
-        DctIv(_low, _dct0, _dct0Reverse, useVector);
-        DctIv(_high, _dct1, _dct1Reverse, useVector);
+        window1 = 0;
+        window2 = _overlap - 1;
+        for (int i = preQuarter; i < half - preQuarter; i++)
+        {
+            foldReal[i] = input[source2];
+            foldImaginary[i] = input[source1];
+            source1 += 2;
+            source2 -= 2;
+        }
 
-        MdctKernels.CombineForward(
-            coefficients, _dct0, _dct1Reverse, _betaCos, _betaSin, count, stride, useVector);
+        for (int i = half - preQuarter; i < half; i++)
+        {
+            foldReal[i] =
+                (-window[window1] * input[source1 - count]) + (window[window2] * input[source2]);
+            foldImaginary[i] =
+                (window[window2] * input[source1]) + (window[window1] * input[source2 + count]);
+            source1 += 2;
+            source2 -= 2;
+            window1 += 2;
+            window2 -= 2;
+        }
+
+        // Pre-rotation by -exp(-i*theta).
+        MdctKernels.RotateForwardPre(foldReal, foldImaginary, _rotCos, _rotSin, half, useVector);
+
+        _fft.Transform(
+            foldReal, foldImaginary, _spectrumReal, _spectrumImaginary, inverse: false, useVector);
+
+        // Post-rotation: coefficient 2p comes from the real part of conj(Z) exp(+i*theta), and
+        // coefficient N-1-2p from the imaginary part.
+        MdctKernels.WriteForwardPost(
+            coefficients,
+            _spectrumReal,
+            _spectrumImaginary,
+            _rotCos,
+            _rotSin,
+            count,
+            stride,
+            useVector);
     }
 
     /// <summary>Computes the windowed inverse MDCT of one block.</summary>
@@ -270,7 +280,8 @@ internal sealed class Mdct
     private void InverseCore(ReadOnlySpan<float> coefficients, Span<float> output, int stride, bool useVector)
     {
         ValidateStride(stride);
-        if (coefficients.Length < (((long)_coefficientCount - 1) * stride) + 1)
+        long required = (((long)_coefficientCount - 1) * stride) + 1;
+        if (coefficients.Length < required)
         {
             throw new ArgumentException(
                 "The coefficient buffer is too short for the requested stride.", nameof(coefficients));
@@ -283,43 +294,46 @@ internal sealed class Mdct
         }
 
         int count = _coefficientCount;
+        int half = _half;
+        float[] foldReal = _foldReal;
+        float[] foldImaginary = _foldImaginary;
 
-        // Fuse the beta pre-multiply into one pass that produces the two real DCT-IV inputs:
-        // xc(k) = C(k) cos(beta_k) and xs(k) = (-1)^k C(k) sin(beta_k).
-        for (int k = 0; k < count; k++)
+        // Pre-rotation: pair coefficient 2p with coefficient N-1-2p, rotate by phi and the
+        // half-sample correction, and write the complex FFT input.
+        int even = 0;
+        int odd = count - 1;
+        float cosSine = _cosSine;
+        float sinSine = _sinSine;
+        for (int p = 0; p < half; p++)
         {
-            float value = coefficients[k * stride];
-            _low[k] = value * _betaCos[k];
-            _high[k] = ((k & 1) == 0 ? value : -value) * _betaSin[k];
+            float a = coefficients[even * stride];
+            float b = coefficients[odd * stride];
+            float phiCos = _phiCos[p];
+            float phiSin = _phiSin[p];
+            float real = (a * phiSin) - (b * phiCos);
+            float imaginary = -(b * phiSin) - (a * phiCos);
+            foldReal[p] = (real * cosSine) - (imaginary * sinSine);
+            foldImaginary[p] = (imaginary * cosSine) + (real * sinSine);
+            even += 2;
+            odd -= 2;
         }
 
-        DctIv(_low, _dct0, _dct0Reverse, useVector);
-        DctIv(_high, _dct1, _dct1Reverse, useVector);
+        _fft.Transform(
+            foldReal, foldImaginary, _spectrumReal, _spectrumImaginary, inverse: true, useVector);
+
+        // Post-rotation by exp(+i*theta), then the de-shuffle that interleaves the direct and
+        // reversed spectra for the TDAC mirror.
+        MdctKernels.RotateInversePost(_spectrumReal, _spectrumImaginary, _rotCos, _rotSin, half, useVector);
+
+        float[] deshuffle = _deshuffle;
+        for (int p = 0; p < half; p++)
+        {
+            deshuffle[2 * p] = -_spectrumReal[p];
+            deshuffle[(2 * p) + 1] = _spectrumImaginary[half - 1 - p];
+        }
 
         float scale = 2f / count;
-        MdctKernels.WindowFirst(output, _dct0, _dct1Reverse, _window, scale, count, useVector);
-        MdctKernels.WindowSecond(
-            output.Slice(count), _dct0Reverse, _dct1, _window.AsSpan(count), scale, _overlap, useVector);
-    }
-
-    private static float[] BuildWindow(int coefficientCount, int overlap)
-    {
-        int length = coefficientCount + overlap;
-        var window = new float[length];
-        float[] rising = CeltWindow.Create(overlap);
-        Array.Copy(rising, window, overlap);
-
-        for (int n = overlap; n < coefficientCount; n++)
-        {
-            window[n] = 1f;
-        }
-
-        for (int n = coefficientCount; n < length; n++)
-        {
-            window[n] = rising[length - 1 - n];
-        }
-
-        return window;
+        MdctKernels.MirrorInverse(output, deshuffle, _window, scale, count, _overlap, useVector);
     }
 
     private void ValidateStride(int stride)
@@ -330,37 +344,12 @@ internal sealed class Mdct
         }
     }
 
-    /// <summary>
-    /// Computes the size-<c>N</c> DCT-IV of <paramref name="input"/> into <paramref name="output"/>
-    /// with one size-<c>N/2</c> complex FFT, using the packing
-    /// <c>z[p] = (x[2p] + i*x[N-1-2p]) e^(-i*pi*(4p+1)/(4N))</c>, the FFT, and the post-rotation
-    /// <c>t = Z[k] e^(-i*pi*k/N)</c> with <c>D[2k] = Re(t)</c>, <c>D[N-1-2k] = -Im(t)</c>.
-    /// </summary>
-    /// <param name="input">The real input sequence.</param>
-    /// <param name="output">Receives the DCT-IV result.</param>
-    /// <param name="outputReverse">
-    /// Optional; when present, also receives the result in reverse order so the caller can combine
-    /// the two DCT-IV outputs with contiguous elementwise passes.
-    /// </param>
-    /// <param name="useVector">Whether to use the vectorised FFT path.</param>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void DctIv(ReadOnlySpan<float> input, Span<float> output, float[]? outputReverse, bool useVector)
+    private void ValidateInput(ReadOnlySpan<float> input)
     {
-        int count = _coefficientCount;
-
-        MdctTwiddleKernel.PreTwiddle(
-            input, count, _preCos, _preSin, _packReal, _packImaginary);
-
-        _fft.Transform(
-            _packReal, _packImaginary, _spectrumReal, _spectrumImaginary, inverse: false, useVector);
-
-        MdctTwiddleKernel.PostTwiddle(
-            _spectrumReal,
-            _spectrumImaginary,
-            count,
-            _postCos,
-            _postSin,
-            output,
-            outputReverse);
+        if (input.Length < _length)
+        {
+            throw new ArgumentException(
+                $"The input must contain {_length} samples.", nameof(input));
+        }
     }
 }
