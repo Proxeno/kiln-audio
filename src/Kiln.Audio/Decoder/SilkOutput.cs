@@ -1,0 +1,238 @@
+// Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
+
+using Kiln.Audio.Entropy;
+using Kiln.Audio.Silk;
+
+namespace Kiln.Audio.Decoder;
+
+/// <summary>
+/// Drives the SILK bitstream decoder, synthesis and output resampler for the top-level decoder,
+/// producing normalized interleaved PCM at the API sample rate and channel count.
+/// </summary>
+/// <remarks>
+/// <para>
+/// This is the streaming equivalent of the SILK output path in RFC 6716 Appendix A
+/// <c>silk/dec_API.c</c>. libopus feeds its resampler one extra history sample for a mono
+/// stream (the stereo mid buffer) and therefore delays mono by one internal sample relative to
+/// stereo; this class reproduces that buffering explicitly and constructs the resampler with
+/// the stereo calibration, so a mono stream and the same stream decoded as stereo stay aligned
+/// with libopus at every API rate.
+/// </para>
+/// <para>
+/// A change of internal sample rate re-creates the resamplers, which matches libopus's
+/// <c>silk_decoder_set_fs</c> resetting the resampler state. Everything is allocated in the
+/// constructor, so decoding allocates nothing after construction.
+/// </para>
+/// </remarks>
+internal sealed class SilkOutput
+{
+    private const int MaxInternalSamples = 16 * 60;
+    private const int MaxInternalChannels = 2;
+
+    private readonly int _apiRate;
+    private readonly int _apiChannels;
+    private readonly SilkDecoder _decoder = new();
+    private readonly SilkSynthesis _synthesis = new();
+    private readonly SilkFrameResult _frameResult = new();
+    private readonly short[] _internalPcm = new short[MaxInternalSamples * MaxInternalChannels];
+    private readonly short[] _channel0 = new short[MaxInternalSamples];
+    private readonly short[] _channel1 = new short[MaxInternalSamples];
+    private readonly short[] _feed0 = new short[MaxInternalSamples + 1];
+    private readonly short[] _feed1 = new short[MaxInternalSamples];
+    private readonly short[] _resampled0;
+    private readonly short[] _resampled1;
+    private readonly SilkResampler[] _leftByRate = new SilkResampler[3];
+    private readonly SilkResampler[] _rightByRate = new SilkResampler[3];
+
+    private SilkResampler? _left;
+    private SilkResampler? _right;
+    private int _resamplerRate;
+    private short _mid1;
+
+    /// <inheritdoc cref="SilkOutput"/>
+    /// <param name="apiRate">API sample rate: 8000, 12000, 16000, 24000 or 48000 Hz.</param>
+    /// <param name="apiChannels">API channel count: 1 or 2.</param>
+    internal SilkOutput(int apiRate, int apiChannels)
+    {
+        _apiRate = apiRate;
+        _apiChannels = apiChannels;
+        int maxApiSamples = apiRate * 60 / 1000;
+        _resampled0 = new short[maxApiSamples];
+        _resampled1 = new short[maxApiSamples];
+
+        // Every internal rate is prepared up front so that a bandwidth change never allocates.
+        for (int index = 0; index < _leftByRate.Length; index++)
+        {
+            int internalRate = InternalRate(index);
+            _leftByRate[index] = new SilkResampler(internalRate, apiRate, channels: 2);
+            _rightByRate[index] = new SilkResampler(internalRate, apiRate, channels: 2);
+        }
+    }
+
+    /// <summary>Clears all SILK and resampler state, as RFC 6716 §4.5.2 requires.</summary>
+    internal void Reset()
+    {
+        _decoder.Reset();
+        _synthesis.Reset();
+        _left?.Reset();
+        _right?.Reset();
+        _mid1 = 0;
+    }
+
+    /// <summary>
+    /// Decodes the SILK layer of one Opus frame and writes normalized interleaved PCM at the API
+    /// rate.
+    /// </summary>
+    /// <param name="dec">Range decoder positioned at the start of the frame's SILK data.</param>
+    /// <param name="internalRateHz">SILK internal rate: 8000, 12000 or 16000 Hz.</param>
+    /// <param name="internalChannels">Coded SILK channels: 1 or 2.</param>
+    /// <param name="frameDurationMs">Opus frame duration: 10, 20, 40 or 60 ms.</param>
+    /// <param name="pcm">
+    /// Destination for <c>frameDurationMs * apiRate / 1000</c> interleaved API-rate samples; it
+    /// must hold that many samples for every API channel.
+    /// </param>
+    /// <returns>The number of samples per channel written.</returns>
+    internal int Decode(
+        ref RangeDecoder dec,
+        int internalRateHz,
+        int internalChannels,
+        int frameDurationMs,
+        Span<float> pcm)
+    {
+        int internalSamples = internalRateHz * frameDurationMs / 1000;
+        int outputSamples = _apiRate * frameDurationMs / 1000;
+        if (pcm.Length < outputSamples * _apiChannels)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The PCM destination needs {outputSamples * _apiChannels} samples but holds {pcm.Length}."),
+                nameof(pcm));
+        }
+
+        _decoder.DecodeFrame(ref dec, internalRateHz, internalChannels, frameDurationMs, _frameResult);
+
+        short heldMid = _mid1;
+        int internalCount = internalSamples * internalChannels;
+        _synthesis.Synthesize(_frameResult, _internalPcm.AsSpan(0, internalCount));
+        _mid1 = _synthesis.LastMidSample;
+
+        for (int i = 0; i < internalSamples; i++)
+        {
+            _channel0[i] = _internalPcm[i * internalChannels];
+            if (internalChannels == 2)
+            {
+                _channel1[i] = _internalPcm[(i * 2) + 1];
+            }
+        }
+
+        EnsureResamplers(internalRateHz);
+
+        ReadOnlySpan<short> feed0;
+        ReadOnlySpan<short> feed1;
+        if (internalChannels == 1)
+        {
+            // RFC 6716 Appendix A, dec_API.c: the mono path prepends the two-sample mid history
+            // and feeds from its second entry, then holds the last two samples for the next
+            // frame. That is exactly a one-internal-sample delay of the mono signal.
+            _feed0[0] = heldMid;
+            _channel0.AsSpan(0, internalSamples).CopyTo(_feed0.AsSpan(1));
+            feed0 = _feed0.AsSpan(0, internalSamples);
+            feed1 = feed0;
+        }
+        else if (_apiChannels == 1)
+        {
+            // A stereo stream decoded to mono uses the mid signal without the MS-to-LR
+            // conversion, exactly as dec_API.c's buffering branch does. The stereo synthesis
+            // output is already history-delayed, so no extra buffering is applied.
+            for (int i = 0; i < internalSamples; i++)
+            {
+                _feed0[i] = (short)((_channel0[i] + _channel1[i]) >> 1);
+            }
+
+            feed0 = _feed0.AsSpan(0, internalSamples);
+            feed1 = feed0;
+        }
+        else
+        {
+            _channel0.AsSpan(0, internalSamples).CopyTo(_feed0);
+            _channel1.AsSpan(0, internalSamples).CopyTo(_feed1);
+            feed0 = _feed0.AsSpan(0, internalSamples);
+            feed1 = _feed1.AsSpan(0, internalSamples);
+        }
+
+        int produced = _left!.OutputCount(internalSamples);
+        if (produced != outputSamples)
+        {
+            throw new InvalidOperationException(
+                FormattableString.Invariant(
+                    $"The SILK resampler produced {produced} samples, expected {outputSamples}."));
+        }
+
+        _left.Process(feed0, _resampled0.AsSpan(0, produced));
+        if (_apiChannels == 2)
+        {
+            _right!.Process(feed1, _resampled1.AsSpan(0, produced));
+        }
+
+        const float scale = 1f / 32768f;
+        if (_apiChannels == 2)
+        {
+            for (int i = 0; i < produced; i++)
+            {
+                pcm[i * 2] = _resampled0[i] * scale;
+                pcm[(i * 2) + 1] = (internalChannels == 2 ? _resampled1[i] : _resampled0[i]) * scale;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < produced; i++)
+            {
+                pcm[i] = _resampled0[i] * scale;
+            }
+        }
+
+        return produced;
+    }
+
+    /// <summary>Selects the resampler for the internal rate and resets it on a rate change.</summary>
+    /// <param name="internalRateHz">The SILK internal rate of the frame being decoded.</param>
+    /// <remarks>
+    /// RFC 6716 Appendix A, <c>silk_decoder_set_fs</c>: a change of internal rate reinitializes
+    /// the resampler. The calibration used here is always the stereo one, because the explicit
+    /// one-sample mid buffering above already supplies the extra mono delay.
+    /// </remarks>
+    private void EnsureResamplers(int internalRateHz)
+    {
+        if (_resamplerRate == internalRateHz)
+        {
+            return;
+        }
+
+        int index = RateIndex(internalRateHz);
+        _left = _leftByRate[index];
+        _right = _rightByRate[index];
+        _left.Reset();
+        _right.Reset();
+        _resamplerRate = internalRateHz;
+    }
+
+    /// <summary>Maps an internal rate to its table index and back.</summary>
+    /// <param name="index">Table index 0 to 2, or an internal rate when used as a lookup.</param>
+    /// <returns>The internal rate for an index, or the index for a rate.</returns>
+    private static int InternalRate(int index) => index switch
+    {
+        0 => 8000,
+        1 => 12000,
+        _ => 16000,
+    };
+
+    /// <summary>Returns the table index for an internal rate.</summary>
+    /// <param name="internalRateHz">8000, 12000 or 16000 Hz.</param>
+    /// <returns>0, 1 or 2.</returns>
+    private static int RateIndex(int internalRateHz) => internalRateHz switch
+    {
+        8000 => 0,
+        12000 => 1,
+        _ => 2,
+    };
+}
