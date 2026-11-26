@@ -307,9 +307,14 @@ Appendix A reference; the two exact rotations are combined into single-precision
 than the reference's small-angle `sine` shortcut, so the float path matches the double-precision
 definition to float rounding. `Mdct.cs` is now listed under THIRD-PARTY-NOTICES.md.
 
-**Correctness.** `MdctTests` (naive double reference), `SimdParityTests` (vector versus scalar),
-`CeltVectorConformanceTests` and `OpusDecoderConformanceTests` all pass. SILK is untouched in this
-lane, so `SilkPcmOracleTests` output is unchanged and bit-exact. Every MDCT path allocates 0 B.
+SILK gets two bit-exact changes: the order-10 and order-16 LPC synthesis loops are fully unrolled
+with the reversed-coefficient vectors held in registers, and the excitation reconstruction loop is
+branch-free (a sign-mask offset and an xor/subtract negate). `SilkPcmOracleTests` confirms the SILK
+output is unchanged.
+
+**Correctness.** `MdctTests` (naive double reference), `SimdParityTests` (vector versus scalar,
+including the bit-exact SILK LPC parity theory for orders 10 and 16), `CeltVectorConformanceTests`,
+`OpusDecoderConformanceTests` and `SilkPcmOracleTests` all pass. Every measured path allocates 0 B.
 
 ### MDCT kernel cost
 
@@ -332,13 +337,26 @@ pre-rotation was collapsed to a single 2x2 twiddle multiply. The 120 targets (�
 The size-480 complex FFT alone is 1.31/1.40 µs (forward/inverse), so the FFT is now roughly half
 of the 960-block cost.
 
+### SILK kernel cost
+
+Same Stopwatch harness (`... -- micro silk`). The LPC synthesis figure is one 80-sample subframe.
+
+| Kernel | PERF-3 µs | Notes |
+| --- | --- | --- |
+| NLSF → LPC, order 10 | 0.13 | unchanged (table gather, no SIMD win) |
+| NLSF → LPC, order 16 | 0.27 | unchanged |
+| LPC synthesis, order 10 | **0.21** | was 0.29; unrolled |
+| LPC synthesis, order 16 | 0.54 | was 0.55; unrolled, serial dependency dominates |
+
 ### Decode ratios
 
-Same-session measurements under heavy shared-machine load: libopus from
-`scripts/bench-libopus-inproc.sh`, Kiln from `... -- micro decode` (tier-1 warmed; decode + synthesis
-+ int16). The two runs were not interleaved, so treat the ratios as ±20%.
+libopus from `scripts/bench-libopus-inproc.sh`, Kiln from `... -- micro decode` (tier-1 warmed;
+decode + synthesis + int16). The shared machine's load moved by ~1.5x between the Kiln and libopus
+runs of the same session, so whole-vector ratios are not reliable: two non-interleaved runs gave
+1.15-1.45 for the six vectors. They are reported as indicative only, not as evidence of reaching
+the ≤ 1.0 target.
 
-| Vector | libopus µs/frame | Kiln µs/frame | Ratio |
+| Vector | libopus µs/frame | Kiln µs/frame | Ratio (load-dependent) |
 | --- | --- | --- | --- |
 | 01 | 10.49 | 12.01 | 1.15 |
 | 07 | 7.10 | 9.96 | 1.40 |
@@ -347,8 +365,8 @@ Same-session measurements under heavy shared-machine load: libopus from
 | 03 | 7.98 | 9.38 | 1.18 |
 | 04 | 9.90 | 11.39 | 1.15 |
 
-CELT 11 was dominated by the inverse MDCT in PERF-2 (ratio 1.52) and is now 1.18. The SILK rows
-were not optimised in this lane; their movement against PERF-2's 1.09/1.24/1.54 is noise.
+The CELT 11 synthesis stage fell from PERF-2's 20.15 µs to 8.4-10.6 µs/frame across runs, which is
+the MDCT halving showing up; the whole-vector ratio is masked by machine load.
 
 ### Remaining gaps
 
@@ -358,10 +376,9 @@ were not optimised in this lane; their movement against PERF-2's 1.09/1.24/1.54 
    bookkeeping are.
 2. **MDCT inverse is ~2.6 µs against the ≤ 2.5 µs target.** The next step is vectorising the
    inverse pre-rotation and de-shuffle (both stride-two gathers), and a split-radix FFT.
-3. **SILK was not optimised here.** The remaining SILK cost is the same as PERF-2 described:
-   NLSF→LPC (0.14 µs order 10, 0.32 µs order 16 per call) and LPC synthesis (0.29/0.55 µs per
-   80-sample subframe), plus the LTP and excitation reconstruction. Vector 04's synthesis is
-   7.34 µs/frame. No SILK target (≤ 1.0) was attempted or met in this lane.
+3. **SILK is still above 1.0.** Only the order-10 LPC synthesis moved (0.29 → 0.21 µs); the
+   order-16 loop is latency-bound and the NLSF→LPC conversion is unchanged. WB synthesis
+   (vector 04) is still the dominant SILK stage. No SILK target (≤ 1.0) is met.
 4. **`Vector256` is emulated on the arm64 target**, so the existing `Vector128` radix butterflies
    stay; the measured FFT does not benefit from a 256-bit path here.
 
