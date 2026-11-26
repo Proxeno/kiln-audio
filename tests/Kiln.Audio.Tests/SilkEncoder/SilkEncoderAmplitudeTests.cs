@@ -1,4 +1,6 @@
+using System.Globalization;
 using FluentAssertions;
+using Kiln.Audio.Tests.Oracle;
 
 namespace Kiln.Audio.Tests.SilkEncoder;
 
@@ -9,6 +11,12 @@ namespace Kiln.Audio.Tests.SilkEncoder;
 /// <remarks>
 /// Covers 20 ms and 60 ms packets (one and three SILK frames, so conditional gain coding) in
 /// each SILK bandwidth, at complexity 0 (single-state quantizer) and 5.
+/// <para>
+/// Coordinator ruling: the window is |decoded RMS - input RMS| &lt;= 1.5 dB, and our level
+/// ratio must be within 1.0 dB of libopus's ratio on the same signal (measured with the
+/// oracle). The strongly tonal signal loses about 1 dB through any SILK quantizer, so a flat
+/// 1 dB window was a mis-specification; the test still catches the +6 to +9 dB gain defect.
+/// </para>
 /// </remarks>
 public class SilkEncoderAmplitudeTests
 {
@@ -30,7 +38,7 @@ public class SilkEncoderAmplitudeTests
 
     [Theory]
     [MemberData(nameof(Bands))]
-    public void Decoded_rms_is_within_1_db_of_the_input(
+    public void Decoded_rms_stays_near_input_and_libopus(
         OpusBandwidth bandwidth, int internalRate, OpusFrameDuration duration, int complexity)
     {
         const int sampleRate = 48000;
@@ -65,9 +73,38 @@ public class SilkEncoderAmplitudeTests
         double outputRms = Rms(decoded.AsSpan(start, offset - start));
         double deltaDb = 20 * Math.Log10(outputRms / inputRms);
 
-        deltaDb.Should().BeInRange(
-            -1.0, 1.0,
-            $"{bandwidth} (internal {internalRate} Hz), {duration}, complexity {complexity}: input RMS {inputRms:F0}, decoded RMS {outputRms:F0}");
+        string context = $"{bandwidth} (internal {internalRate} Hz), {duration}, complexity {complexity}: input RMS {inputRms:F0}, decoded RMS {outputRms:F0}";
+        deltaDb.Should().BeInRange(-1.5, 1.5, context);
+
+        if (OracleTestSupport.OracleAvailable())
+        {
+            string name = bandwidth switch
+            {
+                OpusBandwidth.Narrowband => "NB",
+                OpusBandwidth.Mediumband => "MB",
+                _ => "WB",
+            };
+            int ms = duration == OpusFrameDuration.Ms20 ? 20 : 60;
+            byte[] encoded = LibOpusOracle.Encode(
+                pcm, sampleRate, 1, 16000,
+                ["-bandwidth", name, "-framesize", ms.ToString(CultureInfo.InvariantCulture),
+                 "-complexity", complexity.ToString(CultureInfo.InvariantCulture)]);
+            string path = Path.Combine(Path.GetTempPath(), $"kiln-silk-amp-{Guid.NewGuid():N}.bit");
+            short[] theirs;
+            try
+            {
+                File.WriteAllBytes(path, encoded);
+                theirs = LibOpusOracle.Decode(path, sampleRate, 1);
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+
+            int count = Math.Min(theirs.Length, offset) - start;
+            double libopusDb = 20 * Math.Log10(Rms(theirs.AsSpan(start, count)) / Rms(pcm.AsSpan(start, count)));
+            (deltaDb - libopusDb).Should().BeInRange(-1.0, 1.0, context + $", libopus {libopusDb:F2} dB");
+        }
     }
 
     private static short[] SpeechLike(int sampleRate, int seconds)
