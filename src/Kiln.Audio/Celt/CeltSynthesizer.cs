@@ -36,7 +36,7 @@ namespace Kiln.Audio.Celt;
 /// construction.
 /// </para>
 /// </remarks>
-internal sealed class CeltSynthesizer
+internal sealed partial class CeltSynthesizer
 {
     private const int Overlap = CeltWindow.DefaultOverlap;
     private const int HistorySize = 2048;
@@ -116,30 +116,30 @@ internal sealed class CeltSynthesizer
         Array.Clear(_block);
         Array.Clear(_imdct);
         Array.Clear(_rawOutput);
+        ResetPlcState();
     }
 
-    /// <summary>Produces silence for a lost frame until packet loss concealment is implemented.</summary>
+    /// <summary>Produces concealment for a lost frame (RFC 6716 §4.4).</summary>
     /// <param name="lm">Base-2 logarithm of the number of short MDCT blocks.</param>
+    /// <param name="startBand">First band to generate: 0 for CELT-only, 17 for hybrid.</param>
     /// <param name="pcmOut">Destination for interleaved normalized PCM.</param>
     /// <remarks>
-    /// This is the hook required by RFC 6716 §4.4. Packet loss concealment (the pitch-based
-    /// waveform repetition of <c>celt_decode_lost()</c>) is a later lane; until then a lost
-    /// frame contributes silence of the correct duration.
+    /// The pitch-based waveform repetition and noise fallback of <c>celt_decode_lost()</c> are
+    /// implemented in <c>CeltPlc.cs</c>; this method is the hook the decoder calls.
     /// </remarks>
-    internal void DecodeLost(int lm, Span<float> pcmOut)
+    internal void DecodeLost(int lm, int startBand, Span<float> pcmOut)
     {
         if (lm is < 0 or > 3)
         {
             throw new ArgumentOutOfRangeException(nameof(lm), lm, "LM must be 0 to 3.");
         }
 
-        int count = (CeltTables.ShortBlockSamples << lm) * _outputChannels;
-        if (pcmOut.Length < count)
+        if (startBand is not (0 or 17))
         {
-            throw new ArgumentException("The PCM destination is too short for the frame.", nameof(pcmOut));
+            throw new ArgumentOutOfRangeException(nameof(startBand), startBand, "Start band must be 0 or 17.");
         }
 
-        pcmOut[..count].Clear();
+        PlcDecodeLost(lm, startBand, pcmOut);
     }
 
     /// <summary>
@@ -178,6 +178,8 @@ internal sealed class CeltSynthesizer
             ApplyPostFilter(frame, samples, channel);
             Deemphasise(samples, channel, pcmOut, channels);
         }
+
+        CapturePlcState(frame);
     }
 
     /// <summary>Denormalizes the normalized bands and maps the stream channels to the output channels.</summary>

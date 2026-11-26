@@ -183,3 +183,147 @@ with the variable set exercises it end to end.
 5. **PVQ decode and CELT de-emphasis** are inherently serial (range decode and a one-pole IIR
    respectively). They were measured at ~0.2 µs and are not worth vectorizing; they remain in
    place.
+
+## Encoder (CELT-only, 48 kHz mono)
+
+This section records the ENC-1 measurements for the CELT-only restricted-low-delay encoder:
+48 kHz, mono, CBR, 20 ms frames. It uses the same machine and runtime as the decoder baseline.
+
+### Method
+
+**Kiln.** `EncodeBenchmarks` loads the mono downmix of every RFC 8251 `.dec` file — 320.6 s of
+audio (15,390,480 samples) — into memory in `[GlobalSetup]` and encodes it as 20 ms / 32 kbps
+CBR frames at every complexity 0-10. No file IO is inside the measured region, and the encoder
+is constructed before the benchmark body, so the numbers are steady-state `Encode` calls.
+`[MemoryDiagnoser]` reports allocations.
+
+**libopus.** `scripts/bench-libopus-encode.sh` runs
+`opus_demo -e restricted-lowdelay 48000 1 32000 -framesize 20 -cbr -complexity C` over the same
+PCM file five times and keeps the fastest wall time. That time **includes process start-up and
+reading the whole input file**, so it is an upper bound on libopus's encoding cost. Lane PERF-1's
+fair in-process harness (`bench/native/libopus_bench.c`) had not merged into `main` when this
+section was written; if it has merged by the time you read this, prefer it.
+
+**Quality (G2).** The corpus is the mono downmix of every `.dec` at 48 kHz. Both encoders encode
+it at 24 and 32 kbps, 20 ms, CBR, and both outputs are decoded with libopus. Segmental SNR uses
+20 ms segments, each clamped to [-10, 60] dB, after removing the codec's 120-sample stream delay.
+`opus_compare` runs at 48 kHz with the same alignment, over the first ten seconds of each vector;
+the tool's naive DFT is linear in audio length, and a per-vector excerpt keeps the gate test to a
+couple of minutes.
+
+### Complexity mapping
+
+| Complexity | What it enables in this encoder |
+| --- | --- |
+| 0 | No transient analysis (long blocks only), spread forced to none, single-pass coarse energy. |
+| 1 | Transient analysis still off; spread stays at its normal default. |
+| 2 | Transient analysis on (short blocks for transients). |
+| 3 | Spreading decision on. |
+| 4-10 | Two-pass intra/inter coarse-energy trial. |
+
+Every level uses the same TF analysis, allocation and PVQ search. The pitch pre-filter of
+RFC 6716 §4.3.7.1 (encoder side) is not implemented; the bitstream always signals it off. libopus
+also disables it below complexity 5, so the complexity-0 comparison is unaffected. Because the
+pre-filter is absent, levels 5-10 are equivalent to 4 here.
+
+### Encode speed
+
+The corpus is 320.62 s of audio encoded as 16,031 frames of 20 ms. `Mean` is the
+BenchmarkDotNet mean for the whole corpus in one invocation; `µs/frame` and `× real time` are
+derived from it. The allocation column is BenchmarkDotNet's `[MemoryDiagnoser]` for the whole
+invocation: zero bytes.
+
+| Complexity | Mean | µs/frame | × real time | Allocated |
+| --- | --- | --- | --- | --- |
+| 0 | 1.888 s | 117.8 | 170x | 0 B |
+| 1 | 1.971 s | 123.0 | 163x | 0 B |
+| 2 | 1.833 s | 114.3 | 175x | 0 B |
+| 3 | 1.954 s | 121.9 | 164x | 0 B |
+| 4 | 2.022 s | 126.1 | 159x | 0 B |
+| 5 | 1.940 s | 121.0 | 165x | 0 B |
+| 6 | 1.877 s | 117.1 | 171x | 0 B |
+| 7 | 1.902 s | 118.6 | 169x | 0 B |
+| 8 | 1.709 s | 106.6 | 188x | 0 B |
+| 9 | 1.804 s | 112.5 | 178x | 0 B |
+| 10 | 1.761 s | 109.9 | 182x | 0 B |
+
+The spread between complexities is measurement noise on this shared machine (the same run's
+per-invocation standard error reached 7%): levels 0-3 differ only in transient and spread
+analysis, and levels 5-10 do exactly the same work as 4. The encoder runs at roughly 160-190x
+real time for the whole corpus at 32 kbps.
+
+**libopus.** `scripts/bench-libopus-encode.sh` times the same 320.62 s file five times and keeps
+the best: complexity 0 **0.206 s (1,556x real time)**, complexity 5 **0.739 s (434x)** and
+complexity 10 **0.791 s (405x)**. Those times include process start-up and reading the whole
+input file, which is generous to us.
+
+**Iso-quality.** Our complexity-0 aggregate SNR at 32 kbps (16.313 dB) is above libopus
+complexity 5 (15.795 dB) and below complexity 10 (16.653 dB), so the lowest measured libopus
+complexity whose quality is at least ours is 10. Ours takes 1.888 s in-process against libopus's
+0.791 s with file IO: **we are 2.4x slower at equal-or-better quality**. At the same complexity 0,
+libopus is 9.2x faster (0.206 s vs 1.888 s). The gap is the forward MDCT: 89 µs of the roughly
+118 µs per frame is the scalar `Mdct.Forward`, which lane PERF-1 owns. The encoder's own kernels
+are the transient detector (3.2 µs), the PVQ search (2.1 µs) and sub-microsecond energy and
+pre-emphasis work. When PERF-1's SIMD MDCT lands, this encoder inherits it without a change here.
+The front-end is otherwise allocation-free and its non-MDCT kernels are already vector-ready;
+`NormaliseBand` uses `Vector128` and is bit-identical to its scalar reference.
+
+### Quality (G2)
+
+| Bitrate | Complexity | Ours segSNR (dB) | libopus segSNR (dB) | Gap (ours − libopus) | Ours `opus_compare` | libopus `opus_compare` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 24 kbps | 0 | 14.450 | 13.334 | **+1.116** | −457.7% | −516.9% |
+| 24 kbps | 5 | 14.467 | 13.876 | +0.591 | −266.1% | −247.2% |
+| 24 kbps | 10 | 14.467 | 14.441 | +0.026 | −266.1% | −235.3% |
+| 32 kbps | 0 | 16.313 | 15.237 | **+1.076** | −419.9% | −455.4% |
+| 32 kbps | 5 | 16.302 | 15.795 | +0.506 | −221.6% | −195.4% |
+| 32 kbps | 10 | 16.302 | 16.653 | −0.351 | −221.6% | −170.0% |
+
+The gate is the complexity-0 row: the aggregate segmental SNR is 1.1 dB above libopus at both
+rates. At complexity 5 it is still ahead by about half a dB; at complexity 10 it is essentially
+tied at 24 kbps and 0.35 dB behind at 32 kbps; libopus spends its extra complexity on the pitch
+pre-filter, which this encoder does not implement.
+
+The `opus_compare` percentages are negative for **both** encoders because the corpus is itself a
+lossy decode that is being re-encoded: the metric charges the second generation of loss. On the
+same input, libopus scores +25% at 64 kbps and +74% at 128 kbps, so the negative values are a
+property of the double compression, not of the comparison. Ours is better at complexity 0; at
+complexity 5 and 10 ours is lower because libopus's pitch pre-filter improves perceptual quality
+in a way that segmental SNR does not capture.
+
+### Kernel breakdown
+
+One invocation of each kernel, steady state, from `EncodeKernelBenchmarks`. The five largest are
+listed first by time. Allocations are 0 B for every kernel.
+
+| Kernel | Work per invocation | Mean | Allocated |
+| --- | --- | --- | --- |
+| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 0 B |
+| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 0 B |
+| `TransientAnalysis` | Transient detector over 1080 pre-emphasized samples | 3.20 µs | 0 B |
+| `PvqSearch` | PVQ search, N = 96, K = 32 | 2.10 µs | 0 B |
+| `BandEnergy` | Sum of squares over 960 samples | 577 ns | 0 B |
+| `PreEmphasis` | 960 samples | 383 ns | 0 B |
+| `NormaliseBand` | 960 samples, `Vector128` path | 71 ns | 0 B |
+
+The forward MDCT is 75% of the per-frame cost; the transient detector and PVQ search are the only
+other microsecond-scale work. The PVQ search is a scalar soft-search of the reference algorithm
+(MaxIteration-wise identical to `alg_quant`); a measured faster original search is the next
+encoder-side idea, but the MDCT is where the missing 9x at complexity 0 lives.
+
+Note: the machine is shared, and repeated kernel runs varied by up to ~30% on the two MDCT rows;
+the sub-microsecond rows were stable to a few percent.
+
+### Algorithmic delay
+
+The stream delay is the 2.5 ms overlap: a sample at input index `i` appears at output index
+`i + 120` at 48 kHz. An impulse test measures 119-120 samples. The decoder look-ahead is therefore
+120 samples; a downstream consumer that has to acquire the whole frame before encoding should
+budget **one frame plus 2.5 ms**: `N + 120` samples, which is 1080 samples (22.5 ms) for the
+primary 20 ms frame.
+
+### Allocations
+
+`Encode` allocates zero bytes after construction, for all four frame durations, for the 16-bit
+overload and the float overload. `EncoderAllocationTests` proves this with
+`GC.GetAllocatedBytesForCurrentThread` over a whole file.

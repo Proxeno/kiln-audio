@@ -39,7 +39,6 @@ internal sealed class OpusDecoderCore
     private readonly float[] _pcmSilk;
     private readonly float[] _pcmTransition;
     private readonly float[] _redundantAudio;
-    private readonly float[] _plcPcm;
 
     private OpusMode? _prevMode;
     private OpusMode _mode;
@@ -49,8 +48,6 @@ internal sealed class OpusDecoderCore
     private int _frameSize;
     private int _streamChannels;
     private bool _prevRedundancy;
-    private bool _hasPlcSource;
-    private int _plcLength;
     private int _lastLm;
     private uint _finalRange;
 
@@ -74,7 +71,6 @@ internal sealed class OpusDecoderCore
         _pcmSilk = new float[_maxFrameSamples * apiChannels];
         _pcmTransition = new float[_f5 * apiChannels];
         _redundantAudio = new float[_f5 * apiChannels];
-        _plcPcm = new float[_maxFrameSamples * apiChannels];
     }
 
     /// <summary>Gets the final range of the last decoded frame (RFC 8251).</summary>
@@ -104,19 +100,15 @@ internal sealed class OpusDecoderCore
     /// </summary>
     /// <param name="packet">The packet, starting at its TOC byte.</param>
     /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
-    /// <param name="decodeFec">Any use of in-band FEC is unsupported and throws.</param>
+    /// <param name="decodeFec">
+    /// Decode this packet's in-band FEC (LBRR) data to recover the frame that preceded it, with
+    /// packet loss concealment where an interval carries no LBRR.
+    /// </param>
     /// <returns>The number of samples per channel written.</returns>
     /// <exception cref="InvalidDataException">The packet violates RFC 6716 §3 framing.</exception>
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short.</exception>
-    /// <exception cref="NotSupportedException"><paramref name="decodeFec"/> is true.</exception>
     internal int DecodePacket(ReadOnlySpan<byte> packet, Span<float> pcm, bool decodeFec)
     {
-        if (decodeFec)
-        {
-            throw new NotSupportedException(
-                "in-band FEC (LBRR) decode is not implemented yet: EWI-2742");
-        }
-
         if (packet.IsEmpty)
         {
             return DecodeLoss(pcm);
@@ -151,7 +143,7 @@ internal sealed class OpusDecoderCore
         for (int frame = 0; frame < frameCount; frame++)
         {
             int written = DecodeFrame(
-                packet[frames[frame]], _frameSize, pcm.Slice(offset, _frameSize * _channels));
+                packet[frames[frame]], _frameSize, pcm.Slice(offset, _frameSize * _channels), decodeFec);
             offset += written * _channels;
         }
 
@@ -193,7 +185,7 @@ internal sealed class OpusDecoderCore
     /// <param name="capacity">Samples per channel available in <paramref name="pcm"/>.</param>
     /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
     /// <returns>The number of samples per channel written.</returns>
-    private int DecodeFrame(ReadOnlySpan<byte> data, int capacity, Span<float> pcm)
+    private int DecodeFrame(ReadOnlySpan<byte> data, int capacity, Span<float> pcm, bool decodeFec)
     {
         if (capacity < _f2_5)
         {
@@ -240,6 +232,11 @@ internal sealed class OpusDecoderCore
             DecodeConcealment(mode, audioSize, pcm);
             _finalRange = 0;
             return audioSize;
+        }
+
+        if (decodeFec)
+        {
+            return DecodeFecFrame(data, audioSize, pcm);
         }
 
         pcm[..(audioSize * _channels)].Clear();
@@ -399,9 +396,66 @@ internal sealed class OpusDecoderCore
         _finalRange = len <= 1 ? 0 : dec.Rng ^ redundantRange;
         _prevMode = mode;
         _prevRedundancy = redundancy && !celtToSilk;
-        _plcLength = audioSize;
-        _hasPlcSource = true;
-        pcm[..(audioSize * _channels)].CopyTo(_plcPcm);
+        return audioSize;
+    }
+
+    /// <summary>
+    /// Decodes the in-band FEC (LBRR) frames of this packet to recover the previous frame
+    /// (RFC 6716 §4.2.4–§4.2.5, Appendix A <c>opus_decode_frame()</c> with <c>decode_fec</c>).
+    /// </summary>
+    /// <param name="data">The frame's bytes, from the packet that follows the lost one.</param>
+    /// <param name="audioSize">Samples per channel the frame produces.</param>
+    /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
+    /// <returns>The number of samples per channel written.</returns>
+    /// <remarks>
+    /// SILK and hybrid frames decode their LBRR data; an interval without LBRR falls back to
+    /// packet loss concealment, as the reference does. The CELT layer has no FEC, so for CELT-only
+    /// and hybrid frames it contributes concealment (<c>celt_decode_with_ec(NULL)</c>). Output has
+    /// the duration of the frame in <paramref name="data"/>, which is the frame size the caller
+    /// sees, not the size of the lost frame.
+    /// </remarks>
+    private int DecodeFecFrame(ReadOnlySpan<byte> data, int audioSize, Span<float> pcm)
+    {
+        OpusMode mode = _mode;
+        var dec = new RangeDecoder(data);
+        pcm[..(audioSize * _channels)].Clear();
+
+        if (mode != OpusMode.Celt)
+        {
+            if (_prevMode == OpusMode.Celt)
+            {
+                _silk.Reset();
+            }
+
+            _silk.DecodeFec(
+                ref dec, InternalRate(mode), _streamChannels, _frameDurationMs, _pcmSilk);
+        }
+
+        if (mode != OpusMode.Silk)
+        {
+            if (mode != _prevMode && _prevMode is not null && !_prevRedundancy)
+            {
+                _celt.Reset();
+            }
+
+            _celt.DecodeLost(
+                LogForSamples(audioSize),
+                mode == OpusMode.Hybrid ? 17 : 0,
+                pcm[..(audioSize * _channels)]);
+        }
+
+        if (mode != OpusMode.Celt)
+        {
+            int count = audioSize * _channels;
+            for (int i = 0; i < count; i++)
+            {
+                pcm[i] += _pcmSilk[i];
+            }
+        }
+
+        _finalRange = dec.Rng;
+        _prevMode = mode;
+        _prevRedundancy = false;
         return audioSize;
     }
 
@@ -413,40 +467,91 @@ internal sealed class OpusDecoderCore
         _celt.DecodeRedundant(data, endBand, _streamChannels, _redundantAudio);
 
     /// <summary>
-    /// Writes minimal concealment for a lost frame: the CELT <c>DecodeLost</c> hook for CELT-only
-    /// streams, and a decaying repeat of the last frame for SILK and hybrid streams.
+    /// Writes concealment for a lost frame in the mode of the last good frame (RFC 6716 §4.4).
     /// </summary>
     /// <param name="mode">Coding mode of the frame being concealed.</param>
     /// <param name="samples">Samples per channel to write.</param>
     /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
     private void DecodeConcealment(OpusMode mode, int samples, Span<float> pcm)
     {
-        if (mode == OpusMode.Celt)
+        int durationMs = samples * 1000 / _apiRate;
+        switch (mode)
         {
-            _celt.DecodeLost(LogForSamples(samples), pcm[..(samples * _channels)]);
-            return;
+            case OpusMode.Celt:
+                ConcealCelt(samples, startBand: 0, pcm);
+                break;
+            case OpusMode.Silk:
+                ConcealSilk(Math.Max(durationMs, 10), samples, pcm[..(samples * _channels)]);
+                break;
+            default:
+                ConcealHybrid(samples, pcm);
+                break;
         }
+    }
 
-        if (!_hasPlcSource || _plcLength == 0)
+    /// <summary>Conceals a CELT-only frame, splitting at 20 ms as the reference does.</summary>
+    /// <param name="samples">Samples per channel to conceal.</param>
+    /// <param name="startBand">First band: 0 for CELT-only, 17 for the CELT half of a hybrid frame.</param>
+    /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
+    private void ConcealCelt(int samples, int startBand, Span<float> pcm)
+    {
+        int offset = 0;
+        while (offset < samples)
         {
-            pcm[..(samples * _channels)].Clear();
-            return;
+            int chunk = Math.Min(_f20, samples - offset);
+            _celt.DecodeLost(
+                LogForSamples(chunk),
+                startBand,
+                pcm.Slice(offset * _channels, chunk * _channels));
+            offset += chunk;
         }
+    }
 
-        for (int i = 0; i < samples; i++)
+    /// <summary>Conceals a hybrid frame: SILK for the low band, CELT for the high band.</summary>
+    /// <param name="samples">Samples per channel to conceal.</param>
+    /// <param name="pcm">Destination for interleaved samples in [-1, 1].</param>
+    private void ConcealHybrid(int samples, Span<float> pcm)
+    {
+        int offset = 0;
+        while (offset < samples)
         {
-            int source = i % _plcLength;
-            for (int channel = 0; channel < _channels; channel++)
+            int chunk = Math.Min(_f20, samples - offset);
+            int chunkMs = chunk * 1000 / _apiRate;
+            ConcealSilk(Math.Max(chunkMs, 10), chunk, _pcmSilk);
+            _celt.DecodeLost(
+                LogForSamples(chunk),
+                startBand: 17,
+                pcm.Slice(offset * _channels, chunk * _channels));
+            int baseOffset = offset * _channels;
+            int count = chunk * _channels;
+            for (int i = 0; i < count; i++)
             {
-                pcm[(i * _channels) + channel] = _plcPcm[(source * _channels) + channel];
+                pcm[baseOffset + i] += _pcmSilk[i];
             }
+
+            offset += chunk;
+        }
+    }
+
+    /// <summary>
+    /// Conceals SILK audio, producing whole 10 ms or 20 ms frames even when fewer samples are
+    /// requested, because the SILK PLC cannot make shorter frames (Appendix A, dec_API.c).
+    /// </summary>
+    /// <param name="concealDurationMs">Duration the SILK PLC runs for: at least 10 ms.</param>
+    /// <param name="requestedSamples">Samples per channel the caller wants.</param>
+    /// <param name="destination">Destination for the requested samples.</param>
+    /// <returns>The number of samples per channel written.</returns>
+    private int ConcealSilk(int concealDurationMs, int requestedSamples, Span<float> destination)
+    {
+        if (concealDurationMs == requestedSamples * 1000 / _apiRate)
+        {
+            return _silk.DecodeLost(concealDurationMs, destination);
         }
 
-        // Fade the stored frame so repeated losses decay instead of ringing forever.
-        for (int i = 0; i < _plcLength * _channels; i++)
-        {
-            _plcPcm[i] *= 0.5f;
-        }
+        _silk.DecodeLost(concealDurationMs, _pcmSilk);
+        int count = requestedSamples * _channels;
+        _pcmSilk.AsSpan(0, count).CopyTo(destination);
+        return requestedSamples;
     }
 
     /// <summary>Applies the CELT power-complementary cross-fade used for transitions.</summary>

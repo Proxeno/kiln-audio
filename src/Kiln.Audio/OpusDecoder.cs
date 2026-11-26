@@ -20,9 +20,10 @@ namespace Kiln.Audio;
 /// channel, and a mono stream decoded to stereo duplicates it, matching the reference decoder.
 /// </para>
 /// <para>
-/// Packet loss concealment is deliberately minimal in this release: CELT uses its
-/// <c>DecodeLost</c> hook (silence for now) and SILK/hybrid repeats the previous frame with a
-/// decay. A full PLC and in-band FEC implementation is EWI-2742.
+/// Packet loss is handled in the mode of the last good frame (RFC 6716 §4.4): SILK extrapolates
+/// from its LPC/LTP state with comfort noise and a smooth re-entry, and CELT repeats the pitch
+/// period before switching to shaped noise. <see cref="Decode(ReadOnlySpan{byte},Span{short},bool)"/>
+/// with <c>decodeFec: true</c> recovers the preceding frame from the in-band LBRR data.
 /// </para>
 /// </remarks>
 public sealed class OpusDecoder : IDisposable
@@ -62,23 +63,19 @@ public sealed class OpusDecoder : IDisposable
     /// <see cref="OpusDecoderOptions.Channels"/> samples.
     /// </param>
     /// <param name="decodeFec">
-    /// Decode the in-band FEC data of this packet to recover the previous (lost) frame. In-band
-    /// FEC is not implemented yet and throws <see cref="NotSupportedException"/>.
+    /// Decode the in-band FEC (LBRR) data of this packet to recover the frame that preceded it.
+    /// The output has the frame size of <paramref name="packet"/> itself, which is not
+    /// necessarily the size of the lost frame; an interval without LBRR falls back to packet
+    /// loss concealment. CELT-only and hybrid packets have no SILK LBRR for the CELT layer, so
+    /// their CELT contribution is concealed as well.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
     /// <exception cref="ObjectDisposedException">The decoder has been disposed.</exception>
     /// <exception cref="InvalidDataException">The packet violates RFC 6716 §3 framing.</exception>
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short for the packet.</exception>
-    /// <exception cref="NotSupportedException"><paramref name="decodeFec"/> is true.</exception>
     public int Decode(ReadOnlySpan<byte> packet, Span<short> pcm, bool decodeFec = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (decodeFec)
-        {
-            throw new NotSupportedException(
-                "in-band FEC (LBRR) decode is not implemented yet: EWI-2742");
-        }
-
         ValidateDestination(packet, pcm.Length);
 
         int samples = _core.DecodePacket(packet, _floatScratch, decodeFec);
@@ -106,14 +103,14 @@ public sealed class OpusDecoder : IDisposable
     /// <paramref name="return"/> times <see cref="OpusDecoderOptions.Channels"/> samples.
     /// </param>
     /// <param name="decodeFec">
-    /// Decode the in-band FEC data of this packet to recover the previous (lost) frame. In-band
-    /// FEC is not implemented yet and throws <see cref="NotSupportedException"/>.
+    /// Decode the in-band FEC (LBRR) data of this packet to recover the frame that preceded it.
+    /// The output has the frame size of <paramref name="packet"/> itself; an interval without
+    /// LBRR falls back to packet loss concealment.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
     /// <exception cref="ObjectDisposedException">The decoder has been disposed.</exception>
     /// <exception cref="InvalidDataException">The packet violates RFC 6716 §3 framing.</exception>
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short for the packet.</exception>
-    /// <exception cref="NotSupportedException"><paramref name="decodeFec"/> is true.</exception>
     public int Decode(ReadOnlySpan<byte> packet, Span<float> pcm, bool decodeFec = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
