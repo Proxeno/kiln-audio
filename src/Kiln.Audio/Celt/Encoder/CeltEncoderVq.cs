@@ -1,6 +1,8 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using Kiln.Audio.Entropy;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -107,21 +109,22 @@ internal static class CeltEncoderVq
     private static void ExpRotation1(Span<float> x, int stride, float c, float s)
     {
         int length = x.Length;
+        ref float values = ref MemoryMarshal.GetReference(x);
         for (int i = 0; i < length - stride; i++)
         {
-            float x1 = x[i];
-            float x2 = x[i + stride];
-            x[i + stride] = (c * x2) + (s * x1);
-            x[i] = (c * x1) - (s * x2);
+            float x1 = Unsafe.Add(ref values, i);
+            float x2 = Unsafe.Add(ref values, i + stride);
+            Unsafe.Add(ref values, i + stride) = (c * x2) + (s * x1);
+            Unsafe.Add(ref values, i) = (c * x1) - (s * x2);
         }
 
         int pointer = length - (2 * stride) - 1;
         for (int i = length - (2 * stride) - 1; i >= 0; i--)
         {
-            float x1 = x[pointer];
-            float x2 = x[pointer + stride];
-            x[pointer + stride] = (c * x2) + (s * x1);
-            x[pointer] = (c * x1) - (s * x2);
+            float x1 = Unsafe.Add(ref values, pointer);
+            float x2 = Unsafe.Add(ref values, pointer + stride);
+            Unsafe.Add(ref values, pointer + stride) = (c * x2) + (s * x1);
+            Unsafe.Add(ref values, pointer) = (c * x1) - (s * x2);
             pointer--;
         }
     }
@@ -135,12 +138,14 @@ internal static class CeltEncoderVq
         }
 
         int perBlock = n / blocks;
+        ref int pulses = ref MemoryMarshal.GetReference(iy);
         int mask = 0;
         for (int i = 0; i < blocks; i++)
         {
+            int index = i * perBlock;
             for (int j = 0; j < perBlock; j++)
             {
-                mask |= (iy[(i * perBlock) + j] != 0 ? 1 : 0) << i;
+                mask |= (Unsafe.Add(ref pulses, index + j) != 0 ? 1 : 0) << i;
             }
         }
 
@@ -242,50 +247,56 @@ internal static class CeltEncoderVq
 
     private static uint Icwrs(ReadOnlySpan<int> y, int n, int k, out uint nc, Span<uint> u)
     {
-        u[0] = 0;
+        ref int yRef = ref MemoryMarshal.GetReference(y);
+        ref uint uRef = ref MemoryMarshal.GetReference(u);
+
+        Unsafe.Add(ref uRef, 0) = 0;
         for (int j = 1; j <= k + 1; j++)
         {
-            u[j] = (uint)((j << 1) - 1);
+            Unsafe.Add(ref uRef, j) = (uint)((j << 1) - 1);
         }
 
-        int acc = Math.Abs(y[n - 1]);
-        uint index = y[n - 1] < 0 ? 1u : 0u;
+        int last = Unsafe.Add(ref yRef, n - 1);
+        int acc = Math.Abs(last);
+        uint index = last < 0 ? 1u : 0u;
         int position = n - 2;
-        index += u[acc];
-        acc += Math.Abs(y[position]);
-        if (y[position] < 0)
+        index += Unsafe.Add(ref uRef, acc);
+        int value = Unsafe.Add(ref yRef, position);
+        acc += Math.Abs(value);
+        if (value < 0)
         {
-            index += u[acc + 1];
+            index += Unsafe.Add(ref uRef, acc + 1);
         }
 
         while (position-- > 0)
         {
-            Unext(u, k + 2, 0);
-            index += u[acc];
-            acc += Math.Abs(y[position]);
-            if (y[position] < 0)
+            Unext(ref uRef, k + 2, 0);
+            index += Unsafe.Add(ref uRef, acc);
+            value = Unsafe.Add(ref yRef, position);
+            acc += Math.Abs(value);
+            if (value < 0)
             {
-                index += u[acc + 1];
+                index += Unsafe.Add(ref uRef, acc + 1);
             }
         }
 
-        nc = u[acc] + u[acc + 1];
+        nc = Unsafe.Add(ref uRef, acc) + Unsafe.Add(ref uRef, acc + 1);
         return index;
     }
 
     /// <summary>Advances one row of the combinatorial recurrence (RFC 6716 Appendix A, celt/cwrs.c: unext).</summary>
-    private static void Unext(Span<uint> u, int length, uint ui0)
+    private static void Unext(ref uint uRef, int length, uint ui0)
     {
         int j = 1;
         do
         {
-            uint ui1 = unchecked(u[j] + u[j - 1] + ui0);
-            u[j - 1] = ui0;
+            uint ui1 = unchecked(Unsafe.Add(ref uRef, j) + Unsafe.Add(ref uRef, j - 1) + ui0);
+            Unsafe.Add(ref uRef, j - 1) = ui0;
             ui0 = ui1;
         }
         while (++j < length);
 
-        u[j - 1] = ui0;
+        Unsafe.Add(ref uRef, j - 1) = ui0;
     }
 
     private static uint Ucwrs2(int k) => (uint)(k + (k - 1));
