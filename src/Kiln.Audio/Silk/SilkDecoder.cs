@@ -33,9 +33,6 @@ internal sealed class SilkDecoder
     /// </summary>
     private struct ChannelState
     {
-        /// <summary>Previous gain index, or -1 when no value is available (RFC 6716 §4.2.7.4).</summary>
-        public int PreviousLogGain;
-
         /// <summary>Previous primary pitch lag, or -1 (RFC 6716 §4.2.7.6.1).</summary>
         public int PreviousLag;
 
@@ -47,7 +44,6 @@ internal sealed class SilkDecoder
 
         public void Clear()
         {
-            PreviousLogGain = -1;
             PreviousLag = -1;
             StereoWeight0Q13 = 0;
             StereoWeight1Q13 = 0;
@@ -56,6 +52,13 @@ internal sealed class SilkDecoder
 
     private readonly ChannelState[] _regularState = new ChannelState[MaxChannels];
     private readonly ChannelState[] _lbrrState = new ChannelState[MaxChannels];
+
+    /// <summary>
+    /// The gain index of the most recent coded subframe in each channel, or -1 when no value is
+    /// available. LBRR and regular frames share it, because it is a per-channel value
+    /// (RFC 6716 §4.2.7.4).
+    /// </summary>
+    private readonly int[] _previousLogGain = new int[MaxChannels];
     private int _rateHz;
     private int _channels;
     private int _bandwidthIndex;
@@ -75,6 +78,7 @@ internal sealed class SilkDecoder
         {
             _regularState[channel].Clear();
             _lbrrState[channel].Clear();
+            _previousLogGain[channel] = -1;
         }
     }
 
@@ -129,6 +133,7 @@ internal sealed class SilkDecoder
             {
                 _regularState[channel].Clear();
                 _lbrrState[channel].Clear();
+                _previousLogGain[channel] = -1;
             }
         }
 
@@ -289,7 +294,7 @@ internal sealed class SilkDecoder
                 {
                     // No gain is available from an uncoded side frame (RFC 6716 §4.2.7.4).
                     sideSignalType = -1;
-                    _regularState[1].PreviousLogGain = -1;
+                    _previousLogGain[1] = -1;
                 }
             }
 
@@ -347,7 +352,7 @@ internal sealed class SilkDecoder
         target.SignalType = (SilkSignalType)(frameType >> 1);
         target.QuantizationOffsetType = frameType & 1;
 
-        DecodeGains(ref dec, target, ref state, firstOfType, previousCoded);
+        DecodeGains(ref dec, target, channel, firstOfType, previousCoded);
         DecodeNlsf(ref dec, target);
         if (target.IsVoiced)
         {
@@ -389,8 +394,11 @@ internal sealed class SilkDecoder
     }
 
     /// <summary>Decodes the subframe gains (RFC 6716 §4.2.7.4, Tables 11 through 13).</summary>
-    private void DecodeGains(ref RangeDecoder dec, SilkChannelFrame target, ref ChannelState state, bool firstOfType, bool previousCoded)
+    private void DecodeGains(ref RangeDecoder dec, SilkChannelFrame target, int channel, bool firstOfType, bool previousCoded)
     {
+        // RFC 6716 §4.2.7.4: the clamp and delta coding use the gain from the most recent
+        // coded subframe in this channel, whichever frame type it belonged to.
+        ref int previousLogGain = ref _previousLogGain[channel];
         for (int k = 0; k < _subframes; k++)
         {
             int logGain;
@@ -400,14 +408,14 @@ internal sealed class SilkDecoder
                 int msb = SilkTables.DecodePdf(ref dec, SilkTables.GainMsbPdf[(int)target.SignalType]);
                 int lsb = SilkTables.DecodePdf(ref dec, SilkTables.GainLsbPdf);
                 logGain = (msb << 3) | lsb;
-                if (state.PreviousLogGain >= 0)
+                if (previousLogGain >= 0)
                 {
-                    logGain = Math.Max(logGain, state.PreviousLogGain - 16);
+                    logGain = Math.Max(logGain, previousLogGain - 16);
                 }
             }
             else
             {
-                int previous = state.PreviousLogGain >= 0 ? state.PreviousLogGain : 0;
+                int previous = previousLogGain >= 0 ? previousLogGain : 0;
                 int delta = SilkTables.DecodePdf(ref dec, SilkTables.GainDeltaPdf);
                 logGain = Math.Clamp(
                     Math.Max((2 * delta) - 16, previous + delta - 4), 0, 63);
@@ -415,7 +423,7 @@ internal sealed class SilkDecoder
 
             target.LogGainIndex[k] = logGain;
             target.GainQ16[k] = DequantizeGainQ16(logGain);
-            state.PreviousLogGain = logGain;
+            previousLogGain = logGain;
         }
     }
 
