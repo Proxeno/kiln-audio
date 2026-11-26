@@ -27,7 +27,7 @@ jobs:
             runs_on: [self-hosted, Windows, X64]
             require_oracle: '0'
             # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.
-            bash: '"C:\\Program Files\\Git\\bin\\bash.exe" --noprofile --norc -eo pipefail {0}'
+            bash: '"C:\Program Files\Git\bin\bash.exe" --noprofile --norc -eo pipefail {0}'
           - os: macos
             runs_on: [self-hosted, macOS, ARM64]
             require_oracle: '1'
