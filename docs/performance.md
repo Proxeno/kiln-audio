@@ -153,6 +153,10 @@ because it was not measured to win on this machine.
 | MDCT window multiply (`MdctKernels`) | Vector128 | float, ≤1e-6 RMS |
 | CELT comb post-filter (`CeltPostFilterKernel`) | Vector128, four independent samples when period ≥ 6 | bit-exact |
 | SILK short-term LPC (`SilkLpcKernel`) | Vector128 over the order-tap dot product, 32-bit lanes | bit-exact |
+| CELT band denormalization (`DecKernels.ScaleCopy`) | Vector128, elementwise | bit-exact |
+| CELT PVQ pulse scaling (`DecKernels.ScaleIntToFloat`) | Vector128, int32→float then multiply | bit-exact |
+| CELT stereo merge (`DecKernels.StereoMerge`) | Vector128, elementwise | bit-exact |
+| SILK LTP synthesis (`DecSilkLtp`) | Vector128, four independent samples when lag ≥ 10 | bit-exact |
 
 **Algorithmic changes.**
 
@@ -183,25 +187,111 @@ every kernel onto its scalar path. `SimdParityTests` runs both paths in-process 
 on every kernel, so the scalar path is exercised in CI without a separate job; running the suite
 with the variable set exercises it end to end.
 
+## PERF-2: decoder hot paths
+
+PERF-2 targets the CELT entropy and frequency-domain decode plus the SILK synthesis loop. The
+changes are pure optimizations: the SILK output is bit-exact, the final range is exact on every
+packet, and the RFC 8251 conformance tests are unchanged.
+
+**Profiling method.** `DecodeStageBenchmarks` and `SilkDecodeStageBenchmarks` in
+`bench/Kiln.Audio.Benchmarks/DecodeStages.cs` time each Opus frame in three (CELT) or two (SILK)
+stages with `Stopwatch.GetTimestamp` and report the average in microseconds per frame over every
+invocation. `DecodeKernelBenchmarks` in `DecodeKernels.cs` times each kernel's scalar and vector
+paths back to back in one process, which is the only comparison that survives the shared machine's
+load. An EventPipe sample was also taken, but BenchmarkDotNet's speedscope export attributed every
+sample to a `CPU_TIME` leaf, so it was not used.
+
+The machine was at load average 60-120 (18 cores) for much of this lane, and whole-vector means
+varied by up to 40% between runs. The per-stage figures come from two runs with the same job
+(before on the PERF-1 base, after on this branch); the SILK mediumband row (03) is the clearest
+victim of the noise, since even its untouched decode stage moved by 30%.
+
+### Decode results
+
+Per-frame microseconds for the whole vector, best observed mean on each side. `libopus` is the
+fastest of two in-process harness runs. The whole-vector rows were taken at different times, so
+treat the ratios as indicative rather than exact.
+
+| Vector | libopus µs/frame | Kiln before µs/frame | Ratio before | Kiln after µs/frame | Ratio after |
+| ------ | ---------------- | -------------------- | ------------ | ------------------- | ----------- |
+| 01 | 8.55 | 12.37 | 1.45 | 11.70 | 1.37 |
+| 07 | 5.70 | 12.65 | 2.22 | 8.76 | 1.54 |
+| 11 | 24.40 | 37.15 | 1.52 | 37.15 | 1.52 |
+| 02 | 6.22 | 7.08 | 1.14 | 6.79 | 1.09 |
+| 03 | 7.39 | 10.83 | 1.47 | 9.15 | 1.24 |
+| 04 | 8.71 | 15.80 | 1.81 | 13.43 | 1.54 |
+
+The CELT 07 and SILK 03 rows improved the most (the PVQ/denormalization and LTP changes
+respectively). CELT 11 showed no reliable change: its synthesis is dominated by the inverse MDCT,
+which this lane does not own. None of the six vectors reached the ≤1.0 target.
+
+### Stage split (µs per Opus frame, 0 B allocated)
+
+| Vector | Mode | Stage | Before | After |
+| ------ | ---- | ----- | ------ | ----- |
+| 01 | CELT | bitstream + frequency domain | 10.70 | 7.97 |
+| 01 | | synthesis | 6.78 | 4.78 |
+| 01 | | int16 conversion | 0.41 | 0.33 |
+| 07 | CELT | bitstream + frequency domain | 6.29 | 5.15 |
+| 07 | | synthesis | 7.69 | 6.04 |
+| 07 | | int16 conversion | 0.43 | 0.38 |
+| 11 | CELT | bitstream + frequency domain | 28.39 | 23.37 |
+| 11 | | synthesis | 24.96 | 20.15 |
+| 11 | | int16 conversion | 1.77 | 1.64 |
+| 02 | SILK | parameters + excitation | 4.52 | 4.13 |
+| 02 | | synthesis | 4.68 | 3.92 |
+| 03 | SILK | parameters + excitation | 4.71 | 6.15 |
+| 03 | | synthesis | 5.18 | 6.72 |
+| 04 | SILK | parameters + excitation | 5.03 | 5.05 |
+| 04 | | synthesis | 10.29 | 9.50 |
+
+"Synthesis" for CELT is denormalization, the inverse MDCT with overlap-add, the post-filter and
+de-emphasis; for SILK it is NLSF→LPC, excitation reconstruction, LTP and LPC synthesis.
+
+### Kernel A/B (same process, one benchmark run)
+
+| Kernel | Work per invocation | Scalar | Vector | Speedup |
+| ------ | ------------------- | ------ | ------ | ------- |
+| SILK LTP synthesis (`DecSilkLtp`) | 5-tap LTP over 80 samples | 213.6 ns | 68.6 ns | 3.1x |
+| CELT denormalization (`DecKernels.ScaleCopy`) | 176-coefficient band | 64.3 ns | 20.7 ns | 3.1x |
+| CELT PVQ pulse scaling (`DecKernels.ScaleIntToFloat`) | 176 pulses | 70.9 ns | 19.4 ns | 3.7x |
+
+### Algorithmic changes
+
+- The PVQ `V(N,K)` table is a single flat `uint[]` with a fixed row stride instead of a
+  two-dimensional array, so the several reads per bin in `cwrs` cost one offset add rather than a
+  multiply and two bounds checks. `Cwrsi` also reuses the `V(N-j-1,k)` value it already read and
+  accumulates `sum(y^2)` during the same walk, removing a second pass over the pulse vector.
+- The CELT frequency buffer is cleared only outside the coded band range, and the long-block
+  inverse MDCT writes straight into the overlap-add instead of through a cleared intermediate.
+- `RangeDecoder`'s symbol path is marked for inlining, renormalization gets a branch-only fast
+  path, and the byte read uses an unchecked span reference after the existing bounds test.
+- The SILK LTP loop vectorizes four samples at a time when the lag keeps a block's writes outside
+  its reads (`lag >= 10`), falling back to the reference scalar chain otherwise. `Smulwb` is
+  evaluated in 32-bit lanes exactly as in `SilkLpcKernel`.
+
 ## Remaining gaps and next ideas
 
-1. **CELT decode** (ratio in the decode table above). The MDCT is now ~5.4-6.0 µs per
-   960-sample channel frame, close to the 6 µs target. The inverse still runs two `N/2`-point
-   complex FFTs (one per DCT-IV); the next idea is a real FFT of size `N/2`, which is an
-   `N/4`-point complex FFT plus a split, to halve the transform again. After the transform, the
-   CELT entropy decode and the frequency-domain reconstruction (outside the PERF-1 kernel set)
-   dominate.
-2. **MDCT inverse.** Kernel-level, a split-radix radix-2/4 FFT and a fused post-rotation write
+1. **CELT decode** (ratios in the PERF-2 decode table above). After PERF-2 the per-frame split is
+   roughly half bitstream/frequency-domain decode and half synthesis. The single largest synthesis
+   kernel is now the inverse MDCT (~5.4 µs per 960-sample channel frame); it still runs two
+   `N/2`-point complex FFTs (one per DCT-IV), and a real FFT of size `N/2` is the next step. That
+   file belongs to lane ENC-PERF-1, not this one.
+2. **CELT entropy decode.** The remaining bitstream cost is the PVQ codeword read and the
+   per-band bookkeeping (allocation interpolation, `TellFrac`, coarse/fine energy). The range
+   decoder itself matches the reference's structure; the next ideas are a branch-free `ec_dec`
+   tail and fusing `ExtractCollapseMask` into `Cwrsi`, both expected to be small.
+3. **MDCT inverse.** Kernel-level, a split-radix radix-2/4 FFT and a fused post-rotation write
    (avoiding the separate reversed copies) are the next step. The DCT-IV pre/post rotations are
    stride-two on the input and output; a two-source lane shuffle, which this runtime's
    `Vector128.Shuffle` lacks, would vectorize them.
-3. **CELT post-filter.** 2.4x faster; at ~0.36 µs it is no longer material.
-4. **SILK.** LPC synthesis is ~20% faster in isolation. The full SILK vectors moved only a little
-   because LPC synthesis is a minority of SILK decode; the next targets are the LPC analysis
-   filter, the NLSF decode and the stereo unmix.
-5. **PVQ decode and CELT de-emphasis** are inherently serial (range decode and a one-pole IIR
-   respectively). They were measured at ~0.2 µs and are not worth vectorizing; they remain in
-   place.
+4. **CELT post-filter and de-emphasis.** The post-filter is 2.4x faster and ~0.36 µs. De-emphasis
+   is a one-pole recursion that the reference also runs scalar; combining it with the int16
+   conversion would need the synthesis API to write shorts, which is outside this lane's files.
+5. **SILK.** The LTP loop is now 3.1x faster in isolation and LPC synthesis 20%, but the WB vector
+   (04) is the one SILK vector still well above 1.0: its synthesis is ~9.5 µs/frame. The next
+   targets are the NLSF→LPC conversion and the excitation reconstruction, neither of which is in
+   this lane's file set, plus vectorizing the LPC analysis filter.
 
 ## Encoder (CELT-only, 48 kHz mono)
 
