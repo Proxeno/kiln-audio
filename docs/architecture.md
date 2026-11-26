@@ -81,14 +81,23 @@ followed by this resampler lands at lag 0 against `opus_demo -d <rate>`.
 The values are a calibration of this filter and must be re-measured if the prototype design
 changes; they are not libopus coefficients. `ResampleConformanceTests` checks the 24 SILK-DEC-2
 streams at 48 kHz: the cross-correlation peak is at lag 0 for every one, and the sample-wise SNR
-after the first 10 ms is about 30–32 dB.
+after the first 10 ms is 29.9–33.8 dB. The 29.9 dB case is NB 10 ms stereo; a filter approaching
+an ideal interpolator scores worse against libopus on NB (about 20 dB), so this is close to the
+limit of matching the reference's own resampler with an original design.
 
-### Known gap: mono/stereo transitions
+### Mono/stereo channel transitions
 
-RFC 8251 vectors 02–04 switch from mono to stereo partway through. libopus carries channel 0's
-decoder and synthesis state across that switch and only initializes the new side channel
-(`dec_API.c`), whereas `SilkSynthesis` resets every channel on a channel-count change. The reset
-makes the first ~100 ms of the stereo half differ from the reference, which dominates the
-`opus_compare` score. The RFC vectors therefore cannot pass end to end until the synthesis
-state handling for channel transitions is fixed; that is outside the resampler module.
+RFC 8251 vectors 02–04 are mono for their first half and stereo for the second. A change of
+channel count is not a mode change: RFC 6716 §4.5.2 resets only for a rate or mode change, and
+RFC 8251 §3 resets only the stereo state. The reference implementation keeps the mid (channel 0)
+decoder and synthesis state across the switch, initializes the new side channel, and clears the
+stereo mid/side prediction memory (`silk/dec_API.c` in Appendix A). `SilkDecoder`,
+`SilkSynthesis` and `SilkVectorDriver` follow that: the driver also skips one internal-rate
+sample at a mono-to-stereo switch so the one-sample delay step is applied before the resampler
+and smoothed by it, rather than as a discontinuity in the 48 kHz output.
+
+With that handling, RFC 8251 vectors 02, 03 and 04 pass the native `opus_compare` metric against
+both `.dec` and `m.dec` (see `ResampleConformanceTests`), and `ResampleTransitionTests` checks
+that the mono half and the post-transition stereo half are bit-exact with `opus_demo` at the
+internal rate.
 

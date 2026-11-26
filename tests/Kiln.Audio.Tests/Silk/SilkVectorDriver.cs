@@ -91,6 +91,8 @@ internal static class SilkVectorDriver
         SilkResampler? left = null;
         SilkResampler? right = null;
         int packetIndex = 0;
+        int pendingTransition = 0;
+        int inputDebt = 0;
 
         foreach ((byte[] packet, _) in packets)
         {
@@ -117,12 +119,24 @@ internal static class SilkVectorDriver
             };
             int packetChannels = toc.IsStereo ? 2 : 1;
 
-            if (packetRate != rate || packetChannels != channels)
+            if (packetRate != rate)
             {
                 rate = packetRate;
                 channels = packetChannels;
                 left = new SilkResampler(rate, OutputRate, channels);
                 right = new SilkResampler(rate, OutputRate, channels);
+                pendingTransition = 0;
+            }
+            else if (packetChannels != channels)
+            {
+                // libopus's mono path holds one extra sample of mid history, so the total
+                // delay steps by one input sample when the stream changes between mono and
+                // stereo. Apply the step before the resampler (skip or duplicate one input
+                // sample) so the filter smooths it, as libopus's resampler does. The filter
+                // state itself carries across the change.
+                pendingTransition = packetChannels == 2 ? 1 : -1;
+                inputDebt += pendingTransition;
+                channels = packetChannels;
             }
 
             OpusStatus status = OpusPacket.TryParse(
@@ -153,6 +167,19 @@ internal static class SilkVectorDriver
                 var framePcm = new short[samplesPerChannel * channels];
                 synthesis.Synthesize(result, framePcm);
 
+                int skip = 0;
+                int insert = 0;
+                if (pendingTransition > 0)
+                {
+                    skip = 1;
+                    pendingTransition = 0;
+                }
+                else if (pendingTransition < 0)
+                {
+                    insert = 1;
+                    pendingTransition = 0;
+                }
+
                 if (channels == 2)
                 {
                     var channel = new short[samplesPerChannel];
@@ -161,13 +188,13 @@ internal static class SilkVectorDriver
                         channel[i] = framePcm[2 * i];
                     }
 
-                    short[] delayedLeft = Resample(left!, channel);
+                    short[] delayedLeft = Resample(left!, ApplyTransition(channel, skip, insert));
                     for (int i = 0; i < samplesPerChannel; i++)
                     {
                         channel[i] = framePcm[(2 * i) + 1];
                     }
 
-                    short[] delayedRight = Resample(right!, channel);
+                    short[] delayedRight = Resample(right!, ApplyTransition(channel, skip, insert));
                     for (int i = 0; i < delayedLeft.Length; i++)
                     {
                         pcm.Add(delayedLeft[i]);
@@ -176,11 +203,15 @@ internal static class SilkVectorDriver
                 }
                 else
                 {
-                    short[] delayed = Resample(left!, framePcm);
-                    foreach (short sample in delayed)
+                    // Feed both output channels so the side resampler carries the mid history,
+                    // as libopus does when it copies channel 0's resampler state to channel 1.
+                    short[] source = ApplyTransition(framePcm, skip, insert);
+                    short[] delayedLeft = Resample(left!, source);
+                    short[] delayedRight = Resample(right!, source);
+                    for (int i = 0; i < delayedLeft.Length; i++)
                     {
-                        pcm.Add(sample);
-                        pcm.Add(sample);
+                        pcm.Add(delayedLeft[i]);
+                        pcm.Add(delayedRight[i]);
                     }
                 }
             }
@@ -190,7 +221,57 @@ internal static class SilkVectorDriver
             packetIndex++;
         }
 
+        // Restore the skipped or duplicated input samples so the output has one sample per
+        // decoded sample. A skipped sample is repaid with silence at the end; a duplicated one
+        // is removed from the end.
+        if (inputDebt > 0)
+        {
+            var zeros = new short[inputDebt];
+            short[] delayedLeft = Resample(left!, zeros);
+            short[] delayedRight = Resample(right!, zeros);
+            for (int i = 0; i < delayedLeft.Length; i++)
+            {
+                pcm.Add(delayedLeft[i]);
+                pcm.Add(delayedRight[i]);
+            }
+        }
+        else if (inputDebt < 0)
+        {
+            int remove = (-inputDebt * (OutputRate / rate)) * 2;
+            if (remove > 0 && remove <= pcm.Count)
+            {
+                pcm.RemoveRange(pcm.Count - remove, remove);
+            }
+        }
+
         return new Result(pcm.ToArray(), layout.Count == 0 ? 0 : layout[0].Channels, layout);
+    }
+
+    private static short[] ApplyTransition(ReadOnlySpan<short> source, int skip, int insert)
+    {
+        if (skip == 0 && insert == 0)
+        {
+            return source.ToArray();
+        }
+
+        if (skip > 0)
+        {
+            source = source[skip..];
+        }
+
+        if (insert > 0)
+        {
+            var output = new short[source.Length + 1];
+            if (source.Length > 0)
+            {
+                output[0] = source[0];
+            }
+
+            source.CopyTo(output.AsSpan(1));
+            return output;
+        }
+
+        return source.ToArray();
     }
 
     private static short[] Resample(SilkResampler resampler, ReadOnlySpan<short> input)

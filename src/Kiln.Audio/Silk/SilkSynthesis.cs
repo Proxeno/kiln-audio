@@ -22,8 +22,11 @@ namespace Kiln.Audio.Silk;
 /// </para>
 /// <para>
 /// One instance decodes one stream: it carries the LPC/LTP histories, previous NLSFs and gains,
-/// and the stereo mid/side state across frames. A change of internal rate or channel count resets
-/// it, as RFC 6716 §4.5.2 requires. Synthesizing a frame allocates nothing.
+/// and the stereo mid/side state across frames. A change of internal rate resets it, as RFC 6716
+/// §4.5.2 requires for a bandwidth change. A change of channel count at the same rate keeps the
+/// mid channel's synthesis state, starts the side channel fresh and clears the stereo mid/side
+/// state, matching the reference implementation (Appendix A, <c>silk/dec_API.c</c>).
+/// Synthesizing a frame allocates nothing.
 /// </para>
 /// </remarks>
 internal sealed class SilkSynthesis
@@ -147,7 +150,7 @@ internal sealed class SilkSynthesis
     {
         ArgumentNullException.ThrowIfNull(frame);
 
-        if (_rateHz != frame.InternalRateHz || _channels != frame.Channels)
+        if (_rateHz != frame.InternalRateHz)
         {
             Reset();
             _rateHz = frame.InternalRateHz;
@@ -159,6 +162,19 @@ internal sealed class SilkSynthesis
                 _ => 2,
             };
             _lpcOrder = _bandwidthIndex == 2 ? MaxLpcOrder : 10;
+        }
+        else if (_channels != frame.Channels)
+        {
+            // A channel-count change at the same rate is not a mode change. The reference
+            // implementation keeps the mid channel's synthesis memory and only initializes the
+            // new side channel (Appendix A, silk/dec_API.c); RFC 8251 §3 requires the stereo
+            // mid/side and prediction state to be cleared.
+            _channelState[1].Reset();
+            _stereoMid.AsSpan().Clear();
+            _stereoSide.AsSpan().Clear();
+            _stereoPredPrevQ13.AsSpan().Clear();
+            _previousDecodeOnlyMiddle = false;
+            _channels = frame.Channels;
         }
 
         _subframeCount = frame.SubframeCount;

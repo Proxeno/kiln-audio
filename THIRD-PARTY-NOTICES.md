@@ -7,6 +7,7 @@ implementation embedded in Appendix A of RFC 6716:
 
 - `src/Kiln.Audio/Celt/CeltTables.cs`
 - `src/Kiln.Audio/Celt/CeltDecoder.cs`
+- `src/Kiln.Audio/Silk/SilkDecoder.cs`
 - `src/Kiln.Audio/Silk/SilkFixedPoint.cs`
 - `src/Kiln.Audio/Silk/SilkNlsf.cs`
 - `src/Kiln.Audio/Silk/SilkSynthesis.cs`
