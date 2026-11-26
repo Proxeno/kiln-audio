@@ -49,7 +49,7 @@ public class SilkPcmOracleTests
     [Fact]
     public void Silk_only_streams_are_bit_exact_with_libopus()
     {
-        if (!LibOpusOracle.Available)
+        if (!OracleTestSupport.OracleAvailable())
         {
             _output.WriteLine("libopus oracle not available; skipping.");
             return;
