@@ -59,6 +59,10 @@ public class KernelBenchmarks
     private readonly short[] _ltpCoefficients = new short[Subframes * LtpOrder];
     private readonly int[] _excitation = new int[SubframeLength];
 
+    private readonly Fft _fft480 = Fft.Get(480);
+    private readonly Complex32[] _fftInput = new Complex32[480];
+    private readonly Complex32[] _fftOutput = new Complex32[480];
+
     private int _gainQ10 = 4096;
 
     /// <summary>Fills every buffer with a deterministic, non-trivial pattern.</summary>
@@ -105,11 +109,21 @@ public class KernelBenchmarks
             _ltpState[i] = ((i * 13) % 2000) - 1000;
         }
 
+        for (int i = 0; i < _fftInput.Length; i++)
+        {
+            _fftInput[i] = new Complex32(
+                (float)Math.Sin(0.23 * i), (float)Math.Cos(0.41 * i));
+        }
+
         for (int i = 0; i < _ltpCoefficients.Length; i++)
         {
             _ltpCoefficients[i] = (short)(((i % 7) - 3) * 900);
         }
     }
+
+    /// <summary>One 480-point complex forward FFT, the size one 960-coefficient MDCT uses per DCT-IV.</summary>
+    [Benchmark]
+    public void Fft480() => _fft480.Forward(_fftInput, _fftOutput);
 
     /// <summary>One inverse MDCT of a 20 ms (960-coefficient) block.</summary>
     [Benchmark]
