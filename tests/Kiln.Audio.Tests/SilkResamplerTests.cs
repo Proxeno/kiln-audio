@@ -154,7 +154,7 @@ public class SilkResamplerTests
     }
 
     [Fact]
-    public void Equal_rates_copy_exactly()
+    public void Equal_rates_copy_exactly_after_the_alignment_delay()
     {
         var random = new Random(99);
         var input = new short[5000];
@@ -166,10 +166,20 @@ public class SilkResamplerTests
         foreach (int rate in InputRates)
         {
             var resampler = new SilkResampler(rate, rate);
-            resampler.DelaySamplesOut.Should().Be(0);
+            int delay = resampler.DelaySamplesOut;
+
+            // libopus's copy resampler delays the signal by a fixed number of samples; the
+            // alignment reproduces exactly that, so equal rates are a pure delay, not a copy.
+            delay.Should().BeGreaterThan(0);
+            var expected = new short[input.Length];
+            for (int i = delay; i < expected.Length; i++)
+            {
+                expected[i] = input[i - delay];
+            }
+
             var output = new short[input.Length];
             resampler.Process(input, output);
-            output.Should().Equal(input);
+            output.Should().Equal(expected);
         }
     }
 

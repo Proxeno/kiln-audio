@@ -14,19 +14,19 @@ namespace Kiln.Audio.Silk;
 /// latency stays small; only its magnitude is constrained, not its phase.
 /// </para>
 /// <para>
-/// At an output rate equal to the input rate the converter is an exact copy. The libopus decoder
-/// also runs a "copy" resampler in that case; the delay it adds is relative to an internal SILK
-/// signal that neither the public API nor <c>opus_demo</c> exposes, so it cannot be observed by
-/// cross-correlation. The observable relative delay of a copy is zero, and that is what this class
-/// does.
+/// At an output rate equal to the input rate the converter is an exact copy followed by the
+/// alignment delay. libopus also runs a "copy" resampler in that case, and its output is delayed
+/// relative to the SILK synthesis by a fixed number of samples (5/10/13 for mono and 4/9/12 for
+/// stereo at 8/12/16 kHz). The alignment delay reproduces that, so equal rates are a pure delay,
+/// not a zero-delay copy.
 /// </para>
 /// <para>
-/// Measured against libopus 1.5.2 (48 kHz output, SILK-only streams): libopus's relative lag is
-/// +3 output samples for 8 kHz in and -3 / -2 for 12 / 16 kHz in. The corresponding nominal
-/// delays of this converter are 16 / 10 / 7 output samples. libopus's internal-rate decode carries
-/// its copy-path delay (4/9/12 input samples) relative to an internal signal that is not exposed,
-/// so a causal converter fed that PCM cannot reproduce the small negative relative lag; the
-/// residual is 9-13 output samples (0.19-0.27 ms). See docs/architecture.md.
+/// The converter carries a short integer alignment delay (see <see cref="AlignmentDelay"/>) so
+/// that the total delay of SILK synthesis followed by this resampler equals libopus's total delay
+/// from its SILK synthesis to the output at the requested rate, for every rate pair and channel
+/// count. That alignment is what makes the end-to-end SILK-only output line up with libopus to the
+/// sample; the measured 48 kHz alignment is 19/29/31 output samples for mono and 13/25/28 for
+/// stereo at 8/12/16 kHz in. See docs/architecture.md.
 /// </para>
 /// <para>
 /// <see cref="Process"/> carries all state between calls, allocates nothing, and produces exactly
@@ -52,15 +52,20 @@ internal sealed class SilkResampler
     private readonly int _historyLength;
     private readonly double[] _history;
 
+    // Integer delay applied after the filter so the total delay matches libopus.
+    private readonly short[] _delayRing;
+    private int _delayPosition;
+
     private long _consumed;
     private long _produced;
     private int _ringPosition;
 
-    /// <summary>Creates a resampler for one rate pair.</summary>
+    /// <summary>Creates a resampler for one rate pair and channel count.</summary>
     /// <param name="inRateHz">Input rate: 8000, 12000 or 16000.</param>
     /// <param name="outRateHz">Output rate: 8000, 12000, 16000, 24000 or 48000.</param>
-    /// <exception cref="ArgumentOutOfRangeException">A rate is not supported.</exception>
-    internal SilkResampler(int inRateHz, int outRateHz)
+    /// <param name="channels">Channel count of the stream being decoded, 1 or 2.</param>
+    /// <exception cref="ArgumentOutOfRangeException">A rate or the channel count is not supported.</exception>
+    internal SilkResampler(int inRateHz, int outRateHz, int channels = 1)
     {
         if (inRateHz is not (8000 or 12000 or 16000))
         {
@@ -74,12 +79,20 @@ internal sealed class SilkResampler
                 nameof(outRateHz), outRateHz, "Output rate must be 8000, 12000, 16000, 24000 or 48000 Hz.");
         }
 
+        if (channels is not (1 or 2))
+        {
+            throw new ArgumentOutOfRangeException(nameof(channels), channels, "Channels must be 1 or 2.");
+        }
+
         _inRate = inRateHz;
         _outRate = outRateHz;
         int divisor = Gcd(inRateHz, outRateHz);
         _up = outRateHz / divisor;
         _down = inRateHz / divisor;
         _copy = inRateHz == outRateHz;
+
+        int alignment = AlignmentDelay(inRateHz, outRateHz, channels);
+        _delayRing = new short[alignment];
 
         if (_copy)
         {
@@ -88,7 +101,7 @@ internal sealed class SilkResampler
             _coefficients = [];
             _historyLength = 1;
             _history = new double[1];
-            DelaySamplesOut = 0;
+            DelaySamplesOut = alignment;
             return;
         }
 
@@ -118,14 +131,16 @@ internal sealed class SilkResampler
             }
         }
 
-        DelaySamplesOut = ComputeDelaySamplesOut(prototype, _up, _down, inRateHz, outRateHz);
+        DelaySamplesOut =
+            ComputeDelaySamplesOut(prototype, _up, _down, inRateHz, outRateHz) + alignment;
         _history = new double[_historyLength];
     }
 
-    /// <summary>Nominal latency in output samples, rounded to the nearest sample.</summary>
+    /// <summary>Total nominal latency in output samples.</summary>
     /// <remarks>
     /// This is the minimum-phase prototype's low-frequency group delay divided by the downsampling
-    /// factor. The actual delay is frequency dependent; the oracle tests report the
+    /// factor, plus the integer alignment delay that matches libopus's total decode-to-output
+    /// delay. The actual delay is frequency dependent; the oracle tests report the
     /// cross-correlation delay measured for each rate pair.
     /// </remarks>
     internal int DelaySamplesOut { get; }
@@ -158,6 +173,8 @@ internal sealed class SilkResampler
     internal void Reset()
     {
         Array.Clear(_history);
+        Array.Clear(_delayRing);
+        _delayPosition = 0;
         _consumed = 0;
         _produced = 0;
         _ringPosition = 0;
@@ -179,13 +196,18 @@ internal sealed class SilkResampler
 
         if (_copy)
         {
-            input.CopyTo(output);
+            int written = 0;
+            foreach (short sample in input)
+            {
+                output[written++] = Push(sample);
+            }
+
             _consumed += input.Length;
             _produced += input.Length;
             return;
         }
 
-        int written = 0;
+        int writtenNonCopy = 0;
         foreach (short sample in input)
         {
             _history[_ringPosition] = sample;
@@ -199,11 +221,91 @@ internal sealed class SilkResampler
             long available = (_consumed * _up) / _down;
             while (_produced < available)
             {
-                output[written++] = NextSample();
+                output[writtenNonCopy++] = Push(NextSample());
                 _produced++;
             }
         }
     }
+
+    /// <summary>Pushes one filtered sample through the alignment delay line.</summary>
+    private short Push(short sample)
+    {
+        if (_delayRing.Length == 0)
+        {
+            return sample;
+        }
+
+        short delayed = _delayRing[_delayPosition];
+        _delayRing[_delayPosition] = sample;
+        _delayPosition++;
+        if (_delayPosition == _delayRing.Length)
+        {
+            _delayPosition = 0;
+        }
+
+        return delayed;
+    }
+
+    /// <summary>
+    /// Integer delay, in output samples, added after the filter so that the total delay of SILK
+    /// synthesis plus this resampler equals libopus's total delay from its SILK synthesis to the
+    /// output at <paramref name="outRateHz"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 6716 §4.2.9 makes the SILK resampler non-normative, but our goal is sample alignment
+    /// with libopus 1.5.2, so the alignment is calibrated to it. Two effects are folded in:
+    /// libopus's internal copy-path buffering, which delays the signal it presents at the internal
+    /// rate by 4-13 samples depending on rate and channel count (one more sample for mono, because
+    /// the mono path buffers the mid history), and the difference between libopus's resampler and
+    /// our own filter's effective delay. The values were obtained by cross-correlating our output
+    /// against <c>opus_demo -d &lt;rate&gt;</c> for SILK-only streams and choosing the integer that
+    /// puts the peak at lag 0; see <c>ResampleConformanceTests</c>.
+    /// </para>
+    /// <para>
+    /// The table is a calibration of this filter, not a libopus table: if the prototype design
+    /// changes, these values must be re-measured.
+    /// </para>
+    /// </remarks>
+    private static int AlignmentDelay(int inRateHz, int outRateHz, int channels) => channels == 2
+        ? (inRateHz, outRateHz) switch
+        {
+            (8000, 8000) => 4,
+            (8000, 12000) => 4,
+            (8000, 16000) => 4,
+            (8000, 24000) => 7,
+            (8000, 48000) => 13,
+            (12000, 8000) => 4,
+            (12000, 12000) => 9,
+            (12000, 16000) => 8,
+            (12000, 24000) => 14,
+            (12000, 48000) => 25,
+            (16000, 8000) => 4,
+            (16000, 12000) => 7,
+            (16000, 16000) => 12,
+            (16000, 24000) => 14,
+            (16000, 48000) => 28,
+            _ => throw new ArgumentOutOfRangeException(nameof(outRateHz), outRateHz, "Unsupported rate pair."),
+        }
+        : (inRateHz, outRateHz) switch
+        {
+            (8000, 8000) => 5,
+            (8000, 12000) => 5,
+            (8000, 16000) => 6,
+            (8000, 24000) => 10,
+            (8000, 48000) => 19,
+            (12000, 8000) => 5,
+            (12000, 12000) => 10,
+            (12000, 16000) => 10,
+            (12000, 24000) => 16,
+            (12000, 48000) => 29,
+            (16000, 8000) => 5,
+            (16000, 12000) => 8,
+            (16000, 16000) => 13,
+            (16000, 24000) => 16,
+            (16000, 48000) => 31,
+            _ => throw new ArgumentOutOfRangeException(nameof(outRateHz), outRateHz, "Unsupported rate pair."),
+        };
 
     /// <summary>Evaluates the prototype filter's magnitude at a frequency, relative to DC.</summary>
     /// <param name="hertz">Frequency in hertz at the upsampled design rate.</param>

@@ -1,3 +1,5 @@
+// Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
+
 using System;
 using Kiln.Audio.Entropy;
 
@@ -22,10 +24,9 @@ namespace Kiln.Audio.Silk;
 /// final range.
 /// </para>
 /// <para>
-/// RFC 8251 §3 additionally requires the stereo state to be reinitialized on a mode switch,
-/// even when the internal rate and channel count do not change; the top-level decoder must call
-/// <see cref="Reset"/> on such a switch (RFC 8251 §6 and §7 apply to inverse-gain and LSF
-/// stabilization, which are synthesis-side and outside this decoder).
+/// A change of internal rate resets the decoder (RFC 6716 §4.5.2). A change of channel count at
+/// the same rate is not a mode change: the mid (channel 0) state is kept, the side channel starts
+/// fresh, and the stereo weights are cleared (RFC 8251 §3; Appendix A, <c>silk/dec_API.c</c>).
 /// </para>
 /// </remarks>
 internal sealed class SilkDecoder
@@ -137,7 +138,7 @@ internal sealed class SilkDecoder
 
         // RFC 6716 §4.5.2: a bandwidth or mode change resets the SILK state. A reset decoder
         // (_rateHz == 0) is already clear.
-        if (_rateHz != 0 && (_rateHz != internalRateHz || _channels != channels))
+        if (_rateHz != 0 && _rateHz != internalRateHz)
         {
             for (int channel = 0; channel < MaxChannels; channel++)
             {
@@ -145,6 +146,20 @@ internal sealed class SilkDecoder
                 _lbrrState[channel].Clear();
                 _previousLogGain[channel] = -1;
             }
+        }
+        else if (_rateHz != 0 && _channels != channels)
+        {
+            // A channel-count change at the same rate is not a mode change. The reference
+            // implementation keeps the mid channel's decoder state (Appendix A, silk/dec_API.c:
+            // only channel_state[1] is reinitialized on mono to stereo), starts the side channel
+            // fresh, and clears the stereo prediction state (RFC 8251 §3).
+            _regularState[0].StereoWeight0Q13 = 0;
+            _regularState[0].StereoWeight1Q13 = 0;
+            _lbrrState[0].StereoWeight0Q13 = 0;
+            _lbrrState[0].StereoWeight1Q13 = 0;
+            _regularState[1].Clear();
+            _lbrrState[1].Clear();
+            _previousLogGain[1] = -1;
         }
 
         _rateHz = internalRateHz;
