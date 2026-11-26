@@ -22,12 +22,16 @@ jobs:
           - os: linux
             runs_on: [self-hosted, Linux, X64, docker]
             require_oracle: '1'
+            bash: bash
           - os: windows
             runs_on: [self-hosted, Windows, X64]
             require_oracle: '0'
+            # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.
+            bash: '"C:\\Program Files\\Git\\bin\\bash.exe" --noprofile --norc -eo pipefail {0}'
           - os: macos
             runs_on: [self-hosted, macOS, ARM64]
             require_oracle: '1'
+            bash: bash
     name: build-test (${{ matrix.os }})
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 40
@@ -52,10 +56,10 @@ jobs:
           path: .oracle/bin
           key: libopus-oracle-${{ runner.os }}-${{ hashFiles('scripts/build-libopus-oracle.sh') }}
       - name: Fetch RFC 8251 test vectors
-        shell: bash
+        shell: ${{ matrix.bash }}
         run: bash scripts/fetch-test-vectors.sh
       - name: Build libopus oracle
-        shell: bash
+        shell: ${{ matrix.bash }}
         run: bash scripts/build-libopus-oracle.sh
       - name: Restore
         run: dotnet restore
