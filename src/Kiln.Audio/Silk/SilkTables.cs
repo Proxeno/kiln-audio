@@ -250,7 +250,7 @@ internal static class SilkTables
     /// <summary>Low part of the primary lag PDF by bandwidth, indexed NB, MB, WB (Table 30).</summary>
     internal static readonly byte[][] PitchLagLowPdf = [PitchLagLowPdfNb, PitchLagLowPdfMb, PitchLagLowPdfWb];
 
-    /// <summary>Scale, minimum and maximum primary lag by bandwidth, indexed NB, MB, WB (Table 30).</summary>
+    /// <summary>Primary lag scale factor by bandwidth, indexed NB, MB, WB (RFC 6716 §4.2.7.6.1, Table 30).</summary>
     internal static readonly int[] PitchLagScale = [4, 6, 8];
 
     /// <summary>Minimum primary lag by bandwidth, indexed NB, MB, WB (RFC 6716 §4.2.7.6.1, Table 30).</summary>
