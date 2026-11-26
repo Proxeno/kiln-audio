@@ -25,7 +25,14 @@ internal static class EncoderTestSignals
     /// <returns>The frame payloads and each frame's final range.</returns>
     internal static (byte[][] Frames, uint[] Ranges) EncodeCeltFrames(int count, int bitrate = 32000, int complexity = 5)
     {
-        var encoder = new CeltEncoder(OpusFrameDuration.Ms20, bitrate, complexity);
+        var encoder = new CeltEncoder(
+            OpusFrameDuration.Ms20,
+            bitrate,
+            complexity,
+            channels: 1,
+            InputResampler.InternalSampleRate,
+            useVbr: false,
+            constrainedVbr: true);
         short[] pcm = Tone(count * FrameSamples);
         var frames = new byte[count][];
         var ranges = new uint[count];
@@ -46,7 +53,14 @@ internal static class EncoderTestSignals
     /// </summary>
     internal static byte[] EncodeSilenceCeltFrame()
     {
-        var encoder = new CeltEncoder(OpusFrameDuration.Ms20, bitrateBps: 1, complexity: 0);
+        var encoder = new CeltEncoder(
+            OpusFrameDuration.Ms20,
+            bitrateBps: 1,
+            complexity: 0,
+            channels: 1,
+            InputResampler.InternalSampleRate,
+            useVbr: false,
+            constrainedVbr: true);
         var frame = new byte[encoder.FrameBytes];
         encoder.EncodeFrame(new short[FrameSamples], frame);
         return frame;

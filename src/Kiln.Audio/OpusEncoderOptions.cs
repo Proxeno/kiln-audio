@@ -10,6 +10,10 @@ public sealed record OpusEncoderOptions
     public int Channels { get; init; } = 1;
 
     /// <summary>Intended application. Default <see cref="OpusApplication.Voip"/>.</summary>
+    /// <remarks>
+    /// All three applications currently map onto the same CELT-only settings. Automatic SILK and
+    /// hybrid mode selection is added separately.
+    /// </remarks>
     public OpusApplication Application { get; init; } = OpusApplication.Voip;
 
     /// <summary>Target bitrate in bits per second. Default 24000; must be positive.</summary>
@@ -20,6 +24,18 @@ public sealed record OpusEncoderOptions
 
     /// <summary>Encoder complexity, 0 (fastest) to 10 (best quality). Default 5.</summary>
     public int Complexity { get; init; } = 5;
+
+    /// <summary>
+    /// Whether to use variable bitrate. Default false, which keeps the constant-bitrate behaviour
+    /// of earlier releases.
+    /// </summary>
+    public bool UseVbr { get; init; }
+
+    /// <summary>
+    /// Whether variable bitrate is constrained by the reference's bit reservoir. Default true.
+    /// Ignored when <see cref="UseVbr"/> is false.
+    /// </summary>
+    public bool ConstrainedVbr { get; init; } = true;
 
     /// <summary>Whether to emit in-band forward error correction (LBRR). Default false.</summary>
     public bool UseInbandFec { get; init; }

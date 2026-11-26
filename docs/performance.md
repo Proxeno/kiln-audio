@@ -345,9 +345,10 @@ at complexity 0 for no quality benefit. It is now gated the same way, and the ti
 below complexity 2 is the reference's `isTransient` (always false here, because transient analysis
 also needs complexity > 1).
 
-The pitch pre-filter of RFC 6716 §4.3.7.1 (encoder side) is not implemented; the bitstream always
-signals it off. libopus also disables it below complexity 5, so the complexity-0 comparison is
-unaffected. Because the pre-filter is absent, levels 5-10 are equivalent to 4 here.
+ENC-2 adds the pitch pre-filter of RFC 6716 §4.3.7.1 (encoder side) at complexity 5 and above,
+matching libopus; it is signalled off below that, so the complexity-0 rows above are unaffected.
+The pre-filter search uses the reference's decimated correlation with a Vector128/Vector256 dot
+product and a scalar reference.
 
 ### Encode speed (fair, in process)
 
@@ -452,6 +453,24 @@ lossy decode that is being re-encoded: the metric charges the second generation 
 same input, libopus scores +25% at 64 kbps and +74% at 128 kbps, so the negative values are a
 property of the double compression, not of the comparison.
 
+### Input rates, stereo and VBR (ENC-2)
+
+CELT runs internally at 48 kHz. For API rates below 48 kHz the encoder uses the reference's
+original upsampler: one input sample is zero-stuffed every `48000/rate` internal samples, then the
+MDCT bins above the input Nyquist rate are cleared and the coded band count is reduced to the
+end band the rate allows (13 for 8 kHz, 17 for 12/16 kHz, 19 for 24 kHz, 21 for 48 kHz). Twelve
+kilohertz maps to wideband because CELT-only packets cannot signal mediumband. The end band is
+carried by the TOC configuration, so the bitstream is decodable by any conformant decoder.
+
+The zero-stuffing upsampler is non-normative and has no resampling filter. Its added delay is
+`(upsample - 1) / 48000` seconds (about 0.104 ms at 8 kHz, 0.021 ms at 16 kHz), on top of the
+unchanged 2.5 ms CELT overlap; the discarded bins are the images above the input Nyquist rate.
+
+Stereo follows §4.3.4: mid/side theta quantization in the band split, the reference's intensity
+thresholds from the effective rate, and the per-frame dual-stereo analysis. `UseVbr` (default
+false) enables the reference's target-plus-reservoir rate control; `ConstrainedVbr` (default true)
+applies the reservoir bound. Defaults keep the previous constant-bitrate behaviour.
+
 ### Kernel results
 
 Direct in-process measurements (best of five, five thousand iterations each); the machine is
@@ -503,3 +522,62 @@ overload and the float overload. `EncoderAllocationTests` proves this with
    and the iso-quality target is met by 2.5-3.6x. Nothing further is needed there for ENC-PERF-1.
 5. **Front end.** Pre-emphasis, band energy and normalise are now equal to or below 0.4 µs each;
    band energy deliberately keeps its scalar summation order because it feeds the bitstream.
+
+## SILK encoder quality
+
+Aggregate segmental SNR (dB, higher is better) of the SILK encoder (`OpusApplication.Voip`, mono) over the RFC 8251 vectors 2, 3, 4 and 6 mixed to mono, 48 kHz input. Every encoder is decoded with libopus 1.5.2 and scored against the same reference: the input passed through an independent long windowed-sinc resampler (`tests/Kiln.Audio.Tests/SilkEncoder/IdealResampler.cs`, more than 80 dB stopband, zero delay). 20 ms segments, each clamped to [-10, 60] dB.
+
+**Where we stand:** at complexity 0 we match or beat the RFC 6716 Appendix A reference encoder in every configuration (this is the hard G2 gate, with the RFC figures frozen in `SilkRfcBaseline.cs`). We trail libopus 1.5.2: by 0.6 to 1.2 dB in the bands that matter most at 12 kbps and above for the low-complexity settings, and by up to about 2 dB at complexity 5 and 10 at low bitrates, where libopus uses encoder features we do not yet have. Lane SILK-QUAL is working on closing this gap. The gap to libopus is reported by the test, not asserted.
+
+| Band | Frame | Bitrate | Complexity | Ours | RFC reference | libopus 1.5.2 | Ours - libopus |
+|---|---|---|---|---|---|---|---|
+| Narrowband | 20 ms | 8 kbps | 0 | 3.17 | 3.04 | 3.61 | -0.44 |
+| Narrowband | 20 ms | 8 kbps | 5 | 3.06 | - | 4.20 | -1.14 |
+| Narrowband | 20 ms | 8 kbps | 10 | 3.18 | - | 4.44 | -1.26 |
+| Narrowband | 20 ms | 12 kbps | 0 | 5.20 | 4.98 | 5.52 | -0.32 |
+| Narrowband | 20 ms | 12 kbps | 5 | 5.18 | - | 5.65 | -0.47 |
+| Narrowband | 20 ms | 12 kbps | 10 | 5.24 | - | 5.74 | -0.50 |
+| Narrowband | 60 ms | 8 kbps | 0 | 3.22 | 3.09 | 3.65 | -0.43 |
+| Narrowband | 60 ms | 8 kbps | 5 | 3.13 | - | 4.22 | -1.09 |
+| Narrowband | 60 ms | 8 kbps | 10 | 3.30 | - | 4.51 | -1.21 |
+| Narrowband | 60 ms | 12 kbps | 0 | 5.25 | 5.03 | 5.50 | -0.25 |
+| Narrowband | 60 ms | 12 kbps | 5 | 5.25 | - | 5.65 | -0.40 |
+| Narrowband | 60 ms | 12 kbps | 10 | 5.27 | - | 5.76 | -0.49 |
+| Mediumband | 20 ms | 8 kbps | 0 | 2.45 | 2.42 | 2.78 | -0.33 |
+| Mediumband | 20 ms | 8 kbps | 5 | 2.20 | - | 3.77 | -1.57 |
+| Mediumband | 20 ms | 8 kbps | 10 | 2.29 | - | 4.17 | -1.88 |
+| Mediumband | 20 ms | 12 kbps | 0 | 4.79 | 4.66 | 5.01 | -0.22 |
+| Mediumband | 20 ms | 12 kbps | 5 | 4.70 | - | 5.47 | -0.77 |
+| Mediumband | 20 ms | 12 kbps | 10 | 4.70 | - | 5.72 | -1.02 |
+| Mediumband | 20 ms | 20 kbps | 0 | 6.26 | 5.95 | 6.73 | -0.47 |
+| Mediumband | 20 ms | 20 kbps | 5 | 6.24 | - | 6.80 | -0.56 |
+| Mediumband | 20 ms | 20 kbps | 10 | 6.21 | - | 6.84 | -0.63 |
+| Mediumband | 60 ms | 8 kbps | 0 | 2.55 | 2.52 | 2.82 | -0.27 |
+| Mediumband | 60 ms | 8 kbps | 5 | 2.22 | - | 3.78 | -1.56 |
+| Mediumband | 60 ms | 8 kbps | 10 | 2.30 | - | 4.23 | -1.93 |
+| Mediumband | 60 ms | 12 kbps | 0 | 4.84 | 4.72 | 4.84 | +0.00 |
+| Mediumband | 60 ms | 12 kbps | 5 | 4.72 | - | 5.39 | -0.67 |
+| Mediumband | 60 ms | 12 kbps | 10 | 4.73 | - | 5.63 | -0.90 |
+| Mediumband | 60 ms | 20 kbps | 0 | 6.32 | 5.98 | 6.72 | -0.40 |
+| Mediumband | 60 ms | 20 kbps | 5 | 6.26 | - | 6.81 | -0.55 |
+| Mediumband | 60 ms | 20 kbps | 10 | 6.23 | - | 6.87 | -0.64 |
+| Wideband | 20 ms | 8 kbps | 0 | 1.70 | 1.71 | 1.71 | -0.01 |
+| Wideband | 20 ms | 8 kbps | 5 | 1.53 | - | 3.00 | -1.47 |
+| Wideband | 20 ms | 8 kbps | 10 | 1.56 | - | 3.53 | -1.97 |
+| Wideband | 20 ms | 12 kbps | 0 | 3.61 | 3.58 | 4.50 | -0.89 |
+| Wideband | 20 ms | 12 kbps | 5 | 3.40 | - | 5.16 | -1.76 |
+| Wideband | 20 ms | 12 kbps | 10 | 3.47 | - | 5.48 | -2.01 |
+| Wideband | 20 ms | 20 kbps | 0 | 6.02 | 5.78 | 6.44 | -0.42 |
+| Wideband | 20 ms | 20 kbps | 5 | 5.91 | - | 6.64 | -0.73 |
+| Wideband | 20 ms | 20 kbps | 10 | 5.96 | - | 6.70 | -0.74 |
+| Wideband | 60 ms | 8 kbps | 0 | 1.82 | 1.72 | 1.78 | +0.04 |
+| Wideband | 60 ms | 8 kbps | 5 | 1.57 | - | 3.06 | -1.49 |
+| Wideband | 60 ms | 8 kbps | 10 | 1.61 | - | 3.61 | -2.00 |
+| Wideband | 60 ms | 12 kbps | 0 | 3.51 | 3.48 | 4.37 | -0.86 |
+| Wideband | 60 ms | 12 kbps | 5 | 3.31 | - | 5.08 | -1.77 |
+| Wideband | 60 ms | 12 kbps | 10 | 3.35 | - | 5.42 | -2.07 |
+| Wideband | 60 ms | 20 kbps | 0 | 6.02 | 5.75 | 6.43 | -0.41 |
+| Wideband | 60 ms | 20 kbps | 5 | 5.92 | - | 6.62 | -0.70 |
+| Wideband | 60 ms | 20 kbps | 10 | 5.95 | - | 6.72 | -0.77 |
+
+The RFC reference was run only at complexity 0 (the gated setting). To regenerate the RFC column, build the RFC 6716 Appendix A source with FIXED_POINT=1 and run the `SilkRfcBaselineGenerator` test with `KILN_SILK_RFC_OPUS_DEMO` set to its `opus_demo`. The per-run output of the quality tests is in the xUnit output of `SilkEncoderQualityTests`.

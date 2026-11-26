@@ -23,8 +23,22 @@
     <ProjectReference Include="../../src/Kiln.Audio/Kiln.Audio.csproj" />
   </ItemGroup>
 
+  <!--
+    The robustness tests replay the same fuzz engine the standalone Kiln.Audio.Fuzz session
+    runs; compiling its sources here keeps the smoke test and the long sessions on one
+    implementation without a test-project reference to an executable project.
+  -->
+  <ItemGroup>
+    <Compile Include="../Kiln.Audio.Fuzz/*.cs"
+             Exclude="../Kiln.Audio.Fuzz/Program.cs"
+             Link="Robustness/Engine/%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="xunit.runner.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Robustness/Inputs/*.seq">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
