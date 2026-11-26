@@ -1,5 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Kiln.Audio.Entropy;
 
 namespace Kiln.Audio.Celt.Encoder;
@@ -364,14 +366,20 @@ internal sealed class CeltEncoderBands
     private static void Haar1(Span<float> x, int n0, int stride)
     {
         n0 >>= 1;
+        ref float values = ref MemoryMarshal.GetReference(x);
         for (int i = 0; i < stride; i++)
         {
+            int even = i;
+            int odd = stride + i;
+            int advance = 2 * stride;
             for (int j = 0; j < n0; j++)
             {
-                float first = 0.70710678f * x[(stride * 2 * j) + i];
-                float second = 0.70710678f * x[(stride * ((2 * j) + 1)) + i];
-                x[(stride * 2 * j) + i] = first + second;
-                x[(stride * ((2 * j) + 1)) + i] = first - second;
+                float first = 0.70710678f * Unsafe.Add(ref values, even);
+                float second = 0.70710678f * Unsafe.Add(ref values, odd);
+                Unsafe.Add(ref values, even) = first + second;
+                Unsafe.Add(ref values, odd) = first - second;
+                even += advance;
+                odd += advance;
             }
         }
     }
@@ -380,25 +388,15 @@ internal sealed class CeltEncoderBands
     {
         int n = n0 * stride;
         Span<float> tmp = _hadamardScratch.AsSpan(0, n);
-        if (hadamard)
+        ref float source = ref MemoryMarshal.GetReference(x);
+        ref float destination = ref MemoryMarshal.GetReference(tmp);
+        ReadOnlySpan<int> ordery = hadamard ? CeltTables.OrderyTable.Slice(stride - 2) : default;
+        for (int i = 0; i < stride; i++)
         {
-            ReadOnlySpan<int> ordery = CeltTables.OrderyTable.Slice(stride - 2);
-            for (int i = 0; i < stride; i++)
+            int target = (hadamard ? ordery[i] : i) * n0;
+            for (int j = 0; j < n0; j++)
             {
-                for (int j = 0; j < n0; j++)
-                {
-                    tmp[(ordery[i] * n0) + j] = x[(j * stride) + i];
-                }
-            }
-        }
-        else
-        {
-            for (int i = 0; i < stride; i++)
-            {
-                for (int j = 0; j < n0; j++)
-                {
-                    tmp[(i * n0) + j] = x[(j * stride) + i];
-                }
+                Unsafe.Add(ref destination, target + j) = Unsafe.Add(ref source, (j * stride) + i);
             }
         }
 

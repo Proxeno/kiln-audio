@@ -1,0 +1,11 @@
+#nullable enable
+Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusBandwidth.Fullband = 4 -> Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusBandwidth.Mediumband = 1 -> Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusBandwidth.Narrowband = 0 -> Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusBandwidth.SuperWideband = 3 -> Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusBandwidth.Wideband = 2 -> Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusEncoderOptions.Bandwidth.get -> Kiln.Audio.OpusBandwidth?
+Kiln.Audio.OpusEncoderOptions.Bandwidth.init -> void
+Kiln.Audio.OpusEncoderOptions.UseCbr.get -> bool
+Kiln.Audio.OpusEncoderOptions.UseCbr.init -> void

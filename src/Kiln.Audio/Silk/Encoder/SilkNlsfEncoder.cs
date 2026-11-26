@@ -272,7 +272,8 @@ internal static class SilkNlsfEncoder
 
     /// <summary>Limits, stabilizes and quantizes an NLSF vector (Appendix A, <c>silk_process_NLSFs</c>).</summary>
     /// <param name="encoder">Encoder state.</param>
-    /// <param name="predictionQ12">Receives the two LPC coefficient sets.</param>
+    /// <param name="prediction0Q12">Receives the LPC coefficients of the first half-frame.</param>
+    /// <param name="prediction1Q12">Receives the LPC coefficients of the second half-frame.</param>
     /// <param name="nlsfQ15">On input the target NLSFs, on output the quantized NLSFs.</param>
     internal static void ProcessNlsfs(
         SilkEncoderState encoder,

@@ -6,7 +6,7 @@ namespace Kiln.Audio.Simd;
 
 /// <summary>
 /// The SILK short-term LPC synthesis loop (RFC 6716 §4.2.7.9.2) as a fixed-point kernel with a
-/// scalar reference path and a <see cref="Vector{T}"/> path.
+/// scalar reference path and a <see cref="System.Numerics.Vector{T}"/> path.
 /// </summary>
 /// <remarks>
 /// <para>
