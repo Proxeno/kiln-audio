@@ -11,6 +11,12 @@ namespace Kiln.Audio.Tests.Silk;
 /// Checks the SILK symbol decoder against the encoder's final range, which is bit-exact evidence
 /// that every symbol was decoded with the right table, in the right order, with the right state.
 /// </summary>
+/// <remarks>
+/// A SILK-only frame may carry a redundant CELT transition frame (RFC 6716 §4.5.1.1), whose
+/// separate range coder is folded into the reference final range. Those packets are identified
+/// here and asserted to be exactly the ones that cannot match a SILK-only range until the CELT
+/// integration lane decodes them.
+/// </remarks>
 public class SilkFinalRangeTests
 {
     private readonly ITestOutputHelper _output;
@@ -25,19 +31,21 @@ public class SilkFinalRangeTests
 
     [Theory]
     [MemberData(nameof(SilkVectors))]
-    public void Every_SILK_only_packet_ends_with_the_encoder_final_range(int vector)
+    public void Every_non_redundant_SILK_only_packet_ends_with_the_encoder_final_range(int vector)
     {
         var frames = new Range[OpusPacket.MaxFrames];
         var decoder = new SilkDecoder();
         var result = new SilkFrameResult();
-        int silkPackets = 0;
-        int matched = 0;
+        int plainPackets = 0;
+        int plainMatched = 0;
+        int plainMismatched = 0;
+        int redundantPackets = 0;
+        int redundantMatched = 0;
+        int redundantMismatched = 0;
         long packetIndex = -1;
-        long firstMismatch = -1;
-        uint firstMismatchActual = 0;
-        uint firstMismatchExpected = 0;
         bool previousPacketWasSilk = false;
-        var mismatchReports = new List<string>();
+        var redundantPacketIndices = new List<long>();
+        var plainMismatchReports = new List<string>();
 
         foreach ((byte[] packet, uint finalRange) in OpusBitFile.Read(TestVectors.BitPath(vector)))
         {
@@ -81,35 +89,55 @@ public class SilkFinalRangeTests
                 _ => throw new InvalidOperationException("A SILK-only packet has a 10, 20, 40 or 60 ms frame."),
             };
 
-            silkPackets++;
             for (int frame = 0; frame < frameCount; frame++)
             {
-                var dec = new RangeDecoder(packet.AsSpan(frames[frame]));
+                Range frameRange = frames[frame];
+                int frameBytes = frameRange.End.Value - frameRange.Start.Value;
+                var dec = new RangeDecoder(packet.AsSpan(frameRange));
                 decoder.DecodeFrame(ref dec, rate, channels, durationMs, result);
 
-                if (frame == frameCount - 1)
+                // RFC 6716 §4.5.1.1: a SILK-only frame signals redundancy implicitly, by having
+                // at least 17 bits left after the SILK layer; §4.5.1.2 then codes the position
+                // flag and §4.5.1.3 sizes the redundant CELT frame. The caller reads all three
+                // right here, keeping the SILK range for the comparison below.
+                uint silkRange = dec.Rng;
+                OpusRedundancyInfo redundancy = SilkDecoder.DecodeRedundancy(ref dec, frameBytes);
+                if (frame != frameCount - 1)
                 {
-                    if (dec.Rng == finalRange)
+                    continue;
+                }
+
+                bool matches = silkRange == finalRange;
+                if (redundancy.Present)
+                {
+                    // The reference final range is the main coder's range XOR the redundant CELT
+                    // coder's range, and that CELT frame is lane CELT-DEC-1's to decode. These
+                    // packets are recorded and asserted to be exactly the non-matching ones.
+                    redundantPackets++;
+                    redundantPacketIndices.Add(packetIndex);
+                    if (matches)
                     {
-                        matched++;
+                        redundantMatched++;
                     }
                     else
                     {
-                        if (firstMismatch < 0)
+                        redundantMismatched++;
+                    }
+                }
+                else
+                {
+                    plainPackets++;
+                    if (matches)
+                    {
+                        plainMatched++;
+                    }
+                    else
+                    {
+                        plainMismatched++;
+                        if (plainMismatchReports.Count < 20)
                         {
-                            firstMismatch = packetIndex;
-                            firstMismatchActual = dec.Rng;
-                            firstMismatchExpected = finalRange;
-                        }
-
-                        if (mismatchReports.Count < 20)
-                        {
-                            // RFC 6716 §4.5.1.1: at least 17 bits left after the SILK layer
-                            // means a byte-aligned redundant CELT frame follows, at a bandwidth
-                            // transition. Its separate range coder is folded into the encoder's
-                            // final range, so a SILK-only decoder cannot reproduce that number.
                             int bitsLeft = (dec.StorageBytes * 8) - dec.Tell();
-                            mismatchReports.Add(FormattableString.Invariant(
+                            plainMismatchReports.Add(FormattableString.Invariant(
                                 $"packet {packetIndex}, config {parsed.Config}, {parsed.Bandwidth}, {durationMs} ms, {channels} ch, {frameCount} frame(s), {dec.StorageBytes} bytes, {bitsLeft} bits left"));
                         }
                     }
@@ -117,25 +145,42 @@ public class SilkFinalRangeTests
             }
         }
 
-        _output.WriteLine(
-            "vector {0:D2}: {1}/{2} SILK-only packets final-range exact",
-            vector, matched, silkPackets);
-
-        if (firstMismatch >= 0)
+        int silkPackets = plainPackets + redundantPackets;
+        if (redundantPackets > 0)
         {
             _output.WriteLine(
-                "vector {0:D2}: first mismatch at packet {1}: got 0x{2:X8}, expected 0x{3:X8}",
-                vector, firstMismatch, firstMismatchActual, firstMismatchExpected);
-            foreach (string report in mismatchReports)
-            {
-                _output.WriteLine("vector {0:D2}: {1}", vector, report);
-            }
+                "vector {0:D2}: {1}/{2} SILK-only packets without redundancy are final-range exact; " +
+                "{3} packets carry redundancy (packets {4}) and wait for the CELT integration lane",
+                vector, plainMatched, plainPackets, redundantPackets,
+                string.Join(", ", redundantPacketIndices));
+        }
+        else
+        {
+            _output.WriteLine(
+                "vector {0:D2}: {1}/{2} SILK-only packets without redundancy are final-range exact; none carry redundancy",
+                vector, plainMatched, plainPackets);
         }
 
         silkPackets.Should().BeGreaterThan(0, "vector {0:D2} must contain SILK-only packets", vector);
-        matched.Should().Be(
-            silkPackets,
-            "vector {0:D2}: every SILK-only packet must reproduce the encoder's final range", vector);
+
+        // Every SILK-only packet without redundancy must reproduce the encoder's final range.
+        plainMatched.Should().Be(plainPackets, "vector {0:D2}: every non-redundant SILK-only packet must match", vector);
+        plainMismatched.Should().Be(
+            0,
+            "vector {0:D2}: first non-redundant mismatch: {1}",
+            vector,
+            string.Join("; ", plainMismatchReports));
+
+        // The redundancy set and the non-matching set must be exactly the same set: no
+        // non-redundant packet may mismatch (above), and no redundant packet may match.
+        redundantMatched.Should().Be(
+            0,
+            "vector {0:D2}: a frame whose final range folds in the redundant CELT coder cannot match the SILK-only range",
+            vector);
+        redundantMismatched.Should().Be(
+            redundantPackets,
+            "vector {0:D2}: every redundant packet must be one of the non-matching packets",
+            vector);
     }
 
     [Fact]

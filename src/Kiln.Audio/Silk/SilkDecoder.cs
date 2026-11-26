@@ -195,6 +195,38 @@ internal sealed class SilkDecoder
         DecodeRegularFrames(ref dec, result, silkFrames, midVadMask, sideVadMask);
     }
 
+    /// <summary>
+    /// Reads the transition redundancy that follows the SILK layer of a SILK-only Opus frame
+    /// (RFC 6716 §4.5.1.1, §4.5.1.2 and §4.5.1.3).
+    /// </summary>
+    /// <param name="dec">
+    /// The frame's range decoder, positioned immediately after <see cref="DecodeFrame"/> for the
+    /// same frame.
+    /// </param>
+    /// <param name="frameBytes">The number of bytes in the frame's range-coded payload.</param>
+    /// <returns>The redundancy, or <see cref="OpusRedundancyInfo.None"/> when there is none.</returns>
+    /// <remarks>
+    /// For SILK-only frames the presence is implicit: at least 17 bits must remain after the
+    /// SILK layer, and the check itself consumes nothing. The position flag then uses the
+    /// uniform Table 65 PDF. The redundant frame is exactly the whole bytes that remain, which
+    /// the caller hands to its own CELT range decoder (RFC 6716 §4.5.1.3).
+    /// </remarks>
+    internal static OpusRedundancyInfo DecodeRedundancy(ref RangeDecoder dec, int frameBytes)
+    {
+        // RFC 6716 §4.5.1.1: ec_tell() after the SILK layer, with at least 17 bits remaining.
+        if ((frameBytes * 8) - dec.Tell() < OpusRedundancyInfo.MinimumBits)
+        {
+            return OpusRedundancyInfo.None;
+        }
+
+        // RFC 6716 §4.5.1.2, Table 65: the redundancy position flag.
+        bool celtToSilk = dec.DecodeBitLogp(1);
+
+        // RFC 6716 §4.5.1.3: for SILK-only frames the size is every whole byte left.
+        int bytes = ((frameBytes * 8) - dec.Tell()) / 8;
+        return OpusRedundancyInfo.Create(celtToSilk, bytes);
+    }
+
     /// <summary>Dequantizes a gain index to a linear Q16 scale factor (RFC 6716 §4.2.7.4).</summary>
     /// <param name="logGain">The 6-bit logarithmic gain index, 0 to 63.</param>
     /// <returns>The Q16 scale factor.</returns>
