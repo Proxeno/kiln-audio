@@ -9,6 +9,14 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Celt/CeltDecoder.cs`
 - `src/Kiln.Audio/Celt/CeltPcm.cs`
 - `src/Kiln.Audio/Celt/CeltSynthesizer.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoder.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoderAllocation.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoderAnalysis.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoderBands.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoderEnergy.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoderKernels.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltEncoderVq.cs`
+- `src/Kiln.Audio/OpusEncoder.cs`
 - `src/Kiln.Audio/Silk/SilkDecoder.cs`
 - `src/Kiln.Audio/Silk/SilkFixedPoint.cs`
 - `src/Kiln.Audio/Silk/SilkNlsf.cs`
