@@ -6,15 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     strategy:
       fail-fast: false
       matrix:
-        # SIMD paths differ per arch: macos-latest is arm64 (NEON/AdvSimd),
-        # ubuntu/windows are x64 (AVX2/SSSE3). All three must stay green.
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        # Self-hosted Proxeno org runners (owner, 2026-11-26: the GitHub-hosted Actions budget is exhausted).
+        # SIMD paths differ per arch: macOS is arm64 (NEON/AdvSimd), Linux/Windows are x64 (AVX2/SSSE3).
+        # Linux uses the `docker` label to stay off the weft-vast-ci boxes (weft rule: not for builds).
+        include:
+          - os: linux
+            runs_on: [self-hosted, Linux, X64, docker]
+            require_oracle: '1'
+          - os: windows
+            runs_on: [self-hosted, Windows, X64]
+            require_oracle: '0'
+          - os: macos
+            runs_on: [self-hosted, macOS, ARM64]
+            require_oracle: '1'
+    name: build-test (${{ matrix.os }})
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,7 +60,7 @@ jobs:
         run: dotnet build --no-restore -c Release
       - name: Test
         env:
-          KILN_AUDIO_REQUIRE_ORACLE: ${{ (matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest') && '1' || '0' }}
+          KILN_AUDIO_REQUIRE_ORACLE: ${{ matrix.require_oracle }}
         run: dotnet test --no-build -c Release --logger "trx" --results-directory artifacts/test-results
       - name: Upload test results
         if: always()
