@@ -56,7 +56,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .oracle/bin
-          key: libopus-oracle-${{ runner.os }}-${{ hashFiles('scripts/build-libopus-oracle.sh') }}
+          # v2 adds ec_probe (range-coder differential oracle) to the cached binaries.
+          key: libopus-oracle-v2-${{ runner.os }}-${{ hashFiles('scripts/build-libopus-oracle.sh', 'tests/Kiln.Audio.Tests/Oracle/native/ec_probe.c', 'tests/Kiln.Audio.Tests/Oracle/native/CMakeLists.txt') }}
       - name: Fetch RFC 8251 test vectors
         shell: bash
         run: bash scripts/fetch-test-vectors.sh

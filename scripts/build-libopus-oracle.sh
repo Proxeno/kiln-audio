@@ -3,9 +3,11 @@
 #
 # These binaries are a TEST-ONLY oracle: opus_demo decodes the RFC 8251 test
 # vectors and opus_compare scores PCM against the reference decodes. Nothing
-# under src/ may reference them.
+# under src/ may reference them. ec_probe exposes libopus's range coder for the
+# bit-exact differential tests in tests/Kiln.Audio.Tests/Entropy.
 #
-# Output: .oracle/bin/opus_demo(.exe), .oracle/bin/opus_compare(.exe)
+# Output: .oracle/bin/opus_demo(.exe), .oracle/bin/opus_compare(.exe),
+#         .oracle/bin/ec_probe(.exe)
 set -euo pipefail
 
 VERSION="1.5.2"
@@ -42,7 +44,8 @@ if [[ -f "${stamp_file}" ]]; then
     current="$(tr -d '[:space:]' < "${stamp_file}")"
     if [[ "${current}" == "${SHA256_EXPECTED}" \
         && -f "${bin_dir}/opus_demo${exe_suffix}" \
-        && -f "${bin_dir}/opus_compare${exe_suffix}" ]]; then
+        && -f "${bin_dir}/opus_compare${exe_suffix}" \
+        && -f "${bin_dir}/ec_probe${exe_suffix}" ]]; then
         echo "libopus ${VERSION} oracle already built (sha256 ${SHA256_EXPECTED})."
         exit 0
     fi
@@ -51,6 +54,42 @@ fi
 find_tool() {
     local name="$1"
     find "${build_dir}" -type f \( -name "${name}" -o -name "${name}.exe" \) -print -quit
+}
+
+# Builds the test-only range-coder differential probe. It links only the three
+# libopus entropy sources plus our own ec_probe.c; nothing here reaches src/.
+build_probe() {
+    local source="$1"
+    local native_dir="${repo_root}/tests/Kiln.Audio.Tests/Oracle/native"
+    local probe_src="${native_dir}/ec_probe.c"
+    local probe_out="${bin_dir}/ec_probe${exe_suffix}"
+    local entry_src="${source}/celt/entenc.c"
+    local dec_src="${source}/celt/entdec.c"
+    local common_src="${source}/celt/entcode.c"
+
+    if [[ "${is_windows}" -eq 1 ]]; then
+        # No dependable cc in the Windows runner's bash; use the CMake toolchain.
+        local probe_build="${build_dir}/probe"
+        if ! cmake -S "${native_dir}" -B "${probe_build}" \
+            -DOPUS_SOURCE="${source}" -DCMAKE_BUILD_TYPE=Release; then
+            return 1
+        fi
+        if ! cmake --build "${probe_build}" --config Release; then
+            return 1
+        fi
+        local built
+        built="$(find "${probe_build}" -type f \( -name "ec_probe" -o -name "ec_probe.exe" \) -print -quit)"
+        if [[ -z "${built}" ]]; then
+            return 1
+        fi
+        cp "${built}" "${probe_out}"
+        return 0
+    fi
+
+    "${CC:-cc}" -O2 \
+        -I"${source}/celt" -I"${source}/include" \
+        -o "${probe_out}" \
+        "${probe_src}" "${entry_src}" "${dec_src}" "${common_src}"
 }
 
 build_oracle() {
@@ -120,6 +159,16 @@ build_oracle() {
     fi
 
     chmod +x "${bin_dir}/opus_demo${exe_suffix}" "${bin_dir}/opus_compare${exe_suffix}"
+
+    if build_probe "${source}"; then
+        chmod +x "${bin_dir}/ec_probe${exe_suffix}"
+    elif [[ "${is_windows}" -eq 1 ]]; then
+        echo "ec_probe unavailable on this OS (Windows); range-coder oracle tests will skip." >&2
+    else
+        echo "ec_probe (range-coder probe) failed to build." >&2
+        return 1
+    fi
+
     printf '%s\n' "${SHA256_EXPECTED}" > "${stamp_file}"
     echo "Built libopus ${VERSION} oracle into ${bin_dir}:"
     ls -l "${bin_dir}"
