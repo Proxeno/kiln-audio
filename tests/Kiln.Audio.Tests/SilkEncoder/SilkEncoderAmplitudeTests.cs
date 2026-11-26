@@ -7,24 +7,34 @@ namespace Kiln.Audio.Tests.SilkEncoder;
 /// the analysis, prefilter or quantizer chain shows up here long before it shows up in G2.
 /// </summary>
 /// <remarks>
-/// This test currently fails: the encoder produces a bitstream that libopus decodes about 2x
-/// (6 dB) louder than the input, so the G2 quality gate is not met. It is kept red on purpose
-/// so the defect cannot regress silently.
+/// Covers 20 ms and 60 ms packets (one and three SILK frames, so conditional gain coding) in
+/// each SILK bandwidth, at complexity 0 (single-state quantizer) and 5.
 /// </remarks>
 public class SilkEncoderAmplitudeTests
 {
-    public static TheoryData<OpusBandwidth, int> Bands() => new()
+    public static TheoryData<OpusBandwidth, int, OpusFrameDuration, int> Bands()
     {
-        { OpusBandwidth.Narrowband, 8000 },
-        { OpusBandwidth.Mediumband, 12000 },
-        { OpusBandwidth.Wideband, 16000 },
-    };
+        var data = new TheoryData<OpusBandwidth, int, OpusFrameDuration, int>();
+        foreach (var duration in new[] { OpusFrameDuration.Ms20, OpusFrameDuration.Ms60 })
+        {
+            foreach (int complexity in new[] { 0, 5 })
+            {
+                data.Add(OpusBandwidth.Narrowband, 8000, duration, complexity);
+                data.Add(OpusBandwidth.Mediumband, 12000, duration, complexity);
+                data.Add(OpusBandwidth.Wideband, 16000, duration, complexity);
+            }
+        }
+
+        return data;
+    }
 
     [Theory]
     [MemberData(nameof(Bands))]
-    public void Decoded_rms_is_within_1_db_of_the_input(OpusBandwidth bandwidth, int internalRate)
+    public void Decoded_rms_is_within_1_db_of_the_input(
+        OpusBandwidth bandwidth, int internalRate, OpusFrameDuration duration, int complexity)
     {
         const int sampleRate = 48000;
+        int frameSamples = duration == OpusFrameDuration.Ms20 ? 960 : 2880;
         var pcm = SpeechLike(sampleRate, seconds: 2);
 
         var options = new OpusEncoderOptions
@@ -34,8 +44,8 @@ public class SilkEncoderAmplitudeTests
             Channels = 1,
             Bandwidth = bandwidth,
             BitrateBps = 16000,
-            FrameDuration = OpusFrameDuration.Ms20,
-            Complexity = 5,
+            FrameDuration = duration,
+            Complexity = complexity,
         };
 
         using var encoder = new OpusEncoder(options);
@@ -43,10 +53,10 @@ public class SilkEncoderAmplitudeTests
         var packet = new byte[1276];
         var decoded = new short[pcm.Length];
         int offset = 0;
-        for (; offset + 960 <= pcm.Length; offset += 960)
+        for (; offset + frameSamples <= pcm.Length; offset += frameSamples)
         {
-            int written = encoder.Encode(pcm.AsSpan(offset, 960), packet);
-            decoder.Decode(packet.AsSpan(0, written), decoded.AsSpan(offset, 960));
+            int written = encoder.Encode(pcm.AsSpan(offset, frameSamples), packet);
+            decoder.Decode(packet.AsSpan(0, written), decoded.AsSpan(offset, frameSamples));
         }
 
         // Compare the steady-state part, past the codec delay and the first frames.
@@ -57,7 +67,7 @@ public class SilkEncoderAmplitudeTests
 
         deltaDb.Should().BeInRange(
             -1.0, 1.0,
-            $"{bandwidth} (internal {internalRate} Hz): input RMS {inputRms:F0}, decoded RMS {outputRms:F0}");
+            $"{bandwidth} (internal {internalRate} Hz), {duration}, complexity {complexity}: input RMS {inputRms:F0}, decoded RMS {outputRms:F0}");
     }
 
     private static short[] SpeechLike(int sampleRate, int seconds)

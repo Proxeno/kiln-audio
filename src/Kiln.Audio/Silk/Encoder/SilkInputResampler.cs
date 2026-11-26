@@ -40,7 +40,9 @@ internal sealed class SilkInputResampler
     private readonly double[] _coefficients;
     private readonly bool _bypass;
 
-    private readonly double[] _history = new double[HalfTaps];
+    // The kernel spans 2 * HalfTaps taps behind the newest sample, so that much history is kept.
+    private const int HistoryLength = 2 * HalfTaps;
+    private readonly double[] _history = new double[HistoryLength];
     private long _inputCount;
     private long _timeNumerator;
 
@@ -133,7 +135,7 @@ internal sealed class SilkInputResampler
 
         long blockStart = _inputCount;
         long blockEnd = blockStart + input.Length;
-        long historyStart = blockStart - HalfTaps;
+        long historyStart = blockStart - HistoryLength;
 
         for (int i = 0; i < outputCount; i++)
         {
@@ -174,12 +176,12 @@ internal sealed class SilkInputResampler
             _timeNumerator += _decimation;
         }
 
-        // Keep the last HalfTaps input samples for the next block.
-        int keep = Math.Min(HalfTaps, input.Length);
-        _history.AsSpan(0, HalfTaps - keep).Clear();
+        // Keep the newest input samples for the next block, sliding older history down.
+        int keep = Math.Min(HistoryLength, input.Length);
+        _history.AsSpan(keep).CopyTo(_history);
         for (int i = 0; i < keep; i++)
         {
-            _history[HalfTaps - keep + i] = input[input.Length - keep + i];
+            _history[HistoryLength - keep + i] = input[input.Length - keep + i];
         }
 
         _inputCount = blockEnd;

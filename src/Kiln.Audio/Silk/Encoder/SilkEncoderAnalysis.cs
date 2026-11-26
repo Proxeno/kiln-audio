@@ -483,7 +483,7 @@ internal static class SilkEncoderAnalysis
             encoder.Indices.QuantOffsetType = control.SparsenessQ8 > 192 ? 0 : 1;
 
             snrAdjustQ7 = SilkFixedPoint.Smlawb(
-                snrAdjustQ7, 6554, control.SparsenessQ8 - 128);
+                snrAdjustQ7, 65536, control.SparsenessQ8 - 128);
         }
 
         int strengthQ16 = SilkFixedPoint.Smulwb(control.PredGainQ16, 66);
@@ -719,7 +719,6 @@ internal static class SilkEncoderAnalysis
                 rr >>= correlationShifts[k] - rrShifts;
             }
 
-            rrEnergies[k] = rr;
             int regularization = 1;
             regularization = SilkFixedPoint.Smlawb(regularization, rr, 1092);
             regularization = SilkFixedPoint.Smlawb(
@@ -732,6 +731,7 @@ internal static class SilkEncoderAnalysis
             }
 
             rr = unchecked(rr + regularization);
+            rrEnergies[k] = rr;
             SolveLdl(correlationMatrix, order, correlationVector, coefficientsQ16);
 
             for (int i = 0; i < order; i++)
@@ -746,7 +746,7 @@ internal static class SilkEncoderAnalysis
             int extraShifts = Math.Min(correlationShifts[k], LtpCorrelationHeadRoom);
             int denominator = SilkFixedPoint.LshiftSat32(
                 SilkFixedPoint.Smulwb(residualEnergy[k], weightsQ15[k]), 1 + extraShifts)
-                + SilkFixedPoint.Smulwb(subframeLength, 655) >> (correlationShifts[k] - extraShifts);
+                + (SilkFixedPoint.Smulwb(subframeLength, 655) >> (correlationShifts[k] - extraShifts));
             denominator = Math.Max(denominator, 1);
             int temp = (weightsQ15[k] << 16) / denominator;
             temp >>= 31 + correlationShifts[k] - extraShifts - 26;
@@ -791,8 +791,8 @@ internal static class SilkEncoderAnalysis
         int divisionQ16 = SilkFixedPoint.Div32VarQ(lpcResidualEnergy, lpcLtpResidualEnergy, 16);
         ltPredCodGainQ7 = SilkEncoderMath.Smulbb(3, SilkEncoderMath.Lin2Log(divisionQ16) - (16 << 7));
 
-        QuantizeLtpGains(encoder, control, wltp);
-
+        // The smoothing below runs on the unquantized coefficients (find_LTP_FIX.c); the
+        // codebook quantization (silk_quant_LTP_gains) follows it.
         for (int k = 0; k < subframeCount; k++)
         {
             sums[k] = 0;
@@ -853,6 +853,8 @@ internal static class SilkEncoderAnalysis
                 control.LtpCoefQ14[(k * order) + i] = (short)SilkEncoderMath.Limit(value, -16000, 28000);
             }
         }
+
+        QuantizeLtpGains(encoder, control, wltp);
     }
 
     private static void QuantizeLtpGains(SilkEncoderState encoder, SilkEncoderControl control, ReadOnlySpan<int> weightsQ18)
@@ -991,9 +993,9 @@ internal static class SilkEncoderAnalysis
         }
 
         // InvMaxSqrVal = pow(2, 0.33 * (21 - SNR_dB)) / subfr_length; the Q7 constant is
-        // round((21 + 16/0.33) * 128) = 8886.
+        // round((21 + 16/0.33) * 128) = 8894.
         int invMaxQ16 = SilkEncoderMath.Div32_16(
-            SilkEncoderMath.Log2Lin(SilkFixedPoint.Smulwb(8886 - encoder.SnrDbQ7, 21627)),
+            SilkEncoderMath.Log2Lin(SilkFixedPoint.Smulwb(8894 - encoder.SnrDbQ7, 21627)),
             encoder.SubframeLength);
 
         for (int k = 0; k < subframeCount; k++)
@@ -1610,10 +1612,10 @@ internal static class SilkEncoderAnalysis
             int inner = 0;
             for (int j = size - 1; j > i; j--)
             {
-                inner = SilkFixedPoint.Smlaww(inner, lQ16[(i * size) + j], xQ16[j]);
+                inner = SilkFixedPoint.Smlaww(inner, lQ16[(j * size) + i], xQ16[j]);
             }
 
-            xQ16[i] = unchecked(b[i] - inner);
+            xQ16[i] = unchecked(y[i] - inner);
         }
     }
 
