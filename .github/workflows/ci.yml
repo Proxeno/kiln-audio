@@ -41,6 +41,12 @@ jobs:
         env:
           # Self-hosted fleet: the default global install prefix is not writable ("mkdir: Permission denied").
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+      - name: Prefer Git for Windows bash
+        # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.
+        # GITHUB_PATH prepends, so later `shell: bash` steps resolve to Git's bash.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\bin'
       - name: Cache RFC 8251 test vectors
         uses: actions/cache@v4
         with:
@@ -52,22 +58,10 @@ jobs:
           path: .oracle/bin
           key: libopus-oracle-${{ runner.os }}-${{ hashFiles('scripts/build-libopus-oracle.sh') }}
       - name: Fetch RFC 8251 test vectors
-        if: runner.os != 'Windows'
         shell: bash
-        run: bash scripts/fetch-test-vectors.sh
-      - name: Fetch RFC 8251 test vectors (Windows, Git bash)
-        # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.
-        if: runner.os == 'Windows'
-        shell: '"C:\Program Files\Git\bin\bash.exe" --noprofile --norc -eo pipefail {0}'
         run: bash scripts/fetch-test-vectors.sh
       - name: Build libopus oracle
-        if: runner.os != 'Windows'
         shell: bash
-        run: bash scripts/build-libopus-oracle.sh
-      - name: Build libopus oracle (Windows, Git bash)
-        # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.
-        if: runner.os == 'Windows'
-        shell: '"C:\Program Files\Git\bin\bash.exe" --noprofile --norc -eo pipefail {0}'
         run: bash scripts/build-libopus-oracle.sh
       - name: Restore
         run: dotnet restore
