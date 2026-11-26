@@ -182,8 +182,44 @@ public class SilkEncoderQualityTests
             count++;
         }
 
-        quality = 0;
+        quality = CompareQuality(reference, decoded, delay, internalRate);
         return count == 0 ? -10 : total / count;
+    }
+
+    /// <summary>
+    /// Runs <c>opus_compare</c> on the aligned signals, capped at ten seconds for runtime. The
+    /// result is reported, not gated; if the tool cannot score the internal rate the value stays
+    /// zero and the segSNR gate still applies.
+    /// </summary>
+    private static double CompareQuality(short[] reference, short[] decoded, int delay, int internalRate)
+    {
+        try
+        {
+            int start = Math.Max(0, -delay);
+            int available = Math.Min(reference.Length - start, decoded.Length - start - delay);
+            int length = Math.Min(available, 10 * internalRate);
+            if (length <= internalRate / 5)
+            {
+                return 0;
+            }
+
+            // opus_compare always reads its reference file as stereo, so the mono reference is
+            // duplicated to two identical channels.
+            var referenceStereo = new short[length * 2];
+            for (int i = 0; i < length; i++)
+            {
+                short value = reference[start + i];
+                referenceStereo[2 * i] = value;
+                referenceStereo[(2 * i) + 1] = value;
+            }
+
+            short[] test = decoded.AsSpan(start + delay, length).ToArray();
+            return LibOpusOracle.Compare(referenceStereo, test, internalRate, stereo: false).Quality;
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
     }
 
     private static int FindDelay(short[] reference, short[] decoded, int internalRate)
