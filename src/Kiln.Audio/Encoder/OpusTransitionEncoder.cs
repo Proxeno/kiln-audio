@@ -57,7 +57,14 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
     /// <param name="complexity">The encoder complexity, 0 to 10.</param>
     internal CeltRedundantEncoder(int bitrateBps, int complexity)
     {
-        _encoder = new CeltEncoder(OpusFrameDuration.Ms5, bitrateBps, complexity);
+        _encoder = new CeltEncoder(
+            OpusFrameDuration.Ms5,
+            bitrateBps,
+            complexity,
+            channels: 1,
+            InputResampler.InternalSampleRate,
+            useVbr: false,
+            constrainedVbr: true);
     }
 
     /// <summary>Gets the number of bytes the encoder emits for one 5 ms frame.</summary>
