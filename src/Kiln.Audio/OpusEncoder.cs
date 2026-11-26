@@ -6,15 +6,15 @@ using Kiln.Audio.Encoder;
 
 namespace Kiln.Audio;
 
-/// <summary>Opus (RFC 6716) encoder for the CELT-only restricted-low-delay case.</summary>
+/// <summary>Opus (RFC 6716) encoder for the CELT-only case.</summary>
 /// <remarks>
 /// <para>
-/// This version supports the configuration HaIyu's outbound voice path needs: application
-/// <see cref="OpusApplication.RestrictedLowDelay"/>, 48 kHz, mono, CELT-only, CBR, and 2.5, 5, 10,
-/// 20, 40 or 60 ms frames. A 40 or 60 ms frame is encoded as two or three 20 ms frames in one
-/// code 1 or code 3 packet, exactly as the reference handles CELT durations above 20 ms. Every
-/// other valid option combination is rejected with <see cref="NotSupportedException"/> and a
-/// message naming the unsupported feature.
+/// This version supports the CELT family: mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5,
+/// 10, 20, 40 or 60 ms frames, constant or variable bitrate, and the pitch pre-filter. A 40 or
+/// 60 ms frame is encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as
+/// the reference handles CELT durations above 20 ms. All three <see cref="OpusApplication"/> values
+/// currently map onto the same CELT settings. SILK, hybrid, in-band FEC and DTX are not
+/// implemented and are rejected with <see cref="NotSupportedException"/>.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
@@ -43,25 +43,6 @@ public sealed class OpusEncoder : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
 
-        if (options.Application != OpusApplication.RestrictedLowDelay)
-        {
-            throw new NotSupportedException(
-                "Only OpusApplication.RestrictedLowDelay (CELT-only) is supported; SILK and hybrid are not implemented.");
-        }
-
-        if (options.SampleRate != 48000)
-        {
-            throw new NotSupportedException(
-                FormattableString.Invariant(
-                    $"Only 48 kHz input is supported by this CELT encoder; got {options.SampleRate} Hz."));
-        }
-
-        if (options.Channels != 1)
-        {
-            throw new NotSupportedException(
-                FormattableString.Invariant($"Only mono input is supported; got {options.Channels} channels."));
-        }
-
         if (options.UseInbandFec)
         {
             throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
@@ -86,11 +67,20 @@ public sealed class OpusEncoder : IDisposable
             _ => 1,
         };
 
-        _encoder = new CeltEncoder(_tocDuration, options.BitrateBps, options.Complexity);
+        _encoder = new CeltEncoder(
+            _tocDuration,
+            options.BitrateBps,
+            options.Complexity,
+            options.Channels,
+            options.SampleRate,
+            options.UseVbr,
+            options.ConstrainedVbr);
         _subFrameSamples = _encoder.FrameSamples;
-        _inputFrameSamples = _subFrameSamples * _subFrameCount;
+        _inputFrameSamples = _subFrameSamples * _subFrameCount * options.Channels;
         _conversionBuffer = new short[_inputFrameSamples];
-        _subFrameData = new byte[_subFrameCount * _encoder.FrameBytes];
+
+        // VBR may use the whole maximum frame; CBR uses only the configured size.
+        _subFrameData = new byte[_subFrameCount * _encoder.MaxFrameBytes];
     }
 
     /// <summary>The validated options this encoder was created with.</summary>
@@ -103,8 +93,14 @@ public sealed class OpusEncoder : IDisposable
     public uint FinalRange => _encoder.FinalRange;
 
     /// <summary>Encodes one frame of interleaved 16-bit PCM into an Opus packet.</summary>
-    /// <param name="pcm">Exactly one frame of mono 16-bit PCM at 48 kHz.</param>
-    /// <param name="packet">Destination for the packet; must hold the TOC byte and the frame.</param>
+    /// <param name="pcm">
+    /// Exactly one frame of interleaved 16-bit PCM at <see cref="OpusEncoderOptions.SampleRate"/>.
+    /// </param>
+    /// <param name="packet">
+    /// Destination for the packet; must hold the TOC byte and the frame. Constant bitrate needs
+    /// the configured frame size plus the framing bytes; variable bitrate may use as much of the
+    /// buffer as is available (up to 1275 bytes per 20 ms frame).
+    /// </param>
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
     /// <exception cref="ArgumentException">
     /// <paramref name="pcm"/> is not exactly one frame, or <paramref name="packet"/> is too small.
@@ -116,12 +112,14 @@ public sealed class OpusEncoder : IDisposable
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {_inputFrameSamples} samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_inputFrameSamples} interleaved samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
         int frameBytes = _encoder.FrameBytes;
-        int minimumPacket = (frameBytes * _subFrameCount) + (_subFrameCount == 1 ? 1 : 2);
+        int minimumPacket = Options.UseVbr
+            ? 2 + (_subFrameCount * 2)
+            : (_subFrameCount == 1 ? frameBytes + 1 : (frameBytes * _subFrameCount) + 1 + _subFrameCount);
         if (packet.Length < minimumPacket)
         {
             throw new ArgumentException(
@@ -139,12 +137,13 @@ public sealed class OpusEncoder : IDisposable
 
         // 40 and 60 ms CELT are code 1/code 3 packets of 20 ms frames (RFC 6716 Appendix A,
         // opus_encoder.c: the "can't support higher than wideband for > 20 ms frames" block).
+        int subFrameInterleaved = _subFrameSamples * Options.Channels;
         Span<int> sizes = stackalloc int[_subFrameCount];
         int dataBytes = 0;
         for (int i = 0; i < _subFrameCount; i++)
         {
             int size = _encoder.EncodeFrame(
-                pcm.Slice(i * _subFrameSamples, _subFrameSamples), _subFrameData.AsSpan(dataBytes));
+                pcm.Slice(i * subFrameInterleaved, subFrameInterleaved), _subFrameData.AsSpan(dataBytes));
             sizes[i] = size;
             dataBytes += size;
         }
@@ -152,8 +151,10 @@ public sealed class OpusEncoder : IDisposable
         return OpusPacketWriter.Write(packet, BuildToc(), sizes, _subFrameData.AsSpan(0, dataBytes));
     }
 
-    /// <summary>Encodes one frame of mono floating-point PCM in [-1, 1] into an Opus packet.</summary>
-    /// <param name="pcm">Exactly one frame of normalized samples at 48 kHz.</param>
+    /// <summary>Encodes one frame of interleaved floating-point PCM in [-1, 1] into an Opus packet.</summary>
+    /// <param name="pcm">
+    /// Exactly one frame of interleaved normalized samples at <see cref="OpusEncoderOptions.SampleRate"/>.
+    /// </param>
     /// <param name="packet">Destination for the packet.</param>
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
     public int Encode(ReadOnlySpan<float> pcm, Span<byte> packet)
@@ -162,7 +163,7 @@ public sealed class OpusEncoder : IDisposable
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {_inputFrameSamples} samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_inputFrameSamples} interleaved samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
@@ -183,9 +184,16 @@ public sealed class OpusEncoder : IDisposable
 
     private byte BuildToc()
     {
-        // CELT-only fullband configs are 28..31 (RFC 6716 §3.1, Table 2), one per frame duration.
+        // CELT-only configurations 16..31 (RFC 6716 §3.1, Table 2): the bandwidth group depends on
+        // the API rate and the low two bits select the frame duration. Bit 2 is the stereo flag.
         // A 40 or 60 ms input frame is signalled as 20 ms and split into several frames.
-        int config = 28 + (int)_tocDuration;
-        return (byte)(config << 3);
+        int config = InputResampler.TocConfigBase(Options.SampleRate) + (int)_tocDuration;
+        int toc = config << 3;
+        if (Options.Channels == 2)
+        {
+            toc |= 0x04;
+        }
+
+        return (byte)toc;
     }
 }

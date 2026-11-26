@@ -1,1 +1,5 @@
 #nullable enable
+Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.get -> bool
+Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.init -> void
+Kiln.Audio.OpusEncoderOptions.UseVbr.get -> bool
+Kiln.Audio.OpusEncoderOptions.UseVbr.init -> void
