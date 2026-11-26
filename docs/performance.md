@@ -99,20 +99,26 @@ after.
 the DEC-INT-1 decoder integration plus the PERF-1 kernels. Both columns compare against the same
 in-process libopus harness on this machine.
 
-| Vector | Mode | libopus in-process | Kiln before | Ratio before | Kiln after | Ratio after |
-| ------ | ---- | ------------------ | ----------- | ------------ | ---------- | ----------- |
-| 01 | CELT, 48 kHz stereo | 38.61 ms | 154.8 ms | 4.01 | 76.9 ms | 1.99 |
-| 07 | CELT, 48 kHz, mixed frames | 20.05 ms | 107.5 ms | 5.36 | 41.1 ms | 2.05 |
-| 11 | CELT, 48 kHz stereo | 31.53 ms | 171.6 ms | 5.44 | 66.6 ms | 2.11 |
-| 02 | SILK NB, 8 kHz | 6.02 ms | 8.70 ms | 1.45 | 8.25 ms | 1.37 |
-| 03 | SILK MB, 12 kHz | 5.81 ms | 9.56 ms | 1.65 | 8.87 ms | 1.53 |
-| 04 | SILK WB, 16 kHz | 8.11 ms | 13.88 ms | 1.71 | 13.59 ms | 1.68 |
+| Vector | Mode | libopus in-process | Kiln before | Ratio before | Kiln after (median) | Ratio after |
+| ------ | ---- | ------------------ | ----------- | ------------ | ------------------- | ----------- |
+| 01 | CELT, 48 kHz stereo | 38.61 ms | 154.8 ms | 4.01 | 88.7 ms | 2.30 |
+| 07 | CELT, 48 kHz, mixed frames | 20.05 ms | 107.5 ms | 5.36 | 38.7 ms | 1.93 |
+| 11 | CELT, 48 kHz stereo | 31.53 ms | 171.6 ms | 5.44 | 60.8 ms | 1.93 |
+| 02 | SILK NB, 8 kHz | 6.02 ms | 8.70 ms | 1.45 | 8.15 ms | 1.35 |
+| 03 | SILK MB, 12 kHz | 5.81 ms | 9.56 ms | 1.65 | 8.93 ms | 1.54 |
+| 04 | SILK WB, 16 kHz | 8.11 ms | 13.88 ms | 1.71 | 14.73 ms | 1.82 |
 
 The libopus column is one harness run on this machine and is used for both "before" and
-"after"; the Kiln "before" column is the PERF-0 BenchmarkDotNet run. The CELT path improved by
-2.0x to 2.6x. It is still about 2.0–2.1x slower than libopus. The inverse MDCT, the single largest
-kernel, went from 37.8 µs to 8.4 µs per 960-sample channel frame (see below); most of what remains
-is outside the kernels attacked here.
+"after"; the Kiln "before" column is the PERF-0 BenchmarkDotNet run. The "after" column is one
+clean BenchmarkDotNet run with nothing else on the machine — the median, because vector 01 and 11
+showed a long tail in this run (their means were 93.1 and 65.1 ms against medians of 88.7 and
+60.8 ms). The CELT path improved by 1.8x to 2.8x across repeated runs; it is about 1.9–2.3x
+libopus. The inverse MDCT, the single largest kernel, went from 37.8 µs to 5.4 µs per
+960-sample channel frame (see below). Vector 04 moved backwards in this particular run (14.73 ms
+against 13.59 ms in an earlier one) even though the SILK kernel it uses is faster; SILK decode is
+dominated by the bitstream and NLSF work outside the kernels this lane changed, and the whole
+vector is a two-second-scale benchmark on a machine that other lanes share, so treat the SILK
+rows as noise-limited.
 
 ## Kernel results
 
@@ -121,15 +127,19 @@ One invocation of each kernel, BenchmarkDotNet mean, 0 B allocated. `Fft480` is 
 | Kernel | Work per invocation | Before | After | Change |
 | ------ | ------------------- | ------ | ----- | ------ |
 | `Fft480` | One 480-point complex forward FFT | not measured | 1.84 µs | new benchmark |
-| `MdctInverse960` | One 960-coefficient inverse MDCT (20 ms, one channel) | 37.78 µs | 8.43 µs | 4.5x |
-| `MdctInverse8x120` | Eight interleaved 120-coefficient inverse MDCTs (20 ms, one channel) | 27.11 µs | 7.01 µs | 3.9x |
+| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 6.05 µs | 14.7x |
+| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 4.75 µs | 13.4x |
+| `MdctInverse960` | One 960-coefficient inverse MDCT (20 ms, one channel) | 37.78 µs | 5.42 µs | 7.0x |
+| `MdctInverse8x120` | Eight interleaved 120-coefficient inverse MDCTs (20 ms, one channel) | 27.11 µs | 4.53 µs | 6.0x |
 | `PvqDecodeBand` | PVQ band decode, 96 coefficients, 32 pulses | 155.8 ns | 215.5 ns | unchanged (run-to-run noise) |
 | `CeltPostFilter` | Comb post-filter over a 960-sample frame with tap-set cross-fade | 875.9 ns | 359 ns | 2.4x |
 | `SilkLpcSynthesis` | Short-term LPC synthesis, 20 ms / 16 kHz, order 16 | 4.026 µs | 3.35 µs | 1.20x |
 | `SilkLtpSynthesis` | Long-term prediction, 20 ms / 16 kHz, five taps, four subframes | 586.3 ns | 674.9 ns | unchanged (noise) |
 
-The before figures are the PERF-0 run on the same machine. PERF-0 had no standalone FFT
+The before figures are the PERF-0 run on the same machine (the forward MDCT figures are ENC-1's
+measurement of the same `Mdct.Forward` before this restructure). PERF-0 had no standalone FFT
 benchmark, so the old recursive FFT was only measured through the MDCT; `Fft480` is new in PERF-1.
+The forward and inverse MDCT now meet the PERF-1 target of 6 µs at 960 points.
 
 ## SIMD kernels
 
@@ -149,11 +159,17 @@ because it was not measured to win on this machine.
 - The FFT is now iterative and table-driven: the leaf permutation and per-level node offsets are
   precomputed, so there is no mixed-radix division or recursion in the hot path, and the generic
   `r * r` small-DFT multiply loop is replaced by fixed radix butterflies.
-- The MDCT fuses the beta pre-multiply into one pass and writes reversed copies of each DCT-IV
-  result so the window combine is a contiguous, vectorized elementwise pass. The DCT-IV pre- and
-  post-rotation loops remain scalar: their reads and writes are strided (even/odd interleave with
-  coefficient reversal), so a portable vector version would need gathers and scatters and was not
-  measured to win.
+- The forward MDCT runs two DCT-IVs, not four. The windowed input is folded around the block
+  centre into the difference and sum sequences
+  `u(n) = a(n) - a(2N-1-n)` and `v(n) = a(n) + a(2N-1-n)`, and
+  `X(k) = cos(beta_k) DCT-IV(u)(k) - sin(beta_k) DST-IV(v)(k)`, where the DST-IV comes from
+  `DCT-IV((-1)^n v)` read in reverse. The identity was verified against the naive double-precision
+  MDCT before it was ported.
+- Both MDCT directions keep the DCT-IV pack and FFT output as separate real and imaginary arrays
+  (structure of arrays), so the FFT takes the buffers directly and the `Complex32`
+  interleave/deinterleave copies are gone. The DCT-IV pre- and post-rotation loops stay scalar:
+  their reads and writes are stride two with a coefficient reversal, which a portable `Vector128`
+  path cannot express without two-source lane shuffles the runtime does not offer here.
 - The comb post-filter is recursive, but because every read is at least `period` samples back, a
   block of four consecutive samples is independent whenever `period >= 6`; the vector path uses
   that and falls back to scalar otherwise.
@@ -169,13 +185,16 @@ with the variable set exercises it end to end.
 
 ## Remaining gaps and next ideas
 
-1. **CELT decode is still ~2.0–2.1x libopus.** The inverse MDCT is 8.4 µs per 960-sample channel
-   frame, about half of it the two 480-point FFTs. The next idea is a true fast IMDCT: fold the
-   coefficients and use one size-`N/4` real FFT instead of two size-`N/2` complex FFTs, which
-   would roughly halve the transform again. After that, the CELT entropy decode and the
-   frequency-domain reconstruction (outside the PERF-1 kernel set) dominate.
+1. **CELT decode** (ratio in the decode table above). The MDCT is now ~5.4-6.0 µs per
+   960-sample channel frame, close to the 6 µs target. The inverse still runs two `N/2`-point
+   complex FFTs (one per DCT-IV); the next idea is a real FFT of size `N/2`, which is an
+   `N/4`-point complex FFT plus a split, to halve the transform again. After the transform, the
+   CELT entropy decode and the frequency-domain reconstruction (outside the PERF-1 kernel set)
+   dominate.
 2. **MDCT inverse.** Kernel-level, a split-radix radix-2/4 FFT and a fused post-rotation write
-   (avoiding the separate reversed copies) are the next step.
+   (avoiding the separate reversed copies) are the next step. The DCT-IV pre/post rotations are
+   stride-two on the input and output; a two-source lane shuffle, which this runtime's
+   `Vector128.Shuffle` lacks, would vectorize them.
 3. **CELT post-filter.** 2.4x faster; at ~0.36 µs it is no longer material.
 4. **SILK.** LPC synthesis is ~20% faster in isolation. The full SILK vectors moved only a little
    because LPC synthesis is a minority of SILK decode; the next targets are the LPC analysis
@@ -233,39 +252,39 @@ BenchmarkDotNet mean for the whole corpus in one invocation; `µs/frame` and `×
 derived from it. The allocation column is BenchmarkDotNet's `[MemoryDiagnoser]` for the whole
 invocation: zero bytes.
 
-| Complexity | Mean | µs/frame | × real time | Allocated |
-| --- | --- | --- | --- | --- |
-| 0 | 1.888 s | 117.8 | 170x | 0 B |
-| 1 | 1.971 s | 123.0 | 163x | 0 B |
-| 2 | 1.833 s | 114.3 | 175x | 0 B |
-| 3 | 1.954 s | 121.9 | 164x | 0 B |
-| 4 | 2.022 s | 126.1 | 159x | 0 B |
-| 5 | 1.940 s | 121.0 | 165x | 0 B |
-| 6 | 1.877 s | 117.1 | 171x | 0 B |
-| 7 | 1.902 s | 118.6 | 169x | 0 B |
-| 8 | 1.709 s | 106.6 | 188x | 0 B |
-| 9 | 1.804 s | 112.5 | 178x | 0 B |
-| 10 | 1.761 s | 109.9 | 182x | 0 B |
+| Complexity | Mean before | µs/frame before | Mean after | µs/frame after | × real time after |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 1.888 s | 117.8 | 0.343 s | 21.4 | 934x |
+| 1 | 1.971 s | 123.0 | 0.361 s | 22.5 | 888x |
+| 2 | 1.833 s | 114.3 | 0.449 s | 28.0 | 715x |
+| 3 | 1.954 s | 121.9 | 0.505 s | 31.5 | 635x |
+| 4 | 2.022 s | 126.1 | 0.497 s | 31.0 | 645x |
+| 5 | 1.940 s | 121.0 | 0.493 s | 30.8 | 650x |
+| 6 | 1.877 s | 117.1 | 0.648 s | 40.4 | 495x |
+| 7 | 1.902 s | 118.6 | 0.518 s | 32.3 | 619x |
+| 8 | 1.709 s | 106.6 | 0.560 s | 34.9 | 573x |
+| 9 | 1.804 s | 112.5 | 0.492 s | 30.7 | 652x |
+| 10 | 1.761 s | 109.9 | 0.484 s | 30.2 | 662x |
 
-The spread between complexities is measurement noise on this shared machine (the same run's
-per-invocation standard error reached 7%): levels 0-3 differ only in transient and spread
-analysis, and levels 5-10 do exactly the same work as 4. The encoder runs at roughly 160-190x
-real time for the whole corpus at 32 kbps.
+Before is ENC-1's measurement; after is this branch (PERF-1's MDCT restructure). Allocations stay
+0 B. The spread between complexities is measurement noise on this shared machine (this run's
+per-invocation standard error reached tens of percent): levels 0-3 differ only in transient and
+spread analysis, and levels 5-10 do the same work as 4. The MDCT restructure cut the per-frame cost
+from ~118 µs to ~21-40 µs; the forward MDCT alone went from 88.91 µs to 4.8 µs.
 
 **libopus.** `scripts/bench-libopus-encode.sh` times the same 320.62 s file five times and keeps
 the best: complexity 0 **0.206 s (1,556x real time)**, complexity 5 **0.739 s (434x)** and
 complexity 10 **0.791 s (405x)**. Those times include process start-up and reading the whole
-input file, which is generous to us.
+input file, which is generous to libopus.
 
 **Iso-quality.** Our complexity-0 aggregate SNR at 32 kbps (16.313 dB) is above libopus
 complexity 5 (15.795 dB) and below complexity 10 (16.653 dB), so the lowest measured libopus
-complexity whose quality is at least ours is 10. Ours takes 1.888 s in-process against libopus's
-0.791 s with file IO: **we are 2.4x slower at equal-or-better quality**. At the same complexity 0,
-libopus is 9.2x faster (0.206 s vs 1.888 s). The gap is the forward MDCT: 89 µs of the roughly
-118 µs per frame is the scalar `Mdct.Forward`, which lane PERF-1 owns. The encoder's own kernels
-are the transient detector (3.2 µs), the PVQ search (2.1 µs) and sub-microsecond energy and
-pre-emphasis work. When PERF-1's SIMD MDCT lands, this encoder inherits it without a change here.
-The front-end is otherwise allocation-free and its non-MDCT kernels are already vector-ready;
+complexity whose quality is at least ours is 10. Before this branch we took 1.888 s in-process
+against libopus's 0.791 s with file IO (2.4x slower). **After the MDCT restructure we take 0.343 s
+in-process against libopus's 0.791 s: about 2.3x faster at equal-or-better quality.** At the same
+complexity 0, libopus is now 1.67x faster (0.206 s vs 0.343 s), down from 9.2x. The remaining
+encode cost is the transient detector, the PVQ search, and the band energy and pre-emphasis passes.
+The front-end is allocation-free and its non-MDCT kernels are already vector-ready;
 `NormaliseBand` uses `Vector128` and is bit-identical to its scalar reference.
 
 ### Quality (G2)
@@ -296,20 +315,20 @@ in a way that segmental SNR does not capture.
 One invocation of each kernel, steady state, from `EncodeKernelBenchmarks`. The five largest are
 listed first by time. Allocations are 0 B for every kernel.
 
-| Kernel | Work per invocation | Mean | Allocated |
-| --- | --- | --- | --- |
-| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 0 B |
-| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 0 B |
-| `TransientAnalysis` | Transient detector over 1080 pre-emphasized samples | 3.20 µs | 0 B |
-| `PvqSearch` | PVQ search, N = 96, K = 32 | 2.10 µs | 0 B |
-| `BandEnergy` | Sum of squares over 960 samples | 577 ns | 0 B |
-| `PreEmphasis` | 960 samples | 383 ns | 0 B |
-| `NormaliseBand` | 960 samples, `Vector128` path | 71 ns | 0 B |
+| Kernel | Work per invocation | Mean before | Mean after | Allocated |
+| --- | --- | --- | --- | --- |
+| `MdctForward960` | One 960-coefficient forward MDCT (20 ms, one channel) | 88.91 µs | 4.80 µs | 0 B |
+| `MdctForward8x120` | Eight interleaved 120-coefficient forward MDCTs (20 ms, one channel) | 63.79 µs | 5.11 µs | 0 B |
+| `TransientAnalysis` | Transient detector over 1080 pre-emphasized samples | 3.20 µs | 3.23 µs | 0 B |
+| `PvqSearch` | PVQ search, N = 96, K = 32 | 2.10 µs | 1.89 µs | 0 B |
+| `BandEnergy` | Sum of squares over 960 samples | 577 ns | 540 ns | 0 B |
+| `PreEmphasis` | 960 samples | 383 ns | 348 ns | 0 B |
+| `NormaliseBand` | 960 samples, `Vector128` path | 71 ns | 74 ns | 0 B |
 
-The forward MDCT is 75% of the per-frame cost; the transient detector and PVQ search are the only
-other microsecond-scale work. The PVQ search is a scalar soft-search of the reference algorithm
-(MaxIteration-wise identical to `alg_quant`); a measured faster original search is the next
-encoder-side idea, but the MDCT is where the missing 9x at complexity 0 lives.
+Before the MDCT restructure the forward transform was 75% of the per-frame cost. It is now a
+minority of it; the transient detector, the PVQ search and the band energy and pre-emphasis passes
+dominate. The PVQ search is a scalar soft-search of the reference algorithm (MaxIteration-wise
+identical to `alg_quant`); a measured faster original search is the next encoder-side idea.
 
 Note: the machine is shared, and repeated kernel runs varied by up to ~30% on the two MDCT rows;
 the sub-microsecond rows were stable to a few percent.

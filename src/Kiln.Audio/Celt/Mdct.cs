@@ -48,15 +48,15 @@ namespace Kiln.Audio.Celt;
 /// same layout with the same stride.
 /// </para>
 /// <para>
-/// <b>PERF-1 structure.</b> Each DCT-IV runs one size-<c>N/2</c> complex FFT; the forward
-/// direction needs four (the windowed low and high halves plus their odd-sample sign flips) and
-/// the inverse needs two (the cosine and sine coefficient sequences). The gain over PERF-0 comes
-/// from the FFT itself: the generic <c>r * r</c> small-DFT loop is replaced by specialised
-/// radix-2/3/4/5 butterflies over separate real and imaginary arrays (see
-/// <see cref="FftKernels"/>), so the combine stage vectorises with <c>Vector128</c>. The inverse
-/// also fuses the beta pre-multiply into one pass and writes reversed copies of the DCT-IV results
-/// so the final window multiply is a contiguous elementwise pass vectorised in
-/// <see cref="MdctKernels"/>.
+/// <b>PERF-1 structure.</b> Each DCT-IV runs one size-<c>N/2</c> complex FFT, and both directions
+/// need two of them. The forward folds the windowed input around the block centre into the
+/// difference and sum sequences and combines <c>DCT-IV(u)</c> with the reversed
+/// <c>DST-IV(v) = DCT-IV((-1)^n v)</c>; the inverse runs the cosine and sine coefficient sequences.
+/// The gain over PERF-0 comes from the FFT itself: the generic <c>r * r</c> small-DFT loop is
+/// replaced by specialised radix-2/3/4/5 butterflies over separate real and imaginary arrays (see
+/// <see cref="FftKernels"/>), so the combine stage vectorises with <c>Vector128</c>. The DCT-IV
+/// pack and FFT output are structure-of-arrays in <see cref="MdctTwiddleKernel"/>, and the final
+/// window multiply is a contiguous elementwise pass vectorised in <see cref="MdctKernels"/>.
 /// </para>
 /// <para>
 /// Instances hold mutable scratch buffers and are therefore not thread-safe. Allocate one per
@@ -87,7 +87,7 @@ internal sealed class Mdct
     private readonly float[] _spectrumImaginary;
     private readonly float[] _low;
     private readonly float[] _high;
-        private readonly float[] _dct0;
+    private readonly float[] _dct0;
     private readonly float[] _dct1;
     private readonly float[] _dct0Reverse;
     private readonly float[] _dct1Reverse;
