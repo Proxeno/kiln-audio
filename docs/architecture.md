@@ -11,7 +11,7 @@ Kiln.Audio is a skeleton. Only the public API stubs and the TOC parser (RFC 6716
 | Packet framing | TOC parsing, packet splitting, length/padding validation (RFC 6716 §3.2, §3.4) | done |
 | SILK | LPC-based speech layer, NB/MB/WB (§4.2) | partial: bitstream (symbol) decode, final-range exact on SILK-only packets (§4.2.3–§4.2.7.8); synthesis not started |
 | SILK output resampler | Polyphase minimum-phase FIR, 8/12/16 kHz to 8–48 kHz, streaming and allocation-free | done |
-| CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | not started |
+| CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | partial: bitstream (symbol) decode through anti-collapse, final-range exact on CELT-only packets (§4.3.1–§4.3.5); synthesis not started |
 | CELT / MDCT kernel | Low-overlap MDCT/IMDCT and the §4.3.7 window, scalar reference | done (scalar; SIMD pending) |
 | Hybrid | SILK + CELT combined mode (§3.1, Table 2) | not started |
 | PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | not started |

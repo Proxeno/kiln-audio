@@ -79,18 +79,21 @@ The build is strict on purpose, project-wide (`Directory.Build.props`):
 
 ## Originality and citations
 
-Kiln.Audio is original work written against the published RFC 6716 (and RFC
-8251) specification text. Two rules keep it that way:
+Kiln.Audio is written against the published RFC 6716 (and RFC 8251)
+specification text. It may also include code translated from the RFC 6716
+reference implementation in Appendix A. Two rules keep this clear:
 
 - **Implement from the spec, and cite it.** When you implement a spec clause,
   cite it (`§3.1`, `Table 2`, etc.) in the doc comment or inline comment next
   to the code it justifies. Numeric tables that reproduce specification data
   must carry a clause/table citation.
-- **Contributions must be your own original work.** Do not copy or translate
+- **Original code, with one licensed exception.** Do not copy or translate
   libopus source (BSD-licensed or otherwise) into this repository, and do not
-  vendor it. libopus is used only as a black-box **oracle** in tests. If
-  you're unsure whether an approach is appropriate, ask in the PR description
-  before writing the code.
+  vendor it. libopus is used only as a black-box **oracle** in tests. Code
+  translated from the RFC 6716 Appendix A reference is allowed, provided the
+  Simplified BSD notice is kept in `THIRD-PARTY-NOTICES.md` and the derived
+  file carries its header comment. If you're unsure whether an approach is
+  appropriate, ask in the PR description before writing the code.
 
 ## License of contributions
 
