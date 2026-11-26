@@ -9,6 +9,10 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Celt/CeltDecoder.cs`
 - `src/Kiln.Audio/Celt/CeltSynthesizer.cs`
 - `src/Kiln.Audio/Celt/CeltPcm.cs`
+- `src/Kiln.Audio/Silk/SilkFixedPoint.cs`
+- `src/Kiln.Audio/Silk/SilkNlsf.cs`
+- `src/Kiln.Audio/Silk/SilkSynthesis.cs`
+- `src/Kiln.Audio/Silk/SilkSynthesisTables.cs`
 
 The reference implementation is distributed under the Simplified BSD license below,
 copied verbatim from the `COPYING` file included with the Appendix A source
