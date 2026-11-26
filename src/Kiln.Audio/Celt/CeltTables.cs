@@ -355,6 +355,53 @@ internal static class CeltTables
         15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5,
     ];
 
+    /// <summary>
+    /// Per-band mean log2 energy used by denormalization (RFC 6716 §4.3.6; Appendix A,
+    /// celt/quant_bands.c: eMeans[]).
+    /// </summary>
+    /// <remarks>
+    /// Section 4.3.6 defers the denormalization step to <c>denormalise_bands()</c> and
+    /// <c>log2Amp()</c>, which add this table to the decoded log energies before exponentiating.
+    /// The reference stores 25 entries; only the 21 bands of the 48 kHz mode are used.
+    /// </remarks>
+    internal static ReadOnlySpan<float> EMeans =>
+    [
+        // RFC 6716 Appendix A, celt/quant_bands.c: eMeans[] (float build).
+        6.437500f, 6.250000f, 5.750000f, 5.312500f, 5.062500f,
+        4.812500f, 4.500000f, 4.375000f, 4.875000f, 4.687500f,
+        4.562500f, 4.437500f, 4.875000f, 4.625000f, 4.312500f,
+        4.500000f, 4.375000f, 4.625000f, 4.750000f, 4.437500f,
+        3.750000f, 3.750000f, 3.750000f, 3.750000f, 3.750000f,
+    ];
+
+    /// <summary>
+    /// Post-filter tap coefficients <c>[tapset][tap]</c> (RFC 6716 §4.3.7.1).
+    /// </summary>
+    /// <remarks>
+    /// The prose of §4.3.7.1 gives the three tap sets explicitly; the float reference
+    /// (celt/celt.c: comb_filter) stores them in the same layout.
+    /// </remarks>
+    internal static ReadOnlySpan<float> PostFilterGains =>
+    [
+        // RFC 6716 §4.3.7.1 tap sets 0, 1 and 2.
+        0.3066406250f, 0.2170410156f, 0.1296386719f,
+        0.4638671875f, 0.2680664062f, 0.0f,
+        0.7998046875f, 0.1000976562f, 0.0f,
+    ];
+
+    /// <summary>Smallest post-filter pitch period (RFC 6716 §4.3.7.1; Appendix A: COMBFILTER_MINPERIOD).</summary>
+    internal const int CombFilterMinPeriod = 15;
+
+    /// <summary>Post-filter history length (RFC 6716 Appendix A, celt/celt.c: COMBFILTER_MAXPERIOD).</summary>
+    internal const int CombFilterMaxPeriod = 1024;
+
+    /// <summary>De-emphasis pole (RFC 6716 §4.3.7.2: alpha_p = 0.8500061035).</summary>
+    internal const float DeemphasisCoefficient = 0.85000610f;
+
+    /// <summary>Scale that maps the reference's internal sample domain to int16 full scale.</summary>
+    /// <remarks>RFC 6716 Appendix A, celt/arch.h: CELT_SIG_SCALE, and the SCALEOUT in celt.c.</remarks>
+    internal const float SignalScale = 32768f;
+
     /// <summary>Returns the pulse count represented by a cache index (RFC 6716 §4.3.3).</summary>
     /// <param name="i">The cache index, 0 to 40.</param>
     /// <returns>The number of pulses.</returns>

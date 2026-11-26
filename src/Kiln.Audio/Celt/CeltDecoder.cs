@@ -42,6 +42,12 @@ internal sealed class CeltFrameResult
     /// <summary>Base-2 logarithm of the number of short MDCT blocks (0 to 3).</summary>
     internal int Lm { get; set; }
 
+    /// <summary>First coded band: 0 for CELT-only, 17 for a hybrid frame.</summary>
+    internal int StartBand { get; set; }
+
+    /// <summary>One past the last coded band, from the packet bandwidth.</summary>
+    internal int EndBand { get; set; }
+
     /// <summary>Number of bands that received any allocation.</summary>
     internal int CodedBands { get; set; }
 
@@ -66,6 +72,12 @@ internal sealed class CeltFrameResult
     /// <summary>Anti-collapse flag for the frame (RFC 6716 §4.3.5).</summary>
     internal bool AntiCollapse { get; set; }
 
+    /// <summary>
+    /// True when at least one band's intensity-stereo side component was phase-inverted
+    /// (RFC 6716 §4.3.4.2; RFC 8251 §10).
+    /// </summary>
+    internal bool PhaseInversion { get; set; }
+
     /// <summary>Post-filter pitch period, 0 when disabled (RFC 6716 §4.3.7.1).</summary>
     internal int PostFilterPitch { get; set; }
 
@@ -74,6 +86,31 @@ internal sealed class CeltFrameResult
 
     /// <summary>Post-filter gain, 0 when disabled (RFC 6716 §4.3.7.1).</summary>
     internal float PostFilterGain { get; set; }
+
+    /// <summary>
+    /// Pitch period of the decoder's older post-filter history (two frames back, or the
+    /// previous frame after an <c>LM != 0</c> frame), used as the start of the §4.3.7.1
+    /// cross-fade over the frame's first overlap.
+    /// </summary>
+    internal int PostFilterPitchOld { get; set; }
+
+    /// <summary>Gain paired with <see cref="PostFilterPitchOld"/>.</summary>
+    internal float PostFilterGainOld { get; set; }
+
+    /// <summary>Tap set paired with <see cref="PostFilterPitchOld"/>.</summary>
+    internal int PostFilterTapSetOld { get; set; }
+
+    /// <summary>
+    /// Pitch period decoded for the previous frame, used as the end of the first cross-fade
+    /// and the start of the second (RFC 6716 §4.3.7.1).
+    /// </summary>
+    internal int PostFilterPitchPrevious { get; set; }
+
+    /// <summary>Gain paired with <see cref="PostFilterPitchPrevious"/>.</summary>
+    internal float PostFilterGainPrevious { get; set; }
+
+    /// <summary>Tap set paired with <see cref="PostFilterPitchPrevious"/>.</summary>
+    internal int PostFilterTapSetPrevious { get; set; }
 }
 
 /// <summary>
@@ -136,6 +173,7 @@ internal sealed class CeltDecoder
     private readonly int[] _trimOffset = new int[BandCount];
 
     private BandContext _ctx;
+    private bool _phaseInverted;
     private uint _seed;
     private int _postFilterPeriod;
     private int _postFilterPeriodOld;
@@ -166,9 +204,16 @@ internal sealed class CeltDecoder
     internal void Reset()
     {
         Array.Clear(_oldBandE);
-        Array.Clear(_oldLogE);
-        Array.Clear(_oldLogE2);
         Array.Clear(_backgroundLogE);
+
+        // RFC 6716 Appendix A, celt_decoder_ctl(OPUS_RESET_STATE): the anti-collapse
+        // energy history starts at the -28 log2 floor, not at zero.
+        for (int i = 0; i < 2 * BandCount; i++)
+        {
+            _oldLogE[i] = -28f;
+            _oldLogE2[i] = -28f;
+        }
+
         Array.Clear(_spectrum);
         Array.Clear(_norm);
         _seed = 0;
@@ -231,6 +276,9 @@ internal sealed class CeltDecoder
         result.StreamChannels = c;
         result.SampleCount = n;
         result.Lm = lm;
+        result.StartBand = startBand;
+        result.EndBand = endBand;
+        _phaseInverted = false;
 
         Array.Clear(_tfResolution);
         Array.Clear(_pulses);
@@ -416,6 +464,7 @@ internal sealed class CeltDecoder
         result.IsTransient = isTransient;
         result.ShortBlocks = shortBlocks;
         result.AntiCollapse = antiCollapse;
+        result.PhaseInversion = _phaseInverted;
         result.PostFilterPitch = postFilterPitch;
         result.PostFilterTapSet = postFilterTapSet;
         result.PostFilterGain = postFilterGain;
@@ -467,6 +516,15 @@ internal sealed class CeltDecoder
 
         // Publish the band energies after the state clamp so out-of-band entries are defined.
         Array.Copy(_oldBandE, result.BandEnergies, 2 * BandCount);
+
+        // The synthesizer cross-fades between the two older parameter sets and the one just
+        // decoded (RFC 6716 §4.3.7.1), so publish the state as it stood before this frame.
+        result.PostFilterPitchOld = _postFilterPeriodOld;
+        result.PostFilterGainOld = _postFilterGainOld;
+        result.PostFilterTapSetOld = _postFilterTapSetOld;
+        result.PostFilterPitchPrevious = _postFilterPeriod;
+        result.PostFilterGainPrevious = _postFilterGainValue;
+        result.PostFilterTapSetPrevious = _postFilterTapSet;
 
         _postFilterPeriodOld = _postFilterPeriod;
         _postFilterGainOld = _postFilterGainValue;
@@ -1133,7 +1191,9 @@ internal sealed class CeltDecoder
 
             int xMask;
             int yMask;
-            if (lowbandOffset != 0 && (spread != SpreadAggressive || blocks > 1 || _ctx.TfChange < 0))
+            bool useLowband = lowbandOffset != 0
+                && (spread != SpreadAggressive || blocks > 1 || _ctx.TfChange < 0);
+            if (useLowband)
             {
                 int effectiveLowband = Math.Max(0, (m * eBands[lowbandOffset]) - normOffset - bandSamples);
                 int foldStart = lowbandOffset;
@@ -1169,7 +1229,7 @@ internal sealed class CeltDecoder
                 }
             }
 
-            int effective = lowbandOffset != 0
+            int effective = useLowband
                 ? Math.Max(0, (m * eBands[lowbandOffset]) - normOffset - bandSamples)
                 : -1;
 
@@ -1730,6 +1790,7 @@ internal sealed class CeltDecoder
 
         if (inv != 0)
         {
+            _phaseInverted = true;
             for (int j = 0; j < n; j++)
             {
                 y[j] = -y[j];
@@ -1937,8 +1998,9 @@ internal sealed class CeltDecoder
         {
             int remaining = n - j;
 
-            // 1. p = (V(N-j-1,k) + V(N-j,k)) / 2.
-            uint p = (PvqV(remaining - 1, k) + PvqV(remaining, k)) / 2;
+            // 1. p = (V(N-j-1,k) + V(N-j,k)) / 2. The sum can exceed 32 bits even
+            // when both terms and the halved U value fit, so accumulate in 64 bits.
+            uint p = (uint)(((ulong)PvqV(remaining - 1, k) + PvqV(remaining, k)) / 2);
 
             // 2. If i < p, sgn = 1; otherwise sgn = -1 and i = i - p.
             int sgn;
@@ -2096,7 +2158,7 @@ internal sealed class CeltDecoder
         float er = (mid2 * mid2) + side + (2 * xp);
         if (er < 6e-4f || el < 6e-4f)
         {
-            y.CopyTo(x);
+            x.CopyTo(y);
             return;
         }
 
@@ -2189,6 +2251,8 @@ internal sealed class CeltDecoder
         result.StreamChannels = c;
         result.SampleCount = m * CeltTables.ShortBlockSamples;
         result.Lm = lm;
+        result.StartBand = start;
+        result.EndBand = end;
         result.CodedBands = start;
         result.Spread = SpreadNormal;
         result.Intensity = 0;
@@ -2197,6 +2261,7 @@ internal sealed class CeltDecoder
         result.IsTransient = false;
         result.ShortBlocks = 0;
         result.AntiCollapse = false;
+        result.PhaseInversion = false;
         result.PostFilterPitch = 0;
         result.PostFilterTapSet = 0;
         result.PostFilterGain = 0;
@@ -2237,6 +2302,13 @@ internal sealed class CeltDecoder
                 _oldLogE2[(ch * BandCount) + i] = -28;
             }
         }
+
+        result.PostFilterPitchOld = _postFilterPeriodOld;
+        result.PostFilterGainOld = _postFilterGainOld;
+        result.PostFilterTapSetOld = _postFilterTapSetOld;
+        result.PostFilterPitchPrevious = _postFilterPeriod;
+        result.PostFilterGainPrevious = _postFilterGainValue;
+        result.PostFilterTapSetPrevious = _postFilterTapSet;
 
         _postFilterPeriodOld = _postFilterPeriod;
         _postFilterGainOld = _postFilterGainValue;
