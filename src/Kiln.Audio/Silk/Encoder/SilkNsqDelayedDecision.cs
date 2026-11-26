@@ -119,6 +119,28 @@ internal sealed class SilkNsqDelayedDecision
         Reset();
     }
 
+    /// <summary>
+    /// Returns the number of trellis states for an encoder complexity
+    /// (Appendix A <c>silk_setup_complexity</c>).
+    /// </summary>
+    /// <param name="complexity">The encoder complexity, 0 to 10.</param>
+    /// <returns>The delayed-decision state count, 1 to 4.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="complexity"/> is outside 0 to 10.</exception>
+    /// <remarks>
+    /// Complexity 0 and 1 use the greedy quantizer, 2 and 3 still use one state, and the
+    /// trellis widens from complexity 4 on. The 2-4 state widths are what make the
+    /// rate/distortion improvement over greedy coding measurable at complexity 8 and above.
+    /// </remarks>
+    internal static int StatesForComplexity(int complexity) => complexity switch
+    {
+        < 0 or > 10 => throw new ArgumentOutOfRangeException(
+            nameof(complexity), complexity, "The encoder complexity must be 0 to 10."),
+        < 4 => 1,
+        < 6 => 2,
+        < 8 => 3,
+        _ => MaxStates,
+    };
+
     /// <summary>Gets the previous frame's pitch lag (Appendix A <c>NSQ-&gt;lagPrev</c>).</summary>
     internal int LagPrev => _lagPrev;
 

@@ -18,6 +18,32 @@ public class Enc2NsqDelayedDecisionTests
     private const int ShapingOrder = 10;
     private const int OffsetQ10 = 100; // Inactive/unvoiced, low offset (Table 53).
 
+    /// <summary>The trellis width follows the encoder complexity (Appendix A <c>silk_setup_complexity</c>).</summary>
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(1, 1)]
+    [InlineData(3, 1)]
+    [InlineData(4, 2)]
+    [InlineData(5, 2)]
+    [InlineData(6, 3)]
+    [InlineData(7, 3)]
+    [InlineData(8, 4)]
+    [InlineData(10, 4)]
+    public void States_follow_complexity(int complexity, int expectedStates)
+    {
+        SilkNsqDelayedDecision.StatesForComplexity(complexity).Should().Be(expectedStates);
+    }
+
+    /// <summary>Out-of-range complexities are rejected rather than silently clamped.</summary>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(11)]
+    public void Complexity_out_of_range_throws(int complexity)
+    {
+        Action act = () => SilkNsqDelayedDecision.StatesForComplexity(complexity);
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
     /// <summary>The vector path is bit-exact with the scalar candidate evaluation.</summary>
     [Fact]
     public void Vector_candidate_evaluation_is_bit_exact()
