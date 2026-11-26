@@ -61,6 +61,8 @@ jobs:
         shell: bash
         run: bash scripts/fetch-test-vectors.sh
       - name: Build libopus oracle
+        # The Windows runner has no C toolchain; its oracle tests are optional (require_oracle 0).
+        if: matrix.os != 'windows'
         shell: bash
         run: bash scripts/build-libopus-oracle.sh
       - name: Restore
