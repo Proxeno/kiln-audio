@@ -10,20 +10,31 @@ exist; the codec does not.
 
 ## Getting set up
 
-You need the **.NET 10 SDK** and nothing else to build and run the test
-suite. `opus_demo` (from a libopus build) on `PATH` is an **optional**
-dependency used by oracle tests once they exist; those tests detect its
-absence and pass without asserting, so a clean checkout still passes
-`dotnet test`.
+You need the **.NET 10 SDK** and nothing else to build and run the unit test
+suite. The conformance tests additionally use material that is not committed;
+two idempotent scripts fetch and build it, each verifying a pinned SHA-256:
 
 ```bash
 git clone https://github.com/Proxeno/kiln-audio.git
 cd kiln-audio
 
+# Optional, for the conformance suite:
+bash scripts/fetch-test-vectors.sh    # RFC 8251 test vectors -> tests/Kiln.Audio.Tests/Fixtures/opus_testvectors
+bash scripts/build-libopus-oracle.sh  # pinned libopus 1.5.2 -> .oracle/bin (needs CMake and a C compiler)
+
 dotnet restore
 dotnet build -c Release
 dotnet test -c Release
 ```
+
+Both scripts are safe to re-run: the vectors and the oracle build are
+git-ignored, and a matching stamp makes the script a no-op. `opus_demo` and
+`opus_compare` are a **test-only black-box oracle**; nothing under `src/` may
+reference libopus.
+
+Oracle tests skip themselves when the vectors or the oracle are missing, so a
+clean checkout still passes `dotnet test`. Set `KILN_AUDIO_REQUIRE_ORACLE=1`
+to turn absence into a test failure instead; CI sets it on Linux and macOS.
 
 `dotnet build` must report zero warnings — see [Style](#style) below.
 

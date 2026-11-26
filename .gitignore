@@ -5,3 +5,8 @@ artifacts/
 .DS_Store
 BenchmarkDotNet.Artifacts/
 .claude/worktrees/
+
+# RFC 8251 test vectors and the pinned libopus oracle are fetched/built by scripts/
+# (scripts/fetch-test-vectors.sh, scripts/build-libopus-oracle.sh); never commit them.
+/tests/Kiln.Audio.Tests/Fixtures/opus_testvectors/
+/.oracle/
