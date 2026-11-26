@@ -11,8 +11,7 @@ namespace Kiln.Audio.Simd;
 /// <para>
 /// Every kernel here is elementwise: each output element is computed from the same inputs with
 /// the same operation as the scalar code, so the vector and scalar paths produce bit-identical
-/// results and the parity tests compare with <see cref="Assert"/>-style equality rather than an
-/// RMS tolerance.
+/// results and the parity tests compare with exact array equality rather than an RMS tolerance.
 /// </para>
 /// <para>
 /// <c>useVector</c> forces a path for the parity tests; the default overloads honour
