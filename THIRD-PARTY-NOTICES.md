@@ -23,6 +23,7 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Decoder/CeltOutput.cs`
 - `src/Kiln.Audio/Decoder/OpusDecoderCore.cs`
 - `src/Kiln.Audio/Decoder/SilkOutput.cs`
+- `src/Kiln.Audio/Encoder/OpusHybridEncoder.cs`
 - `src/Kiln.Audio/Encoder/OpusModeSelector.cs`
 - `src/Kiln.Audio/Encoder/OpusPacketWriter.cs`
 - `src/Kiln.Audio/Encoder/OpusRepacketizer.cs`

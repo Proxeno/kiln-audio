@@ -17,9 +17,10 @@ internal interface ISilkLayerEncoder
 {
     /// <summary>Encodes one SILK-only frame's symbols.</summary>
     /// <param name="encoder">The frame's range encoder, positioned after no symbols.</param>
-    /// <param name="pcm">Exactly <paramref name="frameSamples"/> samples at 48 kHz.</param>
-    /// <param name="frameSamples">Samples per channel in the frame: 480, 960, 1920 or 2880.</param>
-    void Encode(ref RangeEncoder encoder, ReadOnlySpan<short> pcm, int frameSamples);
+    /// <param name="pcm">Exactly <paramref name="frameSamples"/> samples at the encoder's API rate.</param>
+    /// <param name="frameSamples">Samples per channel in the frame.</param>
+    /// <param name="maxFrameBytes">The frame's byte capacity, excluding the TOC byte.</param>
+    void Encode(ref RangeEncoder encoder, ReadOnlySpan<short> pcm, int frameSamples, int maxFrameBytes);
 }
 
 /// <summary>
@@ -38,19 +39,24 @@ internal interface IRedundantCeltEncoder
 
     /// <summary>Gets the redundant frame's final range.</summary>
     uint FinalRange { get; }
+
+    /// <summary>Gets the number of bytes one redundant frame occupies.</summary>
+    int FrameBytes { get; }
 }
 
 /// <summary>
 /// The real 5 ms redundant CELT encoder, backed by the CELT encoder of this library.
 /// </summary>
 /// <remarks>
-/// The CELT encoder currently codes fullband frames only, so only end band 21 is accepted.
-/// Transitions at narrow, medium, wide or super-wide band (end bands 13 to 19) require
-/// band-limited CELT frames from the CELT lane.
+/// The redundant frame starts at band 0 and stops at the packet's end band, so it is band-limited
+/// the same way the main CELT layer is (RFC 6716 §4.5.1.4). The encoder's state is shared with the
+/// main layer: the reference resets CELT around a transition, so the caller supplies the instance
+/// whose state matches what the decoder will do.
 /// </remarks>
 internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
 {
     private readonly CeltEncoder _encoder;
+    private readonly bool _resetEachFrame;
 
     /// <summary>Creates an encoder for the given bitrate and complexity.</summary>
     /// <param name="bitrateBps">The frame's CBR target bitrate; the 5 ms frame size is bitrate/1600 bytes.</param>
@@ -65,25 +71,27 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
             InputResampler.InternalSampleRate,
             useVbr: false,
             constrainedVbr: true);
+        _resetEachFrame = true;
+    }
+
+    /// <summary>Wraps an existing CELT encoder so the redundant frame shares the main layer's state.</summary>
+    /// <param name="encoder">A 48 kHz, mono CELT encoder.</param>
+    internal CeltRedundantEncoder(CeltEncoder encoder)
+    {
+        ArgumentNullException.ThrowIfNull(encoder);
+        _encoder = encoder;
+        _resetEachFrame = false;
     }
 
     /// <summary>Gets the number of bytes the encoder emits for one 5 ms frame.</summary>
-    internal int FrameBytes => _encoder.FrameBytes;
+    public int FrameBytes => _encoder.FrameBytes;
 
     /// <inheritdoc />
     public uint FinalRange => _encoder.FinalRange;
 
     /// <inheritdoc />
-    /// <exception cref="NotSupportedException">The requested band limit is not fullband.</exception>
     public void Encode(ReadOnlySpan<short> pcm, int endBand, Span<byte> destination)
     {
-        if (endBand != 21)
-        {
-            throw new NotSupportedException(
-                FormattableString.Invariant(
-                    $"The CELT encoder codes fullband frames only; end band {endBand} is not supported."));
-        }
-
         if (pcm.Length != _encoder.FrameSamples)
         {
             throw new ArgumentException(
@@ -100,7 +108,14 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
                 nameof(destination));
         }
 
-        int written = _encoder.EncodeFrame(pcm, destination);
+        if (_resetEachFrame)
+        {
+            // A standalone redundant encoder keeps no history: every redundant frame starts from
+            // the reset state, which is what the decoder uses before a SILK-to-CELT transition.
+            _encoder.Reset();
+        }
+
+        int written = _encoder.EncodeFrame(pcm, destination, 0, endBand);
         destination[written..].Clear();
     }
 }
@@ -154,6 +169,9 @@ internal static class OpusTransitionEncoder
     /// <param name="maxFrameBytes">The frame's capacity in bytes, excluding the TOC byte.</param>
     /// <param name="bitrateBps">The target bitrate.</param>
     /// <param name="redundancyBytes">Receives the number of redundant bytes.</param>
+    /// <param name="desiredBytes">
+    /// The redundant frame's fixed size, or 0 to derive it from <paramref name="bitrateBps"/>.
+    /// </param>
     /// <returns>True when redundancy is signalled and <paramref name="redundancyBytes"/> is valid.</returns>
     internal static bool TryEncodeSignalling(
         ref RangeEncoder encoder,
@@ -163,13 +181,20 @@ internal static class OpusTransitionEncoder
         int nbComprBytes,
         int maxFrameBytes,
         int bitrateBps,
-        out int redundancyBytes)
+        out int redundancyBytes,
+        int desiredBytes = 0)
     {
         redundancyBytes = 0;
         if (mode == OpusMode.Celt)
         {
             return false;
         }
+
+        // Target the same rate for the redundancy as for the rest of the frame.
+        int bytes = desiredBytes > 0
+            ? desiredBytes
+            : Math.Min(MaxRedundancyBytes, Math.Max(2, bitrateBps / 1600));
+        bytes = Math.Min(MaxRedundancyBytes, Math.Max(2, bytes));
 
         int tell = encoder.Tell();
         int hybridBits = mode == OpusMode.Hybrid ? 20 : 0;
@@ -180,32 +205,37 @@ internal static class OpusTransitionEncoder
 
         if (mode == OpusMode.Hybrid)
         {
+            // The presence flag is explicit, so availability must be decided before writing it.
+            if (redundancy && maxFrameBytes - nbComprBytes - 1 < bytes)
+            {
+                return false;
+            }
+
             // Hybrid frames always signal the flag when there is room for it and the frame data.
             if (redundancy || tell + 37 <= 8 * nbComprBytes)
             {
                 encoder.EncodeBitLogp(redundancy ? 1 : 0, 12);
             }
+
+            if (!redundancy)
+            {
+                return false;
+            }
+
+            encoder.EncodeBitLogp(celtToSilk ? 1 : 0, 1);
+            encoder.EncodeUInt((uint)(bytes - 2), 256);
+            redundancyBytes = bytes;
+            return true;
         }
 
-        if (!redundancy)
+        // SILK-only: presence is implicit, so check that the frame can hold the position bit and
+        // the whole redundant frame before writing anything.
+        if (!redundancy || maxFrameBytes - ((tell + 9 + 7) >> 3) < bytes)
         {
             return false;
         }
 
         encoder.EncodeBitLogp(celtToSilk ? 1 : 0, 1);
-
-        int maxRedundancy = mode == OpusMode.Hybrid
-            ? maxFrameBytes - nbComprBytes - 1
-            : maxFrameBytes - ((encoder.Tell() + 7) >> 3);
-
-        // Target the same rate for the redundancy as for the rest of the frame.
-        int bytes = Math.Min(maxRedundancy, bitrateBps / 1600);
-        bytes = Math.Min(MaxRedundancyBytes, Math.Max(2, bytes));
-        if (mode == OpusMode.Hybrid)
-        {
-            encoder.EncodeUInt((uint)(bytes - 2), 256);
-        }
-
         redundancyBytes = bytes;
         return true;
     }
@@ -276,14 +306,15 @@ internal static class OpusTransitionEncoder
         }
 
         var encoder = new RangeEncoder(frameData[..maxFrameBytes]);
-        silkEncoder.Encode(ref encoder, pcm, frameSamples);
+        silkEncoder.Encode(ref encoder, pcm, frameSamples, maxFrameBytes);
         if (encoder.Error)
         {
             throw new InvalidOperationException("The SILK layer overflowed the frame budget.");
         }
 
         bool hasRedundancy = TryEncodeSignalling(
-            ref encoder, OpusMode.Silk, redundancy, celtToSilk, 0, maxFrameBytes, bitrateBps, out int redundancyBytes);
+            ref encoder, OpusMode.Silk, redundancy, celtToSilk, 0, maxFrameBytes, bitrateBps,
+            out int redundancyBytes, redundantCelt.FrameBytes);
         if (encoder.Error)
         {
             throw new InvalidOperationException("The redundancy signalling overflowed the frame budget.");
@@ -293,19 +324,29 @@ internal static class OpusTransitionEncoder
         int mainBytes = (encoder.Tell() + 7) >> 3;
         finalRange = encoder.Rng;
         encoder.Done();
-        if (encoder.Error || mainBytes != encoder.RangeBytes)
+        if (encoder.Error)
         {
-            throw new InvalidOperationException("The SILK layer did not finalize at its expected size.");
+            throw new InvalidOperationException("The SILK layer did not finalize.");
         }
 
         if (!hasRedundancy)
         {
-            return mainBytes;
+            // A SILK-only frame may drop trailing zero bytes (RFC 6716 Appendix A, opus_encoder.c),
+            // which the reference's range decoder refills.
+            return encoder.RangeBytes;
         }
 
-        if (mainBytes + redundancyBytes > maxFrameBytes)
+        int written = encoder.RangeBytes;
+        if (written > mainBytes || mainBytes + redundancyBytes > maxFrameBytes)
         {
             throw new InvalidOperationException("The redundant frame does not fit in the frame budget.");
+        }
+
+        if (mainBytes > written)
+        {
+            // The main part is the announced ceil(tell/8) bytes; keep the range decoder's padding
+            // zeros deterministic before the redundant frame starts.
+            frameData.Slice(written, mainBytes - written).Clear();
         }
 
         ReadOnlySpan<short> fiveMilliseconds = celtToSilk
