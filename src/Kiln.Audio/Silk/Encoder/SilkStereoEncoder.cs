@@ -89,8 +89,8 @@ internal sealed class SilkStereoEncoder
     /// Converts one frame of left/right stereo into the adaptive mid/side representation and
     /// quantizes the stereo prediction weights (RFC 6716 §5.2.2).
     /// </summary>
-    /// <param name="left">The left input frame, <paramref name="frameLength"/> samples.</param>
-    /// <param name="right">The right input frame, <paramref name="frameLength"/> samples.</param>
+    /// <param name="left">The left input frame.</param>
+    /// <param name="right">The right input frame, the same length as <paramref name="left"/>.</param>
     /// <param name="fsKHz">The internal SILK sample rate in kHz (8, 12 or 16).</param>
     /// <param name="totalRateBps">The total bitrate budget in bits per second.</param>
     /// <param name="previousSpeechActivityQ8">The previous frame's speech activity, Q8.</param>

@@ -390,27 +390,15 @@ internal sealed partial class SilkSynthesis
 
                 int predictionLag = ltpBufferIndex - lag + (LtpOrder / 2);
                 int ltpCoef = k * LtpOrder;
-                for (int i = 0; i < subframeLength; i++)
-                {
-                    int ltpPredictionQ13 = 2;
-                    ltpPredictionQ13 = SilkFixedPoint.Smlawb(
-                        ltpPredictionQ13, state.SLtpQ15[predictionLag], state.LtpCoefQ14[ltpCoef]);
-                    ltpPredictionQ13 = SilkFixedPoint.Smlawb(
-                        ltpPredictionQ13, state.SLtpQ15[predictionLag - 1], state.LtpCoefQ14[ltpCoef + 1]);
-                    ltpPredictionQ13 = SilkFixedPoint.Smlawb(
-                        ltpPredictionQ13, state.SLtpQ15[predictionLag - 2], state.LtpCoefQ14[ltpCoef + 2]);
-                    ltpPredictionQ13 = SilkFixedPoint.Smlawb(
-                        ltpPredictionQ13, state.SLtpQ15[predictionLag - 3], state.LtpCoefQ14[ltpCoef + 3]);
-                    ltpPredictionQ13 = SilkFixedPoint.Smlawb(
-                        ltpPredictionQ13, state.SLtpQ15[predictionLag - 4], state.LtpCoefQ14[ltpCoef + 4]);
-                    predictionLag++;
-
-                    residualQ14[i] = SilkFixedPoint.Add(
-                        state.ExcQ14[excitationOffset + i],
-                        SilkFixedPoint.Lshift(ltpPredictionQ13, 1));
-                    state.SLtpQ15[ltpBufferIndex] = SilkFixedPoint.Lshift(residualQ14[i], 1);
-                    ltpBufferIndex++;
-                }
+                DecSilkLtp.Synthesize(
+                    state.SLtpQ15,
+                    predictionLag,
+                    ltpBufferIndex,
+                    state.LtpCoefQ14.AsSpan(ltpCoef, LtpOrder),
+                    state.ExcQ14.AsSpan(excitationOffset, subframeLength),
+                    residualQ14,
+                    subframeLength);
+                ltpBufferIndex += subframeLength;
             }
             else
             {

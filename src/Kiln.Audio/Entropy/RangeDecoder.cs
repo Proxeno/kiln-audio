@@ -1,4 +1,6 @@
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Kiln.Audio.Entropy;
 
@@ -136,6 +138,7 @@ internal ref struct RangeDecoder
     /// </remarks>
     /// <param name="ft">Total frequency, at most 65535.</param>
     /// <returns>The scaled value <c>fs</c>.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint Decode(uint ft)
     {
         if (ft == 0)
@@ -168,6 +171,7 @@ internal ref struct RangeDecoder
     /// </summary>
     /// <param name="bits">The base-2 logarithm of the total frequency.</param>
     /// <returns>The scaled value <c>fs</c>.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint DecodeBin(int bits)
     {
         _ext = _rng >> bits;
@@ -194,6 +198,7 @@ internal ref struct RangeDecoder
     /// <param name="fl">Lower cumulative frequency of the symbol.</param>
     /// <param name="fh">Upper cumulative frequency of the symbol.</param>
     /// <param name="ft">Total frequency, equal to the value passed to the preceding <see cref="Decode"/>.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Update(uint fl, uint fh, uint ft)
     {
         if (_ext == 0)
@@ -222,6 +227,7 @@ internal ref struct RangeDecoder
     /// </summary>
     /// <param name="logp">The absolute base-2 logarithm of the probability of a "1", 1 to 15.</param>
     /// <returns><see langword="true"/> if a "1" was decoded.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool DecodeBitLogp(int logp)
     {
         uint s = _rng >> logp;
@@ -341,8 +347,16 @@ internal ref struct RangeDecoder
     /// <summary>
     /// Renormalizes the range decoder (RFC 6716 §4.1.2.1).
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Normalize()
     {
+        // Renormalization is required only when the range has fallen to or below BOT. Most
+        // symbols leave it above BOT, so keep that common case branch-only.
+        if (_rng > EcCodeBot)
+        {
+            return;
+        }
+
         while (_rng <= EcCodeBot)
         {
             if (_rng == 0)
@@ -365,11 +379,16 @@ internal ref struct RangeDecoder
     }
 
     /// <summary>Reads the next range-coded byte, or zero past the end of the frame (RFC 6716 §4.1.2.1).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ReadByte()
     {
-        if (_offs < _storageBytes)
+        int index = _offs;
+        if (index < _storageBytes)
         {
-            return _frame[_offs++];
+            _offs = index + 1;
+
+            // _storageBytes never exceeds the frame's length, so this read is inside the span.
+            return Unsafe.Add(ref MemoryMarshal.GetReference(_frame), index);
         }
 
         return 0;
