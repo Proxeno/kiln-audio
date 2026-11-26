@@ -10,6 +10,7 @@ Kiln.Audio is a skeleton. Only the public API stubs and the TOC parser (RFC 6716
 | Range coder | Entropy coder shared by SILK and CELT (RFC 6716 §4.1, §5.1) | done (decoder + encoder, round-trip tested) |
 | SILK | LPC-based speech layer, NB/MB/WB (§4.2) | not started |
 | CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | not started |
+| CELT / MDCT kernel | Low-overlap MDCT/IMDCT and the §4.3.7 window, scalar reference | done (scalar; SIMD pending) |
 | Hybrid | SILK + CELT combined mode (§3.1, Table 2) | not started |
 | PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | not started |
 | Resampler-free 48 kHz path | Native 48 kHz operation without a separate resampler stage | not started |
