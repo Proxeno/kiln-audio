@@ -1,5 +1,12 @@
 #nullable enable
+Kiln.Audio.OpusDecoder.LastFecOutcome.get -> Kiln.Audio.OpusFecOutcome
 Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.get -> bool
 Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.init -> void
 Kiln.Audio.OpusEncoderOptions.UseVbr.get -> bool
 Kiln.Audio.OpusEncoderOptions.UseVbr.init -> void
+Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusFecOutcome.Concealed = 2 -> Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusFecOutcome.NotRequested = 0 -> Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusFecOutcome.Recovered = 1 -> Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusPacket
+static Kiln.Audio.OpusPacket.HasLbrr(System.ReadOnlySpan<byte> packet) -> bool

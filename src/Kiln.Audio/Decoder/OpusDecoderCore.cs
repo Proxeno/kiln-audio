@@ -77,6 +77,12 @@ internal sealed class OpusDecoderCore
     internal uint FinalRange => _finalRange;
 
     /// <summary>
+    /// Gets the outcome of the last in-band FEC decode, as exposed by
+    /// <see cref="OpusDecoder.LastFecOutcome"/>.
+    /// </summary>
+    internal OpusFecOutcome LastFecOutcome { get; private set; }
+
+    /// <summary>
     /// Returns the number of samples per channel a valid packet produces at <paramref name="apiRate"/>.
     /// </summary>
     /// <param name="packet">The packet, starting at its TOC byte.</param>
@@ -122,6 +128,15 @@ internal sealed class OpusDecoderCore
             throw new InvalidDataException("The Opus packet is malformed (RFC 6716 §3.2–§3.4).");
         }
 
+        // RFC 6716 §4.2.4–§4.2.5: an FEC decode recovers the previous interval only when the
+        // packet's first SILK frame carries LBRR data; otherwise it conceals that interval. A
+        // packet with several frames reports its first frame, matching OpusPacket.HasLbrr.
+        LastFecOutcome = !decodeFec
+            ? OpusFecOutcome.NotRequested
+            : OpusPacket.HasLbrr(packet)
+                ? OpusFecOutcome.Recovered
+                : OpusFecOutcome.Concealed;
+
         _mode = toc.Mode;
         _bandwidth = toc.Bandwidth;
         _frameDuration = toc.FrameDuration;
@@ -158,6 +173,8 @@ internal sealed class OpusDecoderCore
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short.</exception>
     internal int DecodeLoss(Span<float> pcm)
     {
+        LastFecOutcome = OpusFecOutcome.NotRequested;
+
         int samples = _frameSize;
         if (pcm.Length < samples * _channels)
         {
