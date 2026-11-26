@@ -89,7 +89,7 @@ public class EncodeKernelBenchmarks
     private readonly float[] _mdctCoefficients = new float[960];
     private readonly float[] _shortInput = new float[1080];
     private readonly float[] _shortCoefficients = new float[960];
-    private float _preEmphasisMemory;
+    private readonly float[] _preEmphasisMemory = new float[1];
 
     [GlobalSetup]
     public void Setup()
@@ -134,7 +134,9 @@ public class EncodeKernelBenchmarks
     [BenchmarkCategory("EncodeKernel")]
     public void PreEmphasis()
     {
-        CeltEncoderKernels.PreEmphasis(_pcm, _destination, ref _preEmphasisMemory, out _);
+        CeltEncoderKernels.PreEmphasis(
+            _pcm, channels: 1, upsample: 1, frameSamples: 960, stride: 960, offset: 0,
+            destination: _destination, memory: _preEmphasisMemory, silent: out _);
     }
 
     [Benchmark]
@@ -148,7 +150,9 @@ public class EncodeKernelBenchmarks
     [Benchmark]
     [BenchmarkCategory("EncodeKernel")]
     public void TransientAnalysis() =>
-        CeltEncoderKernels.AnalyzeTransient(_transientInput, _transientScratch, _transientBins, 120);
+        CeltEncoderKernels.AnalyzeTransient(
+            _transientInput, channels: 1, frameSamples: 960, overlap: 120, tmp: _transientScratch,
+            bins: _transientBins);
 
     [Benchmark]
     [BenchmarkCategory("EncodeKernel")]

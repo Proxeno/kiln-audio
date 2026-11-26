@@ -7,6 +7,7 @@ namespace Kiln.Audio.Celt.Encoder;
 /// <summary>Band energy analysis and quantization for the CELT encoder (RFC 6716 §4.3.2).</summary>
 internal static class CeltEncoderEnergy
 {
+    private const int BandCount = CeltTables.BandCount;
     private const int MinProbability = 1;
     private const int MinValues = 16;
 
@@ -14,22 +15,28 @@ internal static class CeltEncoderEnergy
     /// Computes the band log energies from the band amplitudes (RFC 6716 Appendix A,
     /// celt/quant_bands.c: <c>amp2Log2</c>).
     /// </summary>
-    internal static void Amp2Log2(ReadOnlySpan<float> bandEnergy, int effEnd, int end, Span<float> bandLogE)
+    internal static void Amp2Log2(
+        ReadOnlySpan<float> bandEnergy, int channels, int effEnd, int end, Span<float> bandLogE)
     {
         ReadOnlySpan<float> means = CeltTables.EMeans;
-        for (int i = 0; i < effEnd; i++)
+        for (int c = 0; c < channels; c++)
         {
-            bandLogE[i] = (float)(1.442695040888963387 * Math.Log(bandEnergy[i])) - means[i];
-        }
+            int offset = c * BandCount;
+            for (int i = 0; i < effEnd; i++)
+            {
+                bandLogE[offset + i] =
+                    (float)(1.442695040888963387 * Math.Log(bandEnergy[offset + i])) - means[i];
+            }
 
-        for (int i = effEnd; i < end; i++)
-        {
-            bandLogE[i] = -14f;
+            for (int i = effEnd; i < end; i++)
+            {
+                bandLogE[offset + i] = -14f;
+            }
         }
     }
 
     /// <summary>
-    /// Encodes the coarse energy of every band (RFC 6716 §4.3.2.1; RFC 6716 Appendix A,
+    /// Encodes the coarse energy of every band and channel (RFC 6716 §4.3.2.1; RFC 6716 Appendix A,
     /// celt/quant_bands.c: <c>quant_coarse_energy</c>).
     /// </summary>
     /// <remarks>
@@ -45,6 +52,7 @@ internal static class CeltEncoderEnergy
         int start,
         int end,
         int effEnd,
+        int channels,
         ReadOnlySpan<float> bandLogE,
         Span<float> oldBandE,
         Span<float> error,
@@ -59,8 +67,10 @@ internal static class CeltEncoderEnergy
     {
         ReadOnlySpan<byte> model = CeltTables.EnergyProbabilityModel.Slice(lm * 2 * 42, 2 * 42);
 
-        float newDistortion = LossDistortion(bandLogE, oldBandE, start, effEnd);
-        bool intra = !twoPass && delayedIntra > 2f * (end - start) && nbAvailableBytes > end - start;
+        float newDistortion = LossDistortion(bandLogE, oldBandE, start, effEnd, channels);
+        bool intra = !twoPass
+            && delayedIntra > 2f * channels * (end - start)
+            && nbAvailableBytes > (end - start) * channels;
 
         int tell = enc.Tell();
         if (tell + 3 > budget)
@@ -77,7 +87,7 @@ internal static class CeltEncoderEnergy
         {
             oldBandE.CopyTo(oldIntra);
             badness1 = QuantCoarseEnergyImpl(
-                ref enc, lm, start, end, bandLogE, oldIntra, errorIntra, model.Slice(42, 42),
+                ref enc, lm, start, end, channels, bandLogE, oldIntra, errorIntra, model.Slice(42, 42),
                 budget, intra: true, maxDecay);
         }
 
@@ -93,7 +103,7 @@ internal static class CeltEncoderEnergy
             enc = startState;
 
             int badness2 = QuantCoarseEnergyImpl(
-                ref enc, lm, start, end, bandLogE, oldBandE, error, model.Slice(0, 42),
+                ref enc, lm, start, end, channels, bandLogE, oldBandE, error, model.Slice(0, 42),
                 budget, intra: false, maxDecay);
 
             if (twoPass && (badness1 < badness2 || (badness1 == badness2 && (int)enc.TellFrac() > tellIntra)))
@@ -123,6 +133,7 @@ internal static class CeltEncoderEnergy
         int lm,
         int start,
         int end,
+        int channels,
         ReadOnlySpan<float> bandLogE,
         Span<float> oldBandE,
         Span<float> error,
@@ -138,68 +149,73 @@ internal static class CeltEncoderEnergy
 
         float coef = intra ? 0f : PredictionCoefficient(lm);
         float beta = intra ? CeltTables.BetaIntra / 32768f : CeltTables.BetaCoefficient[lm] / 32768f;
-        float previous = 0f;
+        Span<float> previous = stackalloc float[2];
+        previous.Clear();
         int badness = 0;
 
         for (int i = start; i < end; i++)
         {
-            float x = bandLogE[i];
-            float oldE = MathF.Max(-9f, oldBandE[i]);
-            float f = x - (coef * oldE) - previous;
-
-            // Rounding to nearest integer here is really important.
-            int qi = (int)MathF.Floor(0.5f + f);
-            float decayBound = MathF.Max(-28f, oldBandE[i]) - maxDecay;
-            if (qi < 0 && x < decayBound)
+            for (int c = 0; c < channels; c++)
             {
-                qi += (int)(decayBound - x);
-                if (qi > 0)
-                {
-                    qi = 0;
-                }
-            }
+                int index = (c * BandCount) + i;
+                float x = bandLogE[index];
+                float oldE = MathF.Max(-9f, oldBandE[index]);
+                float f = x - (coef * oldE) - previous[c];
 
-            int qi0 = qi;
-            int tell = enc.Tell();
-            int bitsLeft = budget - tell - (3 * (end - i));
-            if (i != start && bitsLeft < 30)
-            {
-                if (bitsLeft < 24)
+                // Rounding to nearest integer here is really important.
+                int qi = (int)MathF.Floor(0.5f + f);
+                float decayBound = MathF.Max(-28f, oldBandE[index]) - maxDecay;
+                if (qi < 0 && x < decayBound)
                 {
-                    qi = Math.Min(1, qi);
+                    qi += (int)(decayBound - x);
+                    if (qi > 0)
+                    {
+                        qi = 0;
+                    }
                 }
 
-                if (bitsLeft < 16)
+                int qi0 = qi;
+                int tell = enc.Tell();
+                int bitsLeft = budget - tell - (3 * channels * (end - i));
+                if (i != start && bitsLeft < 30)
                 {
-                    qi = Math.Max(-1, qi);
+                    if (bitsLeft < 24)
+                    {
+                        qi = Math.Min(1, qi);
+                    }
+
+                    if (bitsLeft < 16)
+                    {
+                        qi = Math.Max(-1, qi);
+                    }
                 }
-            }
 
-            if (budget - tell >= 15)
-            {
-                int pi = 2 * Math.Min(i, 20);
-                LaplaceEncode(ref enc, ref qi, (uint)model[pi] << 7, model[pi + 1] << 6);
-            }
-            else if (budget - tell >= 2)
-            {
-                qi = Math.Max(-1, Math.Min(qi, 1));
-                int symbol = (2 * qi) ^ (qi < 0 ? -1 : 0);
-                enc.EncodeIcdf(CeltTables.SmallEnergyIcdf, 2, symbol);
-            }
-            else if (budget - tell >= 1)
-            {
-                qi = Math.Min(0, qi);
-                enc.EncodeBitLogp(-qi, 1);
-            }
-            else
-            {
-                qi = -1;
-            }
+                if (budget - tell >= 15)
+                {
+                    int pi = 2 * Math.Min(i, 20);
+                    LaplaceEncode(ref enc, ref qi, (uint)model[pi] << 7, model[pi + 1] << 6);
+                }
+                else if (budget - tell >= 2)
+                {
+                    qi = Math.Max(-1, Math.Min(qi, 1));
+                    int symbol = (2 * qi) ^ (qi < 0 ? -1 : 0);
+                    enc.EncodeIcdf(CeltTables.SmallEnergyIcdf, 2, symbol);
+                }
+                else if (budget - tell >= 1)
+                {
+                    qi = Math.Min(0, qi);
+                    enc.EncodeBitLogp(-qi, 1);
+                }
+                else
+                {
+                    qi = -1;
+                }
 
-            error[i] = f - qi;
-            badness += Math.Abs(qi0 - qi);
-            oldBandE[i] = (coef * oldE) + previous + qi;
-            previous += qi - (beta * qi);
+                error[index] = f - qi;
+                badness += Math.Abs(qi0 - qi);
+                oldBandE[index] = (coef * oldE) + previous[c] + qi;
+                previous[c] += qi - (beta * qi);
+            }
         }
 
         return badness;
@@ -253,13 +269,18 @@ internal static class CeltEncoderEnergy
     }
 
     /// <summary>Returns the delayed-intra distortion estimate (RFC 6716 Appendix A, celt/quant_bands.c: loss_distortion).</summary>
-    private static float LossDistortion(ReadOnlySpan<float> bandLogE, ReadOnlySpan<float> oldBandE, int start, int end)
+    private static float LossDistortion(
+        ReadOnlySpan<float> bandLogE, ReadOnlySpan<float> oldBandE, int start, int end, int channels)
     {
         float dist = 0f;
-        for (int i = start; i < end; i++)
+        for (int c = 0; c < channels; c++)
         {
-            float d = bandLogE[i] - oldBandE[i];
-            dist += d * d;
+            int offset = c * BandCount;
+            for (int i = start; i < end; i++)
+            {
+                float d = bandLogE[offset + i] - oldBandE[offset + i];
+                dist += d * d;
+            }
         }
 
         return MathF.Min(200f, dist);
@@ -270,8 +291,9 @@ internal static class CeltEncoderEnergy
         ref RangeEncoder enc,
         int start,
         int end,
+        int channels,
         Span<float> oldBandE,
-        ReadOnlySpan<float> error,
+        Span<float> error,
         ReadOnlySpan<int> fineQuant)
     {
         for (int i = start; i < end; i++)
@@ -283,11 +305,16 @@ internal static class CeltEncoderEnergy
             }
 
             int frac = 1 << quant;
-            int q2 = (int)MathF.Floor((error[i] + 0.5f) * frac);
-            q2 = Math.Clamp(q2, 0, frac - 1);
-            enc.EncodeBits((uint)q2, quant);
-            float offset = (((q2 + 0.5f) * (1 << (14 - quant))) * (1f / 16384f)) - 0.5f;
-            oldBandE[i] += offset;
+            for (int c = 0; c < channels; c++)
+            {
+                int index = (c * BandCount) + i;
+                int q2 = (int)MathF.Floor((error[index] + 0.5f) * frac);
+                q2 = Math.Clamp(q2, 0, frac - 1);
+                enc.EncodeBits((uint)q2, quant);
+                float offset = (((q2 + 0.5f) * (1 << (14 - quant))) * (1f / 16384f)) - 0.5f;
+                oldBandE[index] += offset;
+                error[index] -= offset;
+            }
         }
     }
 
@@ -296,6 +323,7 @@ internal static class CeltEncoderEnergy
         ref RangeEncoder enc,
         int start,
         int end,
+        int channels,
         Span<float> oldBandE,
         ReadOnlySpan<float> error,
         ReadOnlySpan<int> fineQuant,
@@ -304,18 +332,22 @@ internal static class CeltEncoderEnergy
     {
         for (int priority = 0; priority < 2; priority++)
         {
-            for (int i = start; i < end && bitsLeft >= 1; i++)
+            for (int i = start; i < end && bitsLeft >= channels; i++)
             {
                 if (fineQuant[i] >= CeltTables.MaxFineBits || finePriority[i] != priority)
                 {
                     continue;
                 }
 
-                int q2 = error[i] < 0f ? 0 : 1;
-                enc.EncodeBits((uint)q2, 1);
-                float offset = (q2 - 0.5f) * (1 << (14 - fineQuant[i] - 1)) * (1f / 16384f);
-                oldBandE[i] += offset;
-                bitsLeft--;
+                for (int c = 0; c < channels; c++)
+                {
+                    int index = (c * BandCount) + i;
+                    int q2 = error[index] < 0f ? 0 : 1;
+                    enc.EncodeBits((uint)q2, 1);
+                    float offset = (q2 - 0.5f) * (1 << (14 - fineQuant[i] - 1)) * (1f / 16384f);
+                    oldBandE[index] += offset;
+                    bitsLeft--;
+                }
             }
         }
     }

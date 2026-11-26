@@ -1,6 +1,6 @@
 # Architecture
 
-Kiln.Audio is a pure managed C# (.NET 10) Opus decoder; the encoder is planned. The status of
+Kiln.Audio is a pure managed C# (.NET 10) Opus decoder and CELT-only encoder. The status of
 each module is below. Everything in `src/` is managed code, and the test-only conformance oracle
 is in place.
 
@@ -13,6 +13,7 @@ is in place.
 | SILK output resampler | Polyphase minimum-phase FIR, 8/12/16 kHz to 8–48 kHz, streaming and allocation-free | done |
 | CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | done: bitstream decode through synthesis, mono/stereo, every duration and bandwidth, including the band limit before API-rate decimation (§4.3.1–§4.3.7) |
 | CELT / MDCT kernel | Low-overlap MDCT/IMDCT and the §4.3.7 window, scalar reference | done (scalar; SIMD pending) |
+| CELT encoder | CELT-only encode: mono/stereo, 8–48 kHz API rates, 2.5–20 ms, CBR/VBR, TF/spreading/allocation/PVQ and the §4.3.7.1 pitch pre-filter | done: G1 interop and G3 allocation/determinism tests over every mode; quality measured against libopus |
 | Hybrid | SILK + CELT combined mode (§3.1, Table 2) | done: SILK WB at 16 kHz plus CELT from band 17, with the §4.5 transition handling |
 | Top-level decoder | Public `OpusDecoder`: packet decode, mode dispatch, transition redundancy, resets, `FinalRange` | done: all 12 RFC 8251 vectors pass `opus_compare` and the final range through the public API |
 | PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | done: SILK pitch/LPC extrapolation with CNG and re-entry glue, CELT pitch/noise concealment, mode-aware hybrid PLC, and in-band LBRR FEC decode (§4.2.4–§4.2.5, §4.4) |

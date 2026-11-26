@@ -240,10 +240,10 @@ couple of minutes.
 | 3 | Spreading decision on. |
 | 4-10 | Two-pass intra/inter coarse-energy trial. |
 
-Every level uses the same TF analysis, allocation and PVQ search. The pitch pre-filter of
-RFC 6716 §4.3.7.1 (encoder side) is not implemented; the bitstream always signals it off. libopus
-also disables it below complexity 5, so the complexity-0 comparison is unaffected. Because the
-pre-filter is absent, levels 5-10 are equivalent to 4 here.
+Every level uses the same TF analysis, allocation and PVQ search. ENC-2 adds the pitch pre-filter
+of RFC 6716 §4.3.7.1 (encoder side) at complexity 5 and above, matching libopus; it is signalled
+off below that, so the complexity-0 rows above are unaffected. The pre-filter search uses the
+reference's decimated correlation with a Vector128/Vector256 dot product and a scalar reference.
 
 ### Encode speed
 
@@ -309,6 +309,24 @@ same input, libopus scores +25% at 64 kbps and +74% at 128 kbps, so the negative
 property of the double compression, not of the comparison. Ours is better at complexity 0; at
 complexity 5 and 10 ours is lower because libopus's pitch pre-filter improves perceptual quality
 in a way that segmental SNR does not capture.
+
+### Input rates, stereo and VBR (ENC-2)
+
+CELT runs internally at 48 kHz. For API rates below 48 kHz the encoder uses the reference's
+original upsampler: one input sample is zero-stuffed every `48000/rate` internal samples, then the
+MDCT bins above the input Nyquist rate are cleared and the coded band count is reduced to the
+end band the rate allows (13 for 8 kHz, 17 for 12/16 kHz, 19 for 24 kHz, 21 for 48 kHz). Twelve
+kilohertz maps to wideband because CELT-only packets cannot signal mediumband. The end band is
+carried by the TOC configuration, so the bitstream is decodable by any conformant decoder.
+
+The zero-stuffing upsampler is non-normative and has no resampling filter. Its added delay is
+`(upsample - 1) / 48000` seconds (about 0.104 ms at 8 kHz, 0.021 ms at 16 kHz), on top of the
+unchanged 2.5 ms CELT overlap; the discarded bins are the images above the input Nyquist rate.
+
+Stereo follows §4.3.4: mid/side theta quantization in the band split, the reference's intensity
+thresholds from the effective rate, and the per-frame dual-stereo analysis. `UseVbr` (default
+false) enables the reference's target-plus-reservoir rate control; `ConstrainedVbr` (default true)
+applies the reservoir bound. Defaults keep the previous constant-bitrate behaviour.
 
 ### Kernel breakdown
 

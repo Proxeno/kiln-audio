@@ -17,6 +17,9 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Celt/Encoder/CeltEncoderEnergy.cs`
 - `src/Kiln.Audio/Celt/Encoder/CeltEncoderKernels.cs`
 - `src/Kiln.Audio/Celt/Encoder/CeltEncoderVq.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltPrefilter.cs`
+- `src/Kiln.Audio/Celt/Encoder/CeltVbr.cs`
+- `src/Kiln.Audio/Celt/Encoder/InputResampler.cs`
 - `src/Kiln.Audio/Decoder/CeltOutput.cs`
 - `src/Kiln.Audio/Decoder/OpusDecoderCore.cs`
 - `src/Kiln.Audio/Decoder/SilkOutput.cs`

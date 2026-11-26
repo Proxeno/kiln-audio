@@ -14,7 +14,8 @@ namespace Kiln.Audio.Celt.Encoder;
 /// machinery of the reference is irrelevant to the bitstream: every symbol is decided from the
 /// band's own coefficients and its bit budget. This class therefore performs the reference's
 /// pre-quantization transforms and symbol writes only, producing the same bitstream as the
-/// reference while doing less work.
+/// reference while doing less work. Stereo bands use the reference's mid/side angle split; dual
+/// stereo quantizes both channels independently.
 /// </para>
 /// <para>
 /// The instance owns its scratch buffers and allocates nothing during encoding.
@@ -25,6 +26,7 @@ internal sealed class CeltEncoderBands
     private const int BandCount = CeltTables.BandCount;
     private const int BitRes = CeltTables.BitRes;
     private const int QThetaOffset = 4;
+    private const int QThetaOffsetTwoPhase = 16;
 
     private readonly int[] _iy = new int[CeltTables.MaxFrameSamples];
     private readonly float[] _signs = new float[CeltTables.MaxFrameSamples];
@@ -36,6 +38,7 @@ internal sealed class CeltEncoderBands
     private readonly int[] _tfResolution = new int[BandCount];
     private int _band;
     private int _spread;
+    private int _intensity;
 
     /// <summary>
     /// Quantizes every coded band and writes the PVQ symbols (RFC 6716 Appendix A,
@@ -47,6 +50,8 @@ internal sealed class CeltEncoderBands
         int start,
         int end,
         Span<float> spectrum,
+        int channels,
+        int channelStride,
         int lm,
         bool shortBlocks,
         int spread,
@@ -54,11 +59,15 @@ internal sealed class CeltEncoderBands
         int totalBits,
         int balance,
         ReadOnlySpan<int> pulses,
-        ReadOnlySpan<int> tfResolution)
+        ReadOnlySpan<int> tfResolution,
+        int intensity,
+        int dualStereo,
+        ReadOnlySpan<float> bandEnergy)
     {
         int m = 1 << lm;
         int blocks = shortBlocks ? m : 1;
         _spread = spread;
+        _intensity = intensity;
         pulses.CopyTo(_pulses);
         tfResolution.CopyTo(_tfResolution);
 
@@ -80,7 +89,29 @@ internal sealed class CeltEncoderBands
             int bandSamples = m * (eBands[i + 1] - eBands[i]);
             Span<float> x = spectrum.Slice(bandStart, bandSamples);
 
-            QuantBand(ref enc, x, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0);
+            if (dualStereo != 0 && i == intensity)
+            {
+                // Switch off dual stereo for the intensity bands; the normal merge of the
+                // per-channel folding history is a decoder/resynthesis concern only.
+                dualStereo = 0;
+            }
+
+            if (dualStereo != 0)
+            {
+                Span<float> y = spectrum.Slice(channelStride + bandStart, bandSamples);
+                QuantBand(ref enc, x, default, bandSamples, b / 2, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+                QuantBand(ref enc, y, default, bandSamples, b / 2, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+            }
+            else if (channels == 2)
+            {
+                Span<float> y = spectrum.Slice(channelStride + bandStart, bandSamples);
+                QuantBand(ref enc, x, y, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+            }
+            else
+            {
+                QuantBand(ref enc, x, default, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+            }
+
             balance += pulses[i] + tell;
         }
     }
@@ -88,34 +119,40 @@ internal sealed class CeltEncoderBands
     private void QuantBand(
         ref RangeEncoder enc,
         Span<float> x,
+        Span<float> y,
         int n,
         int b,
         int blocks,
         int tfChange,
         int lm,
         ref int remainingBits,
-        int level)
+        int level,
+        ReadOnlySpan<float> bandEnergy)
     {
-        int n0 = n;
+        bool stereo = !y.IsEmpty;
+        bool longBlocks = blocks == 1;
         int nB = n / blocks;
         int b0 = blocks;
         int timeDivide = 0;
         int recombine = 0;
-        bool longBlocks = blocks == 1;
 
         if (n == 1)
         {
-            if (remainingBits >= 1 << BitRes)
+            for (int c = 0; c < (stereo ? 2 : 1); c++)
             {
-                int sign = x[0] < 0f ? 1 : 0;
-                enc.EncodeBits((uint)sign, 1);
-                remainingBits -= 1 << BitRes;
+                Span<float> channel = c == 0 ? x : y;
+                if (remainingBits >= 1 << BitRes)
+                {
+                    int sign = channel[0] < 0f ? 1 : 0;
+                    enc.EncodeBits((uint)sign, 1);
+                    remainingBits -= 1 << BitRes;
+                }
             }
 
             return;
         }
 
-        if (level == 0)
+        if (!stereo && level == 0)
         {
             if (tfChange > 0)
             {
@@ -147,144 +184,219 @@ internal sealed class CeltEncoderBands
             }
         }
 
-        int cacheRow = lm != -1 ? CeltTables.CacheIndex[((lm + 1) * BandCount) + _band] : -1;
-        bool split = false;
-        if (cacheRow >= 0 && n > 2)
+        bool split = stereo;
+        if (!stereo)
         {
-            int maxPulses = CeltTables.CacheBits[cacheRow];
-            if (b > CeltTables.CacheBits[cacheRow + maxPulses] + 12)
+            int cacheRow = lm != -1 ? CeltTables.CacheIndex[((lm + 1) * BandCount) + _band] : -1;
+            if (cacheRow >= 0 && n > 2)
             {
-                n >>= 1;
-                split = true;
-                lm--;
-                blocks = (blocks + 1) >> 1;
+                int maxPulses = CeltTables.CacheBits[cacheRow];
+                if (b > CeltTables.CacheBits[cacheRow + maxPulses] + 12)
+                {
+                    n >>= 1;
+                    split = true;
+                    lm--;
+                    blocks = (blocks + 1) >> 1;
+                }
             }
         }
 
-        if (!split)
+        if (split)
         {
-            int pulses = Bits2Pulses(lm, b);
-            int currentBits = Pulses2Bits(lm, pulses);
-            remainingBits -= currentBits;
-            while (remainingBits < 0 && pulses > 0)
+            Span<float> lower = x.Slice(0, n);
+            Span<float> upper = stereo ? y.Slice(0, n) : x.Slice(n, n);
+
+            int pulseCap = CeltTables.LogN[_band] + (lm << BitRes);
+            int offset = (pulseCap >> 1) - (stereo && n == 2 ? QThetaOffsetTwoPhase : QThetaOffset);
+            int qn = ComputeQn(n, b, offset, pulseCap, stereo);
+            if (stereo && _band >= _intensity)
             {
-                remainingBits += currentBits;
-                pulses--;
-                currentBits = Pulses2Bits(lm, pulses);
-                remainingBits -= currentBits;
+                qn = 1;
             }
 
-            if (pulses != 0)
+            int itheta = 0;
+            int inv = 0;
+            int tell = (int)enc.TellFrac();
+            if (qn != 1)
             {
-                int k = CeltTables.GetPulses(pulses);
-                CeltEncoderVq.AlgQuant(
-                    x, _iy.AsSpan(0, n), _signs.AsSpan(0, n), _y.AsSpan(0, n), _u, n, k, blocks, _spread, ref enc);
+                itheta = StereoItheta(lower, upper, stereo);
+                itheta = (itheta * qn + 8192) >> 14;
+
+                if (stereo && n > 2)
+                {
+                    const int p0 = 3;
+                    int x0 = qn / 2;
+                    int ft = (p0 * (x0 + 1)) + x0;
+                    int fl = itheta <= x0 ? p0 * itheta : (itheta - 1 - x0) + ((x0 + 1) * p0);
+                    int fh = itheta <= x0 ? p0 * (itheta + 1) : (itheta - x0) + ((x0 + 1) * p0);
+                    enc.Encode((uint)fl, (uint)fh, (uint)ft);
+                }
+                else if (b0 > 1 || stereo)
+                {
+                    enc.EncodeUInt((uint)itheta, (uint)(qn + 1));
+                }
+                else
+                {
+                    int ft = ((qn >> 1) + 1) * ((qn >> 1) + 1);
+                    int fs = itheta <= (qn >> 1) ? itheta + 1 : qn + 1 - itheta;
+                    int fl = itheta <= (qn >> 1)
+                        ? itheta * (itheta + 1) >> 1
+                        : ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1);
+                    enc.Encode((uint)fl, (uint)(fl + fs), (uint)ft);
+                }
+
+                itheta = itheta * 16384 / qn;
+                if (stereo)
+                {
+                    if (itheta == 0)
+                    {
+                        IntensityStereo(lower, upper, bandEnergy);
+                    }
+                    else
+                    {
+                        StereoSplit(lower, upper);
+                    }
+                }
+            }
+            else if (stereo)
+            {
+                // Had the angle not been zero, the side would have been phase-inverted.
+                itheta = StereoItheta(lower, upper, true);
+                inv = itheta > 8192 ? 1 : 0;
+                if (inv != 0)
+                {
+                    for (int j = 0; j < n; j++)
+                    {
+                        upper[j] = -upper[j];
+                    }
+                }
+
+                IntensityStereo(lower, upper, bandEnergy);
+                if (b > 2 << BitRes && remainingBits > 2 << BitRes)
+                {
+                    enc.EncodeBitLogp(inv, 2);
+                }
+                else
+                {
+                    inv = 0;
+                }
+
+                itheta = 0;
             }
 
+            int qalloc = (int)enc.TellFrac() - tell;
+            b -= qalloc;
+
+            int imid;
+            int iside;
+            int delta;
+            if (itheta == 0)
+            {
+                imid = 32767;
+                iside = 0;
+                delta = -16384;
+            }
+            else if (itheta == 16384)
+            {
+                imid = 0;
+                iside = 32767;
+                delta = 16384;
+            }
+            else
+            {
+                imid = BitexactCos(itheta);
+                iside = BitexactCos(16384 - itheta);
+                delta = FracMul16((n - 1) << 7, BitexactLog2Tan(iside, imid));
+            }
+
+            if (n == 2 && stereo)
+            {
+                int mbits = b;
+                int sbits = itheta != 0 && itheta != 16384 ? 1 << BitRes : 0;
+                mbits -= sbits;
+                bool useY = itheta > 8192;
+                remainingBits -= qalloc + sbits;
+
+                Span<float> x2 = useY ? upper : lower;
+                Span<float> y2 = useY ? lower : upper;
+                int sign = 0;
+                if (sbits != 0)
+                {
+                    sign = (x2[0] * y2[1]) - (x2[1] * y2[0]) < 0f ? 1 : 0;
+                    enc.EncodeBits((uint)sign, 1);
+                }
+
+                sign = 1 - (2 * sign);
+                QuantBand(ref enc, x2, default, n, mbits, blocks, tfChange, lm, ref remainingBits, level, bandEnergy);
+                y2[0] = -sign * x2[1];
+                y2[1] = sign * x2[0];
+            }
+            else
+            {
+                if (b0 > 1 && !stereo && (itheta & 0x3fff) != 0)
+                {
+                    if (itheta > 8192)
+                    {
+                        delta -= delta >> (4 - lm);
+                    }
+                    else
+                    {
+                        delta = Math.Min(0, delta + (n << BitRes >> (5 - lm)));
+                    }
+                }
+
+                int mbits = Math.Max(0, Math.Min(b, (b - delta) / 2));
+                int sbits = b - mbits;
+                remainingBits -= qalloc;
+
+                int nextLevel = stereo ? 0 : level + 1;
+                int rebalance = remainingBits;
+                if (mbits >= sbits)
+                {
+                    QuantBand(ref enc, lower, default, n, mbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                    rebalance = mbits - (rebalance - remainingBits);
+                    if (rebalance > 3 << BitRes && itheta != 0)
+                    {
+                        sbits += rebalance - (3 << BitRes);
+                    }
+
+                    QuantBand(ref enc, upper, default, n, sbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                }
+                else
+                {
+                    QuantBand(ref enc, upper, default, n, sbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                    rebalance = sbits - (rebalance - remainingBits);
+                    if (rebalance > 3 << BitRes && itheta != 16384)
+                    {
+                        mbits += rebalance - (3 << BitRes);
+                    }
+
+                    QuantBand(ref enc, lower, default, n, mbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                }
+            }
+
+            _ = inv;
             return;
         }
 
-        // Spectral split: encode the angle between the two halves.
-        int pulseCap = CeltTables.LogN[_band] + (lm << BitRes);
-        int offset = (pulseCap >> 1) - QThetaOffset;
-        int qn = ComputeQn(n, b, offset, pulseCap, stereo: false);
-
-        int itheta = 0;
-        int tell = (int)enc.TellFrac();
-        if (qn != 1)
+        int pulses = Bits2Pulses(lm, b);
+        int currentBits = Pulses2Bits(lm, pulses);
+        remainingBits -= currentBits;
+        while (remainingBits < 0 && pulses > 0)
         {
-            Span<float> lower = x.Slice(0, n);
-            Span<float> upper = x.Slice(n, n);
-            itheta = StereoItheta(lower, upper);
-            itheta = (itheta * qn + 8192) >> 14;
-            if (b0 > 1)
-            {
-                enc.EncodeUInt((uint)itheta, (uint)(qn + 1));
-            }
-            else
-            {
-                int ft = ((qn >> 1) + 1) * ((qn >> 1) + 1);
-                int fs = itheta <= (qn >> 1) ? itheta + 1 : qn + 1 - itheta;
-                int fl = itheta <= (qn >> 1)
-                    ? itheta * (itheta + 1) >> 1
-                    : ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1);
-                enc.Encode((uint)fl, (uint)(fl + fs), (uint)ft);
-            }
-
-            itheta = itheta * 16384 / qn;
+            remainingBits += currentBits;
+            pulses--;
+            currentBits = Pulses2Bits(lm, pulses);
+            remainingBits -= currentBits;
         }
 
-        int qalloc = (int)enc.TellFrac() - tell;
-        b -= qalloc;
-
-        int imid;
-        int iside;
-        int delta;
-        if (itheta == 0)
+        if (pulses != 0)
         {
-            imid = 32767;
-            iside = 0;
-            delta = -16384;
-        }
-        else if (itheta == 16384)
-        {
-            imid = 0;
-            iside = 32767;
-            delta = 16384;
-        }
-        else
-        {
-            imid = BitexactCos(itheta);
-            iside = BitexactCos(16384 - itheta);
-            delta = FracMul16((n - 1) << 7, BitexactLog2Tan(iside, imid));
+            int k = CeltTables.GetPulses(pulses);
+            CeltEncoderVq.AlgQuant(
+                x, _iy.AsSpan(0, n), _signs.AsSpan(0, n), _y.AsSpan(0, n), _u, n, k, blocks, _spread, ref enc);
         }
 
-        float mid = imid * (1f / 32768f);
-        float side = iside * (1f / 32768f);
-
-        if (b0 > 1 && (itheta & 0x3fff) != 0)
-        {
-            if (itheta > 8192)
-            {
-                delta -= delta >> (4 - lm);
-            }
-            else
-            {
-                delta = Math.Min(0, delta + (n << BitRes >> (5 - lm)));
-            }
-        }
-
-        int mbits = Math.Max(0, Math.Min(b, (b - delta) / 2));
-        int sbits = b - mbits;
-        remainingBits -= qalloc;
-
-        Span<float> midSpan = x.Slice(0, n);
-        Span<float> sideSpan = x.Slice(n, n);
-        int rebalance = remainingBits;
-        if (mbits >= sbits)
-        {
-            QuantBand(ref enc, midSpan, n, mbits, blocks, tfChange, lm, ref remainingBits, level + 1);
-            rebalance = mbits - (rebalance - remainingBits);
-            if (rebalance > 3 << BitRes && itheta != 0)
-            {
-                sbits += rebalance - (3 << BitRes);
-            }
-
-            QuantBand(ref enc, sideSpan, n, sbits, blocks, tfChange, lm, ref remainingBits, level + 1);
-        }
-        else
-        {
-            QuantBand(ref enc, sideSpan, n, sbits, blocks, tfChange, lm, ref remainingBits, level + 1);
-            rebalance = sbits - (rebalance - remainingBits);
-            if (rebalance > 3 << BitRes && itheta != 16384)
-            {
-                mbits += rebalance - (3 << BitRes);
-            }
-
-            QuantBand(ref enc, midSpan, n, mbits, blocks, tfChange, lm, ref remainingBits, level + 1);
-        }
-
-        _ = n0;
         _ = timeDivide;
     }
 
@@ -308,22 +420,68 @@ internal sealed class CeltEncoderBands
         return (qn + 1) >> 1 << 1;
     }
 
-    /// <summary>Returns the angle between two halves (RFC 6716 Appendix A, celt/vq.c: stereo_itheta, mono).</summary>
-    private static int StereoItheta(ReadOnlySpan<float> x, ReadOnlySpan<float> y)
+    /// <summary>
+    /// Returns the angle between the mid and side signals (RFC 6716 Appendix A, celt/vq.c:
+    /// <c>stereo_itheta</c>). When <paramref name="stereo"/> is false the two inputs are the
+    /// lower and upper halves of a mono band.
+    /// </summary>
+    private static int StereoItheta(ReadOnlySpan<float> x, ReadOnlySpan<float> y, bool stereo)
     {
         float emid = 1e-15f;
         float eside = 1e-15f;
-        for (int i = 0; i < x.Length; i++)
+        if (stereo)
         {
-            float m = x[i];
-            float s = y[i];
-            emid += m * m;
-            eside += s * s;
+            for (int i = 0; i < x.Length; i++)
+            {
+                float m = x[i] + y[i];
+                float s = x[i] - y[i];
+                emid += m * m;
+                eside += s * s;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < x.Length; i++)
+            {
+                float m = x[i];
+                float s = y[i];
+                emid += m * m;
+                eside += s * s;
+            }
         }
 
-        double mid = Math.Sqrt(emid);
-        double side = Math.Sqrt(eside);
-        return (int)Math.Floor((0.5 + (16384.0 * 0.63662 * Math.Atan2(side, mid))));
+        float mid = MathF.Sqrt(emid);
+        float side = MathF.Sqrt(eside);
+        return (int)Math.Floor(0.5 + (16384.0 * 0.63662 * Math.Atan2(side, mid)));
+    }
+
+    /// <summary>
+    /// Replaces the mid channel with the intensity-stereo mixture (RFC 6716 Appendix A,
+    /// celt/bands.c: <c>intensity_stereo</c>).
+    /// </summary>
+    private void IntensityStereo(Span<float> x, Span<float> y, ReadOnlySpan<float> bandEnergy)
+    {
+        float left = bandEnergy[_band];
+        float right = bandEnergy[_band + BandCount];
+        float norm = 1e-15f + MathF.Sqrt(1e-15f + (left * left) + (right * right));
+        float a1 = left / norm;
+        float a2 = right / norm;
+        for (int j = 0; j < x.Length; j++)
+        {
+            x[j] = (a1 * x[j]) + (a2 * y[j]);
+        }
+    }
+
+    /// <summary>Applies the mid/side rotation (RFC 6716 Appendix A, celt/bands.c: <c>stereo_split</c>).</summary>
+    private static void StereoSplit(Span<float> x, Span<float> y)
+    {
+        for (int j = 0; j < x.Length; j++)
+        {
+            float l = 0.70710678f * x[j];
+            float r = 0.70710678f * y[j];
+            x[j] = l + r;
+            y[j] = r - l;
+        }
     }
 
     private int Bits2Pulses(int lm, int bits)
