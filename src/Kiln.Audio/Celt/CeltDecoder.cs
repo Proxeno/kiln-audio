@@ -1,6 +1,9 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
 
@@ -1401,10 +1404,7 @@ internal sealed class CeltDecoder
         if (!lowbandOut.IsEmpty)
         {
             float scale = (float)Math.Sqrt(n0);
-            for (int j = 0; j < n0; j++)
-            {
-                lowbandOut[j] = scale * x[j];
-            }
+            DecKernels.ScaleCopy(lowbandOut, x[..n0], scale);
         }
 
         return collapseMask & ((1 << blocks) - 1);
@@ -1955,20 +1955,14 @@ internal sealed class CeltDecoder
     /// <summary>Decodes a PVQ vector and produces the normalized shape (RFC 6716 §4.3.4.2).</summary>
     private int AlgUnquant(ref RangeDecoder dec, Span<float> x, int n, int k, int blocks, float gain)
     {
-        // RFC 6716 Appendix A, celt/vq.c: decode_pulses(), then Ryy = sum(iy[i]**2).
+        // RFC 6716 Appendix A, celt/vq.c: decode_pulses(), then Ryy = sum(iy[i]**2). The energy
+        // is accumulated while the pulse vector is recovered, so the vector is walked once.
         Span<int> iy = _iy.AsSpan(0, n);
-        DecodePulses(ref dec, n, k, iy);
-        float energy = 0;
-        for (int i = 0; i < n; i++)
-        {
-            energy += iy[i] * iy[i];
-        }
+        uint index = dec.DecodeUInt(PvqV(n, k));
+        Cwrsi(n, k, index, iy, out float energy);
 
         float g = (1f / (float)Math.Sqrt(energy)) * gain;
-        for (int i = 0; i < n; i++)
-        {
-            x[i] = g * iy[i];
-        }
+        DecKernels.ScaleIntToFloat(x, iy, g);
 
         ExpRotation(x, n, -1, blocks, k, _ctx.Spread);
         return ExtractCollapseMask(iy, n, blocks);
@@ -1985,22 +1979,33 @@ internal sealed class CeltDecoder
     /// Returns the number of PVQ codewords <c>V(N,K)</c> (RFC 6716 §4.3.4.2: "V(N,K) =
     /// V(N-1,K) + V(N,K-1) + V(N-1,K-1), with V(N,0) = 1 and V(0,K) = 0, K != 0").
     /// </summary>
-    internal static uint PvqV(int n, int k) => PvqTable[n, k];
+    internal static uint PvqV(int n, int k) =>
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(PvqTable), (n * PvqMaxK) + k);
 
     /// <summary>
     /// Recovers the integer pulse vector from its codeword index using the five steps of
     /// RFC 6716 §4.3.4.2.
     /// </summary>
-    private static void Cwrsi(int n, int k, uint index, Span<int> y)
+    private static void Cwrsi(int n, int k, uint index, Span<int> y) =>
+        Cwrsi(n, k, index, y, out _);
+
+    /// <summary>
+    /// Recovers the integer pulse vector and accumulates <c>sum(y[j]^2)</c> in the same walk, so
+    /// the PVQ decoder does not make a second pass over the pulse vector.
+    /// </summary>
+    private static void Cwrsi(int n, int k, uint index, Span<int> y, out float energy)
     {
         uint i = index;
+        float sum = 0;
         for (int j = 0; j < n; j++)
         {
             int remaining = n - j;
 
             // 1. p = (V(N-j-1,k) + V(N-j,k)) / 2. The sum can exceed 32 bits even
-            // when both terms and the halved U value fit, so accumulate in 64 bits.
-            uint p = (uint)(((ulong)PvqV(remaining - 1, k) + PvqV(remaining, k)) / 2);
+            // when both terms and the halved U value fit, so accumulate in 64 bits. The
+            // V(N-j-1,k) term is reused in step 3, so read it once.
+            uint below = PvqV(remaining - 1, k);
+            uint p = (uint)(((ulong)below + PvqV(remaining, k)) / 2);
 
             // 2. If i < p, sgn = 1; otherwise sgn = -1 and i = i - p.
             int sgn;
@@ -2016,7 +2021,7 @@ internal sealed class CeltDecoder
 
             // 3. k0 = k and p = p - V(N-j-1,k).
             int k0 = k;
-            p -= PvqV(remaining - 1, k);
+            p -= below;
 
             // 4. While p > i, set k = k - 1 and p = p - V(N-j-1,k).
             while (p > i && k > 0)
@@ -2026,9 +2031,13 @@ internal sealed class CeltDecoder
             }
 
             // 5. X[j] = sgn*(k0 - k) and i = i - p.
-            y[j] = sgn * (k0 - k);
+            int value = sgn * (k0 - k);
+            y[j] = value;
+            sum += value * value;
             i -= p;
         }
+
+        energy = sum;
     }
 
     /// <summary>Decodes the second half of the band splitter's angle (RFC 6716 §4.3.4.2).</summary>
@@ -2111,10 +2120,7 @@ internal sealed class CeltDecoder
         }
 
         float g = (1f / (float)Math.Sqrt(energy)) * gain;
-        for (int i = 0; i < x.Length; i++)
-        {
-            x[i] *= g;
-        }
+        DecKernels.ScaleInPlace(x, g);
     }
 
     /// <summary>
@@ -2164,13 +2170,7 @@ internal sealed class CeltDecoder
 
         float lgain = 1f / (float)Math.Sqrt(el);
         float rgain = 1f / (float)Math.Sqrt(er);
-        for (int j = 0; j < n; j++)
-        {
-            float l = mid * x[j];
-            float r = y[j];
-            x[j] = lgain * (l - r);
-            y[j] = rgain * (l + r);
-        }
+        DecKernels.StereoMerge(x, y, mid, lgain, rgain, n);
     }
 
     /// <summary>Applies the anti-collapse noise fill (RFC 6716 §4.3.5).</summary>
@@ -2532,27 +2532,35 @@ internal sealed class CeltDecoder
     /// <c>V(N,K)</c> from the recurrence in RFC 6716 §4.3.4.2, tabulated for the largest
     /// band (176 bins at 20 ms) and the largest pulse count (128).
     /// </summary>
-    private static readonly uint[,] PvqTable = BuildPvqTable();
+    /// <remarks>
+    /// Rows are stored contiguously in one array with a fixed stride: the PVQ decoder makes
+    /// several table reads per bin, and a single-array row offset avoids the two-dimensional
+    /// array's multiply-and-two-bounds-check per access.
+    /// </remarks>
+    private static readonly uint[] PvqTable = BuildPvqTable();
 
-    private static uint[,] BuildPvqTable()
+    private const int PvqMaxN = 177;
+    private const int PvqMaxK = 129;
+
+    private static uint[] BuildPvqTable()
     {
-        const int MaxN = 177;
-        const int MaxK = 129;
-        uint[,] table = new uint[MaxN, MaxK];
-        for (int n = 0; n < MaxN; n++)
+        uint[] table = new uint[PvqMaxN * PvqMaxK];
+        for (int n = 0; n < PvqMaxN; n++)
         {
-            table[n, 0] = 1;
+            table[n * PvqMaxK] = 1;
         }
 
         // V(0,K) = 0 for K != 0. Values above 32 bits cannot occur in a valid codeword and are
         // saturated, which keeps the recurrence inside 32 bits; the saturation cannot affect
         // any V(N,K) that fits the 32-bit index space.
-        for (int n = 1; n < MaxN; n++)
+        for (int n = 1; n < PvqMaxN; n++)
         {
-            for (int k = 1; k < MaxK; k++)
+            int row = n * PvqMaxK;
+            int previousRow = row - PvqMaxK;
+            for (int k = 1; k < PvqMaxK; k++)
             {
-                ulong value = (ulong)table[n - 1, k] + table[n, k - 1] + table[n - 1, k - 1];
-                table[n, k] = value > uint.MaxValue ? uint.MaxValue : (uint)value;
+                ulong value = (ulong)table[previousRow + k] + table[row + k - 1] + table[previousRow + k - 1];
+                table[row + k] = value > uint.MaxValue ? uint.MaxValue : (uint)value;
             }
         }
 
