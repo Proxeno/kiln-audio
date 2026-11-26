@@ -14,7 +14,7 @@ implemented entirely in this repository, with no native codec to cross-compile, 
 
 - **Pure managed.** 100% C# on .NET 10, no native library.
 - **SIMD.** NEON/AdvSimd on arm64, AVX2 and SSSE3 on x64, scalar fallback everywhere else.
-- **Apache-2.0.** Original work, no copyleft code, no vendored libopus.
+- **Apache-2.0, no copyleft code, no native code.** Parts are derived from the RFC 6716 reference (Simplified BSD; see THIRD-PARTY-NOTICES.md).
 - **Real-time voice** for Keryx / Haiyu: low, predictable per-frame latency.
 - **Verified against libopus as an oracle** (`opus_demo`, IETF / RFC 8251 test vectors).
 

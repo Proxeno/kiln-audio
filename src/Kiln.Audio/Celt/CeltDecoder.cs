@@ -1,3 +1,5 @@
+// Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
+
 using Kiln.Audio.Entropy;
 
 namespace Kiln.Audio.Celt;
