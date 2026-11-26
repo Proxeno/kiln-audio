@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!--
+    NuGet package: "Proxeno.Kiln.Audio".
+    Package-ID-only rename: AssemblyName/RootNamespace stay "Kiln.Audio" (set from the
+    project name in Directory.Build.props), so consumers keep `using Kiln.Audio;`.
+  -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Proxeno.Kiln.Audio</PackageId>
+    <Authors>Kiln contributors</Authors>
+    <Description>Pure-managed SIMD Opus (RFC 6716) encoder and decoder for real-time voice. No native dependencies.</Description>
+    <Copyright>Copyright (c) Kiln contributors</Copyright>
+    <PackageReleaseNotes>0.0.x — skeleton; no codec yet.</PackageReleaseNotes>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Proxeno/kiln-audio</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Proxeno/kiln-audio</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>opus;audio;codec;voice;webrtc;simd;realtime</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- SourceLink + symbols -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- SemVer 0.x from git tags (MinVer), tag prefix "v" -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerDefaultPreReleaseIdentifiers>preview.0</MinVerDefaultPreReleaseIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Kiln.Audio.Tests" />
+    <InternalsVisibleTo Include="Kiln.Audio.Benchmarks" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/Kiln.Audio.Benchmarks/Kiln.Audio.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Kiln.Audio/Kiln.Audio.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Kiln.Audio.Tests/Kiln.Audio.Tests.csproj" />
+  </Folder>
+</Solution>
