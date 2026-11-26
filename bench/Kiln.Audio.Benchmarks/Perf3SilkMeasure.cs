@@ -9,7 +9,7 @@ internal static class Perf3SilkMeasure
     /// <summary>Measures the NLSF to LPC conversion and the LPC synthesis loops.</summary>
     public static void Run()
     {
-        Console.WriteLine("== PERF-3 SILK (best of 15 batches) ==");
+        Console.WriteLine("== PERF-3 SILK (warmed; best of 25 batches; 0 B) ==");
         MeasureNlsf(10);
         MeasureNlsf(16);
         MeasureLpc(10);
