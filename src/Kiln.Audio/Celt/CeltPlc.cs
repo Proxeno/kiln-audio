@@ -131,7 +131,12 @@ internal sealed partial class CeltSynthesizer
 
         int pitchIndex;
         float fade = 1f;
-        if (_plcLossCount == 0)
+
+        // The pitch index is only valid after this branch has run since the last good frame.
+        // A hybrid loss conceals its higher bands as noise (start band 17) and bumps the loss
+        // count without searching for a pitch, so a following CELT-only loss must search here;
+        // reusing the zeroed index would make the excitation offset stop advancing.
+        if (_plcLossCount == 0 || _plcLastPitchIndex == 0)
         {
             PitchDownsample(channels);
             PitchSearch(
