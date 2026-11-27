@@ -55,6 +55,7 @@ public sealed class OpusEncoder : IDisposable
     private readonly OpusBandwidth _autoSilkBandwidth;
     private readonly OpusBandwidth _autoMaxBandwidth;
     private readonly int _autoFrameSamples;
+    private int _voiceEstimate;
     private uint _autoRange;
     private bool _disposed;
 
@@ -118,6 +119,10 @@ public sealed class OpusEncoder : IDisposable
                 options.ConstrainedVbr);
             _redundantCelt = new CeltRedundantEncoder(Math.Clamp(options.BitrateBps, 3200, 257 * 1600), options.Complexity);
             _autoFrameSamples = frameDurationMs * 48;
+
+            // The reference seeds its voice estimate from the application and refines it with a
+            // running speech/music classification (opus_encoder.c, voice_ratio).
+            _voiceEstimate = options.Application == OpusApplication.Voip ? 115 : 48;
             _conversionBuffer = new short[_autoFrameSamples];
             _subFrameData = [];
             _tocDuration = options.FrameDuration;
@@ -372,6 +377,7 @@ public sealed class OpusEncoder : IDisposable
             MaxBandwidth = _autoMaxBandwidth,
             MaxDataBytes = packet.Length,
             SilkAllowsBandwidthSwitch = true,
+            VoiceEstimate = UpdateVoiceEstimate(pcm),
         };
         OpusModeDecision decision = _selector!.Decide(request);
 
@@ -432,6 +438,44 @@ public sealed class OpusEncoder : IDisposable
             out _autoRange);
         packet[0] = OpusTocBuilder.Build(OpusMode.Silk, _autoSilkBandwidth, Options.FrameDuration, stereo: false);
         return frameBytes + 1;
+    }
+
+    /// <summary>
+    /// Updates the running speech/music estimate from cheap time-domain features: short-term
+    /// energy gates silence, and the zero-crossing rate separates low-frequency voiced speech
+    /// from noisier music. The estimate is smoothed so mode changes follow the signal with
+    /// hysteresis rather than flipping every frame.
+    /// </summary>
+    /// <param name="pcm">One frame of mono input.</param>
+    /// <returns>The smoothed estimate, 0 (music) to 127 (voice).</returns>
+    private int UpdateVoiceEstimate(ReadOnlySpan<short> pcm)
+    {
+        long energy = 0;
+        int crossings = 0;
+        short previous = pcm.Length > 0 ? pcm[0] : (short)0;
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            int sample = pcm[i];
+            energy += (long)sample * sample;
+            if (i > 0 && (sample >= 0) != (previous >= 0))
+            {
+                crossings++;
+            }
+
+            previous = (short)sample;
+        }
+
+        double meanSquare = pcm.Length == 0 ? 0 : energy / (double)pcm.Length;
+        if (meanSquare < 256)
+        {
+            // Silence carries no classification evidence.
+            return _voiceEstimate;
+        }
+
+        bool voiceLike = crossings < pcm.Length / 8;
+        int instant = voiceLike ? 115 : 48;
+        _voiceEstimate = ((_voiceEstimate * 7) + instant + 4) / 8;
+        return _voiceEstimate;
     }
 
     private byte BuildToc()
