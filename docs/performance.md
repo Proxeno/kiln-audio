@@ -1701,7 +1701,7 @@ fix needs a branch-free in-order lane walk; a lane-wise best (as libopus's SSE2 
 bit-identical to the scalar search the existing parity test pins. Also open: `StereoItheta` still uses double
 `Math.Atan2`, the transient high-pass IIR is serial, and `L1Metric` for 1-2 groups is a serial chain.
 
-## FEC-QUAL-1: restoring in-band FEC quality
+### FEC-QUAL-1: restoring in-band FEC quality
 
 SILK-QUAL-3 (#43, #46) lifted main-path SNR but lowered what a decoder recovers from LBRR. On the
 `Enc2FecEndToEndTests` stream (CreateSpeech seed 20261127; Voip, 16 kHz mono, WB, 32 kbps, 20 ms, complexity 5,
