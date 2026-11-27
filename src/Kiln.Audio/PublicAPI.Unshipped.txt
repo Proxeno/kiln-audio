@@ -9,6 +9,8 @@ Kiln.Audio.OpusDecoder.LastFecOutcome.get -> Kiln.Audio.OpusFecOutcome
 Kiln.Audio.OpusEncoderOptions.Bandwidth.get -> Kiln.Audio.OpusBandwidth?
 Kiln.Audio.OpusEncoderOptions.Bandwidth.init -> void
 Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.get -> bool
+Kiln.Audio.OpusEncoderOptions.PacketLossPercent.get -> int
+Kiln.Audio.OpusEncoderOptions.PacketLossPercent.init -> void
 Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.init -> void
 Kiln.Audio.OpusEncoderOptions.UseCbr.get -> bool
 Kiln.Audio.OpusEncoderOptions.UseCbr.init -> void

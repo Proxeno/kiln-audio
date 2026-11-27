@@ -133,9 +133,10 @@ public class Enc2StereoEncoderTests
             mid[i].Should().Be((short)((left[i] + right[i] + 1) >> 1));
         }
 
-        // The reference writes the predicted side one sample late and leaves the last slot as
-        // the right input sample.
-        side[FrameLength - 1].Should().Be(right[FrameLength - 1]);
+        // The reference writes the predicted side one sample late, so the last slot keeps the raw
+        // side sample.
+        side[FrameLength - 1].Should().Be(
+            (short)((left[FrameLength - 1] - right[FrameLength - 1] + 1) >> 1));
     }
 
     /// <summary>The mixer and quantizer allocate nothing after construction.</summary>

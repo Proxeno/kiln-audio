@@ -1111,6 +1111,40 @@ internal static class SilkEncoderAnalysis
         }
     }
 
+    /// <summary>Dequantizes gain indices (Appendix A, <c>silk_gains_dequant</c>).</summary>
+    /// <remarks>Used by the LBRR path so its gains match what the decoder reconstructs.</remarks>
+    internal static void DequantizeGains(
+        Span<int> gainsQ16, ReadOnlySpan<int> indices, ref int previousIndex, int conditional, int subframeCount)
+    {
+        const int gainLevels = 64;
+        for (int k = 0; k < subframeCount; k++)
+        {
+            if (k == 0 && conditional == 0)
+            {
+                // The gain index may not drop more than 16 steps (~21.8 dB) at once.
+                previousIndex = Math.Max(indices[k], previousIndex - 16);
+            }
+            else
+            {
+                int delta = indices[k] + SilkEncoderTables.MinDeltaGainQuant;
+                int doubleStepThreshold = (2 * SilkEncoderTables.MaxDeltaGainQuant)
+                    - gainLevels + previousIndex;
+                if (delta > doubleStepThreshold)
+                {
+                    previousIndex += (delta << 1) - doubleStepThreshold;
+                }
+                else
+                {
+                    previousIndex += delta;
+                }
+            }
+
+            previousIndex = SilkEncoderMath.Limit(previousIndex, 0, gainLevels - 1);
+            gainsQ16[k] = SilkEncoderMath.Log2Lin(
+                Math.Min(SilkFixedPoint.Smulwb(SilkEncoderTables.GainInvScaleQ16, previousIndex) + SilkEncoderTables.GainOffsetQ7, 3967));
+        }
+    }
+
     /// <summary>Computes the unique identifier of a gain index vector.</summary>
     internal static int GainsId(ReadOnlySpan<int> indices, int subframeCount)
     {

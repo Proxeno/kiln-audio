@@ -90,7 +90,7 @@ public class EncoderOptionTests
     }
 
     [Fact]
-    public void Stereo_voip_falls_back_to_celt_and_decodes()
+    public void Stereo_voip_uses_the_silk_encoder_and_decodes()
     {
         var options = Supported() with
         {
@@ -110,8 +110,9 @@ public class EncoderOptionTests
 
         int written = encoder.Encode(pcm, packet);
         written.Should().BeGreaterThan(1);
-        // RFC 6716 §3.1, Table 2: configs 16..31 are CELT-only, so this is the pre-SILK path.
-        (packet[0] >> 3).Should().BeGreaterThanOrEqualTo(16);
+        // RFC 6716 §3.1, Table 2: configs 0..11 are SILK-only, and bit 2 is the stereo flag.
+        (packet[0] >> 3).Should().BeLessThan(12);
+        (packet[0] & 0x04).Should().NotBe(0);
 
         var decoded = new short[960 * 2];
         decoder.Decode(packet.AsSpan(0, written), decoded).Should().Be(960);

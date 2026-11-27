@@ -46,7 +46,7 @@ internal static class OpusHybridEncoder
     /// <param name="finalRange">Receives the decoder's expected final range.</param>
     /// <returns>The number of payload bytes written.</returns>
     internal static int Encode(
-        SilkEncoderCore silk,
+        ISilkLayerEncoder silk,
         CeltEncoder celt,
         IRedundantCeltEncoder redundantCelt,
         ReadOnlySpan<short> pcm,
@@ -94,7 +94,8 @@ internal static class OpusHybridEncoder
             silkMaxDataBytes -= silkMaxDataBytes / (1 + Math.Max(1, framesPerFiveMilliseconds));
         }
 
-        int silkBits = silk.EncodeInto(ref enc, pcm, silkMaxDataBytes);
+        silk.Encode(ref enc, pcm, frameSamples, silkMaxDataBytes - 1);
+        int silkBits = enc.Tell();
         int silkBytes = (silkBits + 7) >> 3;
         int len = silkBytes + (redundancy ? 3 : 0);
 
