@@ -153,7 +153,7 @@ public class EncodeKernelBenchmarks
     [Benchmark]
     [BenchmarkCategory("EncodeKernel")]
     public void TransientAnalysis() =>
-        CeltEncoderKernels.AnalyzeTransient(
+        CeltEncoderKernels.AnalyzeTransient<Kiln.Audio.Simd.Kernels.Vector128Kernels>(
             _transientInput, channels: 1, frameSamples: 960, overlap: 120, tmp: _transientScratch,
             bins: _transientBins);
 

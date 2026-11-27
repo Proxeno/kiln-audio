@@ -106,7 +106,7 @@ internal sealed class CeltPrefilter
 
         if (allowPitch && availableBytes > 12 * channels && complexity >= 5)
         {
-            PitchDownsample(channels, MaxPeriod + frameSamples, stride);
+            PitchDownsample<TK>(channels, MaxPeriod + frameSamples, stride);
             PitchSearch<TK>(
                 _pitchBuffer.AsSpan(MaxPeriod >> 1),
                 _pitchBuffer,
@@ -115,7 +115,7 @@ internal sealed class CeltPrefilter
                 out pitchIndex);
             pitchIndex = MaxPeriod - pitchIndex;
 
-            gain1 = RemoveDoubling(
+            gain1 = RemoveDoubling<TK>(
                 _pitchBuffer,
                 MaxPeriod,
                 MinPeriod,
@@ -204,7 +204,7 @@ internal sealed class CeltPrefilter
             on = true;
         }
 
-        ApplyCombFilter(input, channels, frameSamples, stride, pitchIndex, gain1, tapset, window);
+        ApplyCombFilter<TK>(input, channels, frameSamples, stride, pitchIndex, gain1, tapset, window);
 
         _period = Math.Max(pitchIndex, MinPeriod);
         _gain = gain1;
@@ -224,7 +224,7 @@ internal sealed class CeltPrefilter
     }
 
     /// <summary>Copies the previous tail into the frame and applies the comb filter per channel.</summary>
-    private void ApplyCombFilter(
+    private void ApplyCombFilter<TK>(
         Span<float> input,
         int channels,
         int frameSamples,
@@ -233,6 +233,7 @@ internal sealed class CeltPrefilter
         float gain,
         int tapset,
         ReadOnlySpan<float> window)
+        where TK : struct, IEncoderKernels
     {
         _period = Math.Max(_period, MinPeriod);
         for (int c = 0; c < channels; c++)
@@ -240,7 +241,8 @@ internal sealed class CeltPrefilter
             int inputBase = c * stride;
             int preBase = c * (MaxPeriod + MaxFrameSamples);
             _inMemory.AsSpan(c * Overlap, Overlap).CopyTo(input.Slice(inputBase, Overlap));
-            CombFilter(
+            ReadOnlySpan<float> gainTable = CeltTables.PostFilterGains;
+            TK.CombFilter(
                 input.Slice(inputBase + Overlap, frameSamples),
                 _pre.AsSpan(preBase, MaxPeriod + frameSamples),
                 MaxPeriod,
@@ -249,8 +251,8 @@ internal sealed class CeltPrefilter
                 frameSamples,
                 -_gain,
                 -gain,
-                _tapset,
-                tapset,
+                gainTable.Slice(_tapset * 3, 3),
+                gainTable.Slice(tapset * 3, 3),
                 window,
                 Overlap);
             input.Slice(inputBase + frameSamples, Overlap).CopyTo(_inMemory.AsSpan(c * Overlap, Overlap));
@@ -297,12 +299,31 @@ internal sealed class CeltPrefilter
         int overlap)
     {
         ReadOnlySpan<float> gains = CeltTables.PostFilterGains;
-        float g00 = g0 * gains[(tapset0 * 3) + 0];
-        float g01 = g0 * gains[(tapset0 * 3) + 1];
-        float g02 = g0 * gains[(tapset0 * 3) + 2];
-        float g10 = g1 * gains[(tapset1 * 3) + 0];
-        float g11 = g1 * gains[(tapset1 * 3) + 1];
-        float g12 = g1 * gains[(tapset1 * 3) + 2];
+        CombFilterReference(
+            y, x, xStart, t0, t1, n, g0, g1, gains.Slice(tapset0 * 3, 3), gains.Slice(tapset1 * 3, 3), window, overlap);
+    }
+
+    /// <summary>The scalar comb filter; see <see cref="CombFilter"/>.</summary>
+    internal static void CombFilterReference(
+        Span<float> y,
+        ReadOnlySpan<float> x,
+        int xStart,
+        int t0,
+        int t1,
+        int n,
+        float g0,
+        float g1,
+        ReadOnlySpan<float> gains0,
+        ReadOnlySpan<float> gains1,
+        ReadOnlySpan<float> window,
+        int overlap)
+    {
+        float g00 = g0 * gains0[0];
+        float g01 = g0 * gains0[1];
+        float g02 = g0 * gains0[2];
+        float g10 = g1 * gains1[0];
+        float g11 = g1 * gains1[1];
+        float g12 = g1 * gains1[2];
 
         int fade = Math.Min(overlap, n);
         for (int i = 0; i < fade; i++)
@@ -335,29 +356,20 @@ internal sealed class CeltPrefilter
     }
 
     /// <summary>Low-pass filters and decimates the signal by two before the pitch search.</summary>
-    private void PitchDownsample(int channels, int len, int stride)
+    private void PitchDownsample<TK>(int channels, int len, int stride)
+        where TK : struct, IEncoderKernels
     {
-        Span<float> low = _pitchBuffer.AsSpan(0, len >> 1);
-        ReadOnlySpan<float> channel0 = _pre.AsSpan(0, len);
-        for (int i = 1; i < len >> 1; i++)
-        {
-            low[i] = (0.25f * (channel0[(2 * i) - 1] + channel0[(2 * i) + 1])) + (0.5f * channel0[2 * i]);
-        }
-
-        low[0] = (0.25f * channel0[1]) + (0.5f * channel0[0]);
+        int count = len >> 1;
+        Span<float> low = _pitchBuffer.AsSpan(0, count);
+        TK.DecimateLowpass(_pre.AsSpan(0, len), low, count, accumulate: false);
         for (int c = 1; c < channels; c++)
         {
-            ReadOnlySpan<float> other = _pre.AsSpan(c * stride, len);
-            for (int i = 1; i < len >> 1; i++)
-            {
-                low[i] += (0.25f * (other[(2 * i) - 1] + other[(2 * i) + 1])) + (0.5f * other[2 * i]);
-            }
-
-            low[0] += (0.25f * other[1]) + (0.5f * other[0]);
+            TK.DecimateLowpass(_pre.AsSpan(c * stride, len), low, count, accumulate: true);
         }
 
         _ = _channels;
-        Autocorr(low, _autocorr, 4);
+        TK.Autocorr5(low, _autocorr);
+        _autocorr[0] += 10f;
         _autocorr[0] *= 1.0001f;
         for (int i = 1; i <= 4; i++)
         {
@@ -372,28 +384,8 @@ internal sealed class CeltPrefilter
             _lpc[i] *= tmp;
         }
 
-        Span<float> firMemory = stackalloc float[4];
-        firMemory.Clear();
-        Fir(low, _lpc.AsSpan(0, 4), low, 4, firMemory);
-        firMemory[0] = 0f;
-        _lpc[0] = 0.8f;
-        Fir(low, _lpc.AsSpan(0, 1), low, 1, firMemory);
-    }
-
-    private static void Autocorr(ReadOnlySpan<float> x, Span<float> ac, int lag)
-    {
-        for (int l = lag; l >= 0; l--)
-        {
-            float d = 0f;
-            for (int i = l; i < x.Length; i++)
-            {
-                d += x[i] * x[i - l];
-            }
-
-            ac[l] = d;
-        }
-
-        ac[0] += 10f;
+        TK.Fir4(low, _lpc[0], _lpc[1], _lpc[2], _lpc[3]);
+        TK.Fir1(low, 0.8f);
     }
 
     private static void Lpc(Span<float> lpc, ReadOnlySpan<float> ac, int order)
@@ -436,26 +428,6 @@ internal sealed class CeltPrefilter
         }
     }
 
-    private static void Fir(ReadOnlySpan<float> x, ReadOnlySpan<float> num, Span<float> y, int order, Span<float> memory)
-    {
-        for (int i = 0; i < x.Length; i++)
-        {
-            float sum = x[i];
-            for (int j = 0; j < order; j++)
-            {
-                sum += num[j] * memory[j];
-            }
-
-            for (int j = order - 1; j >= 1; j--)
-            {
-                memory[j] = memory[j - 1];
-            }
-
-            memory[0] = x[i];
-            y[i] = sum;
-        }
-    }
-
     /// <summary>The decimated correlation pitch search (RFC 6716 Appendix A, celt/pitch.c: pitch_search).</summary>
     private void PitchSearch<TK>(
         ReadOnlySpan<float> xLow, ReadOnlySpan<float> y, int len, int maxPitch, out int pitch)
@@ -488,6 +460,8 @@ internal sealed class CeltPrefilter
         FindBestPitch(_xcorr.AsSpan(0, coarseCount), yLow4, len >> 2, coarseCount, _bestPitch);
 
         int fineCount = Math.Max(1, maxPitch >> 1);
+        Span<int> candidates = stackalloc int[16];
+        int candidateCount = 0;
         for (int i = 0; i < fineCount; i++)
         {
             _xcorr[i] = 0f;
@@ -496,9 +470,40 @@ internal sealed class CeltPrefilter
                 continue;
             }
 
-            int count = len >> 1;
-            float sum = DotProduct(xLow[..count], y.Slice(i, count), SimdConfig.UseSimd);
-            _xcorr[i] = Math.Max(-1f, sum);
+            candidates[candidateCount++] = i;
+        }
+
+        // ENC-CELT-1: the refinement lags (at most ten) are correlated four at a time.
+        int count = len >> 1;
+        ReadOnlySpan<float> fineTarget = xLow[..count];
+        for (int g = 0; g < candidateCount; g += 4)
+        {
+            int c0 = candidates[g];
+            int c1 = candidates[Math.Min(g + 1, candidateCount - 1)];
+            int c2 = candidates[Math.Min(g + 2, candidateCount - 1)];
+            int c3 = candidates[Math.Min(g + 3, candidateCount - 1)];
+            TK.Dot4(
+                count,
+                fineTarget, y.Slice(c0, count),
+                fineTarget, y.Slice(c1, count),
+                fineTarget, y.Slice(c2, count),
+                fineTarget, y.Slice(c3, count),
+                out float d0, out float d1, out float d2, out float d3);
+            _xcorr[c0] = Math.Max(-1f, d0);
+            if (g + 1 < candidateCount)
+            {
+                _xcorr[c1] = Math.Max(-1f, d1);
+            }
+
+            if (g + 2 < candidateCount)
+            {
+                _xcorr[c2] = Math.Max(-1f, d2);
+            }
+
+            if (g + 3 < candidateCount)
+            {
+                _xcorr[c3] = Math.Max(-1f, d3);
+            }
         }
 
         FindBestPitch(_xcorr.AsSpan(0, fineCount), y, len >> 1, fineCount, _bestPitch);
@@ -579,7 +584,7 @@ internal sealed class CeltPrefilter
     /// Removes pitch doubling and refines the lag (RFC 6716 Appendix A, celt/pitch.c:
     /// remove_doubling).
     /// </summary>
-    internal static float RemoveDoubling(
+    internal static float RemoveDoubling<TK>(
         Span<float> x,
         int maxPeriod,
         int minPeriod,
@@ -587,6 +592,7 @@ internal sealed class CeltPrefilter
         ref int t0,
         int previousPeriod,
         float previousGain)
+        where TK : struct, IEncoderKernels
     {
         int minPeriod0 = minPeriod;
         maxPeriod /= 2;
@@ -602,9 +608,13 @@ internal sealed class CeltPrefilter
         int period = t0;
         ReadOnlySpan<float> current = x.Slice(maxPeriod, n);
         ReadOnlySpan<float> delayed = x.Slice(maxPeriod - period, n);
-        float xy = DotProduct(current, delayed, SimdConfig.UseSimd);
-        float xx = DotProduct(current, current, SimdConfig.UseSimd);
-        float yy = DotProduct(delayed, delayed, SimdConfig.UseSimd);
+        TK.Dot4(
+            n,
+            current, delayed,
+            current, current,
+            delayed, delayed,
+            delayed, delayed,
+            out float xy, out float xx, out float yy, out _);
 
         float bestXy = xy;
         float bestYy = yy;
@@ -631,8 +641,9 @@ internal sealed class CeltPrefilter
 
             ReadOnlySpan<float> d1 = x.Slice(maxPeriod - t1, n);
             ReadOnlySpan<float> d2 = x.Slice(maxPeriod - t1b, n);
-            xy = DotProduct(current, d1, SimdConfig.UseSimd) + DotProduct(current, d2, SimdConfig.UseSimd);
-            yy = DotProduct(d1, d1, SimdConfig.UseSimd) + DotProduct(d2, d2, SimdConfig.UseSimd);
+            TK.Dot4(n, current, d1, current, d2, d1, d1, d2, d2, out float xy1, out float xy2, out float yy1, out float yy2);
+            xy = xy1 + xy2;
+            yy = yy1 + yy2;
 
             float g1 = xy / MathF.Sqrt(1f + (2f * xx * yy));
             float cont;
@@ -669,12 +680,13 @@ internal sealed class CeltPrefilter
         }
 
         Span<float> xcorr = stackalloc float[3];
-        for (int k = 0; k < 3; k++)
-        {
-            int t1 = period + k - 1;
-            xy = DotProduct(current, x.Slice(maxPeriod - t1, n), SimdConfig.UseSimd);
-            xcorr[k] = xy;
-        }
+        TK.Dot4(
+            n,
+            current, x.Slice(maxPeriod - (period - 1), n),
+            current, x.Slice(maxPeriod - period, n),
+            current, x.Slice(maxPeriod - (period + 1), n),
+            current, current,
+            out xcorr[0], out xcorr[1], out xcorr[2], out _);
 
         int offset;
         if (xcorr[2] - xcorr[0] > 0.7f * (xcorr[1] - xcorr[0]))

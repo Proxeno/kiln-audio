@@ -1,6 +1,8 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -26,28 +28,31 @@ internal static class CeltEncoderVq
     /// <param name="iy">Scratch of length at least <paramref name="n"/>.</param>
     /// <param name="signs">Scratch of length at least <paramref name="n"/>.</param>
     /// <param name="y">Scratch of length at least <paramref name="n"/>.</param>
-    /// <param name="u">Scratch for the combinatorial U row, at least <c>k+2</c> entries.</param>
     /// <param name="n">The vector dimension, at least 2.</param>
     /// <param name="k">The number of pulses, at least 1.</param>
     /// <param name="blocks">The number of short blocks (<c>B</c>).</param>
     /// <param name="spread">The spread decision, 0 to 3.</param>
     /// <param name="enc">The range encoder.</param>
     /// <returns>The collapse mask for the band (RFC 6716 §4.3.5).</returns>
-    internal static int AlgQuant(
+    internal static int AlgQuant<TK>(
         Span<float> x,
         Span<int> iy,
         Span<float> signs,
         Span<float> y,
-        Span<uint> u,
         int n,
         int k,
         int blocks,
         int spread,
         ref RangeEncoder enc)
+        where TK : struct, IEncoderKernels
     {
-        ExpRotation(x, n, 1, blocks, k, spread);
+        EncProf.Mark(30, "  qb: before pvq (split/theta/bookkeeping)");
+        ExpRotation<TK>(x, n, 1, blocks, k, spread);
+        EncProf.Mark(31, "  qb: spread rotation");
         CeltEncoderKernels.PvqSearch(x, iy, signs, y, n, k);
-        EncodePulses(iy, n, k, u, ref enc);
+        EncProf.Mark(32, "  qb: pvq search");
+        EncodePulses(iy, n, k, ref enc);
+        EncProf.Mark(33, "  qb: pulse index + entropy");
         return ExtractCollapseMask(iy, n, blocks);
     }
 
@@ -58,7 +63,8 @@ internal static class CeltEncoderVq
     /// <param name="stride">The number of short blocks.</param>
     /// <param name="k">The pulse count.</param>
     /// <param name="spread">The spread decision, 0 to 3.</param>
-    internal static void ExpRotation(Span<float> x, int length, int direction, int stride, int k, int spread)
+    internal static void ExpRotation<TK>(Span<float> x, int length, int direction, int stride, int k, int spread)
+        where TK : struct, IEncoderKernels
     {
         if (2 * k >= length || spread == 0)
         {
@@ -89,43 +95,19 @@ internal static class CeltEncoderVq
             {
                 if (stride2 != 0)
                 {
-                    ExpRotation1(part, stride2, s, c);
+                    TK.Rotate(part, part.Length, stride2, s, c);
                 }
 
-                ExpRotation1(part, 1, c, s);
+                TK.Rotate(part, part.Length, 1, c, s);
             }
             else
             {
-                ExpRotation1(part, 1, c, -s);
+                TK.Rotate(part, part.Length, 1, c, -s);
                 if (stride2 != 0)
                 {
-                    ExpRotation1(part, stride2, s, -c);
+                    TK.Rotate(part, part.Length, stride2, s, -c);
                 }
             }
-        }
-    }
-
-    /// <summary>One in-place rotation pass (RFC 6716 Appendix A, celt/vq.c: exp_rotation1).</summary>
-    private static void ExpRotation1(Span<float> x, int stride, float c, float s)
-    {
-        int length = x.Length;
-        ref float values = ref MemoryMarshal.GetReference(x);
-        for (int i = 0; i < length - stride; i++)
-        {
-            float x1 = Unsafe.Add(ref values, i);
-            float x2 = Unsafe.Add(ref values, i + stride);
-            Unsafe.Add(ref values, i + stride) = (c * x2) + (s * x1);
-            Unsafe.Add(ref values, i) = (c * x1) - (s * x2);
-        }
-
-        int pointer = length - (2 * stride) - 1;
-        for (int i = length - (2 * stride) - 1; i >= 0; i--)
-        {
-            float x1 = Unsafe.Add(ref values, pointer);
-            float x2 = Unsafe.Add(ref values, pointer + stride);
-            Unsafe.Add(ref values, pointer + stride) = (c * x2) + (s * x1);
-            Unsafe.Add(ref values, pointer) = (c * x1) - (s * x2);
-            pointer--;
         }
     }
 
@@ -156,167 +138,57 @@ internal static class CeltEncoderVq
     /// Writes the PVQ codeword for the integer vector (RFC 6716 Appendix A, celt/cwrs.c:
     /// <c>encode_pulses</c>).
     /// </summary>
+    /// <remarks>
+    /// ENC-CELT-1: the index is the exact inverse of the decoder's table-driven <c>Cwrsi</c> walk, so it
+    /// is O(n) table reads (the decoder's <c>PvqCwrs</c> cells) instead of the O(n*k) recurrence.
+    /// </remarks>
     /// <param name="y">The signed pulse vector; the sum of absolute values is <paramref name="k"/>.</param>
     /// <param name="n">The dimension.</param>
     /// <param name="k">The pulse count.</param>
-    /// <param name="u">Scratch of at least <c>k+2</c> entries.</param>
     /// <param name="enc">The range encoder.</param>
-    internal static void EncodePulses(ReadOnlySpan<int> y, int n, int k, Span<uint> u, ref RangeEncoder enc)
+    internal static void EncodePulses(ReadOnlySpan<int> y, int n, int k, ref RangeEncoder enc)
     {
-        switch (n)
+        uint index = PulseIndex(y, n, k, out uint nc);
+        enc.EncodeUInt(index, nc);
+    }
+
+    /// <summary>The codeword index of the signed pulse vector and the codeword count <c>V(n,k)</c>.</summary>
+    internal static uint PulseIndex(ReadOnlySpan<int> y, int n, int k, out uint nc)
+    {
+        ref CeltDecoder.PvqEntry table = ref MemoryMarshal.GetArrayDataReference(CeltDecoder.PvqCwrs);
+        ref int yr = ref MemoryMarshal.GetReference(y);
+        uint index = 0;
+        int left = k;
+        for (int j = 0; j < n && left > 0; j++)
         {
-            case 2:
+            int remaining = n - j;
+            int value = Unsafe.Add(ref yr, j);
+            if (remaining == 1)
             {
-                int kk = k;
-                uint index = Icwrs2(y, ref kk);
-                enc.EncodeUInt(index, Ncwrs2(kk));
+                index += value < 0 ? 1u : 0u;
                 break;
             }
 
-            case 3:
+            ref CeltDecoder.PvqEntry row = ref Unsafe.Add(ref table, remaining * CeltDecoder.PvqMaxK);
+            if (value == 0)
             {
-                int kk = k;
-                uint index = Icwrs3(y, ref kk);
-                enc.EncodeUInt(index, Ncwrs3(kk));
-                break;
+                index += Unsafe.Add(ref row, left).Zero;
+                continue;
             }
 
-            case 4:
-            {
-                int kk = k;
-                uint index = Icwrs4(y, ref kk);
-                enc.EncodeUInt(index, Ncwrs4(kk));
-                break;
-            }
-
-            default:
-            {
-                uint index = Icwrs(y, n, k, out uint nc, u);
-                enc.EncodeUInt(index, nc);
-                break;
-            }
-        }
-    }
-
-    /// <summary>Returns the index of a length-1 signed pulse (RFC 6716 Appendix A, celt/cwrs.c: icwrs1).</summary>
-    private static uint Icwrs1(ReadOnlySpan<int> y, out int k)
-    {
-        k = Math.Abs(y[0]);
-        return y[0] < 0 ? 1u : 0u;
-    }
-
-    private static uint Icwrs2(ReadOnlySpan<int> y, ref int k)
-    {
-        uint i = Icwrs1(y[1..], out int kk);
-        i += kk > 0 ? Ucwrs2(kk) : 0u;
-        kk += Math.Abs(y[0]);
-        if (y[0] < 0)
-        {
-            i += Ucwrs2(kk + 1);
-        }
-
-        k = kk;
-        return i;
-    }
-
-    private static uint Icwrs3(ReadOnlySpan<int> y, ref int k)
-    {
-        uint i = Icwrs2(y[1..], ref k);
-        i += k > 0 ? Ucwrs3(k) : 0u;
-        k += Math.Abs(y[0]);
-        if (y[0] < 0)
-        {
-            i += Ucwrs3(k + 1);
-        }
-
-        return i;
-    }
-
-    private static uint Icwrs4(ReadOnlySpan<int> y, ref int k)
-    {
-        uint i = Icwrs3(y[1..], ref k);
-        i += k > 0 ? Ucwrs4(k) : 0u;
-        k += Math.Abs(y[0]);
-        if (y[0] < 0)
-        {
-            i += Ucwrs4(k + 1);
-        }
-
-        return i;
-    }
-
-    private static uint Icwrs(ReadOnlySpan<int> y, int n, int k, out uint nc, Span<uint> u)
-    {
-        ref int yRef = ref MemoryMarshal.GetReference(y);
-        ref uint uRef = ref MemoryMarshal.GetReference(u);
-
-        Unsafe.Add(ref uRef, 0) = 0;
-        for (int j = 1; j <= k + 1; j++)
-        {
-            Unsafe.Add(ref uRef, j) = (uint)((j << 1) - 1);
-        }
-
-        int last = Unsafe.Add(ref yRef, n - 1);
-        int acc = Math.Abs(last);
-        uint index = last < 0 ? 1u : 0u;
-        int position = n - 2;
-        index += Unsafe.Add(ref uRef, acc);
-        int value = Unsafe.Add(ref yRef, position);
-        acc += Math.Abs(value);
-        if (value < 0)
-        {
-            index += Unsafe.Add(ref uRef, acc + 1);
-        }
-
-        while (position-- > 0)
-        {
-            Unext(ref uRef, k + 2, 0);
-            index += Unsafe.Add(ref uRef, acc);
-            value = Unsafe.Add(ref yRef, position);
-            acc += Math.Abs(value);
+            int magnitude = value < 0 ? -value : value;
+            int next = left - magnitude;
+            index += Unsafe.Add(ref row, next).Zero;
             if (value < 0)
             {
-                index += Unsafe.Add(ref uRef, acc + 1);
+                CeltDecoder.PvqEntry e = Unsafe.Add(ref row, left);
+                index += e.Zero + e.Below;
             }
+
+            left = next;
         }
 
-        nc = Unsafe.Add(ref uRef, acc) + Unsafe.Add(ref uRef, acc + 1);
+        nc = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(CeltDecoder.PvqTable), (n * CeltDecoder.PvqMaxK) + k);
         return index;
-    }
-
-    /// <summary>Advances one row of the combinatorial recurrence (RFC 6716 Appendix A, celt/cwrs.c: unext).</summary>
-    private static void Unext(ref uint uRef, int length, uint ui0)
-    {
-        int j = 1;
-        do
-        {
-            uint ui1 = unchecked(Unsafe.Add(ref uRef, j) + Unsafe.Add(ref uRef, j - 1) + ui0);
-            Unsafe.Add(ref uRef, j - 1) = ui0;
-            ui0 = ui1;
-        }
-        while (++j < length);
-
-        Unsafe.Add(ref uRef, j - 1) = ui0;
-    }
-
-    private static uint Ucwrs2(int k) => (uint)(k + (k - 1));
-
-    private static uint Ncwrs2(int k) => (uint)(4 * k);
-
-    private static uint Ucwrs3(int k) => unchecked((uint)(((2 * k) - 2) * k) + 1u);
-
-    private static uint Ncwrs3(int k) => unchecked(2u * ((2u * (uint)k * (uint)k) + 1u));
-
-    private static uint Ucwrs4(int k)
-    {
-        // (2k * ((2k-3)*k + 4) - 3) / 3, known exact; 64-bit keeps the numerator exact.
-        ulong numerator = ((ulong)(2 * k) * (((ulong)((2 * k) - 3) * (ulong)k) + 4)) - 3;
-        return (uint)(numerator / 3);
-    }
-
-    private static uint Ncwrs4(int k)
-    {
-        uint kk = (uint)k;
-        return ((kk * kk) + 2) * kk / 3u << 3;
     }
 }

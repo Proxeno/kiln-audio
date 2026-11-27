@@ -1616,3 +1616,62 @@ WB 20k is high-rate (one trellis state), so cx0 cost is per-sample work, not tre
 shaping and delayed-decision path where libopus runs its plain greedy quantizer. A single-state fast path that is
 bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
 are what is left for cx0 and hybrid.
+
+## ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
+
+Goal: CELT encode at or below 1.0x libopus. Same machine and harness as SIMD-3 (`micro enc run`, the libopus in-process
+encode bench, best of 7, whole corpus, CBR). The "before" window was disturbed by other lanes on the machine (its
+libopus numbers are 1.4x the quiet-machine ones for stereo), so the before ratios are each taken against the libopus
+figure of the same window.
+
+### What moved
+
+- **Pulse index.** `CeltEncoderVq.EncodePulses` is now O(n) table reads: the exact inverse of the decoder's `Cwrsi`
+  walk, reading the decoder's `PvqCwrs`/`PvqTable` cells (made `internal`). The O(n*k) `Icwrs`/`Unext` recurrence and
+  the n=2,3,4 special cases are gone. Test: `PulseIndex_inverts_the_decoder_walk` (3000 random vectors round-trip
+  through a copy of the decoder walk).
+- **Spread rotation and Haar** go through `TK.Rotate`/`TK.Haar` (`QuantAllBands`, `AlgQuant`, `TfAnalysis` are generic
+  over the tier; `IEncoderKernels` now extends `ICeltKernels`).
+- **PVQ search**: each group of four lanes is first tested with one vector compare against the current best and
+  skipped when no lane wins, otherwise walked in index order, so the result is bit-identical to the scalar search.
+- **Prefilter** (`CeltEncVec<T>`, all unfused, so bit-identical to the scalar loops): `Autocorr5` (five serial chains
+  side by side instead of five passes), `Fir4`/`Fir1` (samples are independent; four per step, top down in place),
+  `DecimateLowpass` (unzip), `Dot4` (four dots per pass, used by `RemoveDoubling` and the fine lag search, whose
+  lags are correlated four at a time), and `CombFilter` (four outputs per step; a zero new gain copies).
+- **Transient and spreading analysis**: channel sum via `AddInPlace`, `BlockMaxAbs`, `SpreadCounts` (integer counts,
+  exact); TF analysis uses `TK.Haar` and `AddInPlace`.
+- **Forward MDCT** (`Mdct.Forward<TK>`): vector middle fold (`UnzipEven/Odd`), the tier FFT, zipped post-rotation write
+  for contiguous blocks.
+- `EncProf` marks 30-35 split quant-all-bands; `micro enc run` prints an FNV hash of all packets.
+
+### Results (us per 20 ms frame)
+
+| Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
+| --- | --- | --- | --- | --- | --- |
+| CELT stereo 64k cx0 | 26.7 / 18.5 | 44.6 (32.1 in the profile run) | 25.3 | 1.67 (1.20) | 1.37 |
+| CELT stereo 64k cx5 | 47.4 / 47.2 | 62.9 | 40.2 | 1.33 | **0.85** |
+| CELT mono 32k cx0 | 12.6 / 9.5 | 24.7 | 12.7 | 1.96 | 1.34 |
+| CELT mono 32k cx5 | 34.4 / 34.4 | 42.0 | 25.7 | 1.22 | **0.75** |
+| Hybrid FB mono 32k cx0 | 37.4 / 31.6 | 200.6 | 130.2 | 5.4 | 4.1 |
+| Hybrid FB mono 32k cx5 | 70.1 / 69.5 | 160.1 | 152.4 | 2.28 | 2.19 |
+
+(libopus column: before window / after window.) Hybrid is dominated by the SILK layer (lane ENC-NSQ-1).
+
+Profile, stereo 64k (us): cx0 prefilter 2.4 to 0.4, MDCT 4.2 to 1.6, quant-all-bands 21.5 to 19.3; cx5 prefilter
+16.5 to 7.5, transient 5.5 to 2.3, spreading decision 5.4 to 0.2, TF 2.5 to 2.1, MDCT 4.0 to 1.9, quant-all-bands
+24.5 to 21.3. cx0 quant split: PVQ search 12.7, pulse index plus entropy 2.3, theta 2.0, Haar/Hadamard 1.3, rotation 0.5.
+
+### Output changes
+
+Not byte-identical to SIMD-3 for the configs above (hashes differ): the tier FFT and `TK.Rotate`/`TK.Haar` use fused
+multiply-add on arm64. Kernels written for this lane are unfused and exact. The CELT encoder, interop, KernelTier,
+Mdct/Fft and conformance gates pass (609 of 610 in the first window; the one failure was the new test's own
+reference, replaced).
+
+### Remaining gap
+
+The greedy PVQ pulse placement is 12.7 us of the cx0 25 us: a serial chain per pulse (the placed pulse updates xy/yy,
+which the next pulse's compare needs) plus a mispredicted branch whenever a group beats the running best. An exact
+fix needs a branch-free in-order lane walk; a lane-wise best (as libopus's SSE2 search does) is faster but not
+bit-identical to the scalar search the existing parity test pins. Also open: `StereoItheta` still uses double
+`Math.Atan2`, the transient high-pass IIR is serial, and `L1Metric` for 1-2 groups is a serial chain.

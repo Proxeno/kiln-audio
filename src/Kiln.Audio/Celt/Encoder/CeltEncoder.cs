@@ -428,7 +428,7 @@ internal sealed class CeltEncoder
         {
             if (_complexity > 1)
             {
-                isTransient = CeltEncoderKernels.AnalyzeTransient(
+                isTransient = CeltEncoderKernels.AnalyzeTransient<TK>(
                     input, channels, n, Overlap, _transientScratch, _transientBins);
                 if (isTransient)
                 {
@@ -440,7 +440,7 @@ internal sealed class CeltEncoder
         }
 
         EncProf.Mark(13, "celt transient");
-        ComputeMdcts(shortBlocks, n, input, channels);
+        ComputeMdcts<TK>(shortBlocks, n, input, channels);
         EncProf.Mark(14, "celt mdct");
         if (_upsample != 1)
         {
@@ -479,7 +479,7 @@ internal sealed class CeltEncoder
         }
         else
         {
-            tfSelect = CeltEncoderAnalysis.TfAnalysis(
+            tfSelect = CeltEncoderAnalysis.TfAnalysis<TK>(
                 CeltTables.EBands, end, channels, n, isTransient, _tfResolution, effectiveBytes,
                 _spectrum, lm, out tfSum, _metric, _path0, _path1, _tfScratch);
         }
@@ -506,7 +506,7 @@ internal sealed class CeltEncoder
             }
             else
             {
-                _spread = CeltEncoderAnalysis.SpreadingDecision(
+                _spread = CeltEncoderAnalysis.SpreadingDecision<TK>(
                     CeltTables.EBands, _spectrum, channels, n, ref _tonalAverage, _spread,
                     ref _hfAverage, ref _tapsetDecision, updateHf: pfOn && shortBlocks == 0, end, m);
             }
@@ -603,7 +603,7 @@ internal sealed class CeltEncoder
         CeltEncoderEnergy.QuantFineEnergy(ref enc, start, end, channels, _oldBandE, _error, _fineQuant);
 
         EncProf.Mark(21, "celt fine energy");
-        _bands.QuantAllBands(
+        _bands.QuantAllBands<TK>(
             ref enc, CeltTables.EBands, start, end, _spectrum, channels, n, lm, shortBlocks != 0, _spread,
             codedBands, (nbCompressedBytes << (3 + BitRes)) - antiCollapseReserve, balance, _pulses,
             _tfResolution, intensity, dualStereo, _bandEnergy);
@@ -675,7 +675,8 @@ internal sealed class CeltEncoder
         return total;
     }
 
-    private void ComputeMdcts(int shortBlocks, int n, ReadOnlySpan<float> input, int channels)
+    private void ComputeMdcts<TK>(int shortBlocks, int n, ReadOnlySpan<float> input, int channels)
+        where TK : struct, IEncoderKernels
     {
         int stride = n + Overlap;
         if (shortBlocks == 0)
@@ -683,7 +684,7 @@ internal sealed class CeltEncoder
             float scale = 2f / n;
             for (int c = 0; c < channels; c++)
             {
-                _mdct[_lm].Forward(
+                _mdct[_lm].Forward<TK>(
                     input.Slice(c * stride, stride), _frequency.AsSpan(c * n, n));
                 EncKernels.Scale(_frequency.AsSpan(c * n, n), scale);
             }
@@ -697,7 +698,7 @@ internal sealed class CeltEncoder
         {
             for (int b = 0; b < blocks; b++)
             {
-                _shortMdct.Forward(
+                _shortMdct.Forward<TK>(
                     input.Slice((c * stride) + (b * shortSamples), shortSamples + Overlap),
                     _frequency.AsSpan((c * n) + b),
                     blocks);
