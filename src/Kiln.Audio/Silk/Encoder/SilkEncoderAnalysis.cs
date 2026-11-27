@@ -654,6 +654,7 @@ internal static class SilkEncoderAnalysis
         // SILK-QUAL-3: in the high-rate single-state quantizer a 1.5x stronger tilt shaping
         // lowers the reconstruction noise at every 12-20 kbps target; the low-rate path keeps
         // the reference strength that SILK-QUAL-2 tuned.
+        int referenceTiltQ16 = tiltQ16;
         if (encoder.HighRate != 0)
         {
             tiltQ16 = (int)(((long)tiltQ16 * 3) >> 1);
@@ -671,6 +672,12 @@ internal static class SilkEncoderAnalysis
             control.HarmBoostQ14[k] = SilkEncoderMath.RshiftRound(shape.HarmBoostSmthQ16, 2);
             control.HarmShapeGainQ14[k] = SilkEncoderMath.RshiftRound(shape.HarmShapeGainSmthQ16, 2);
             control.TiltQ14[k] = SilkEncoderMath.RshiftRound(shape.TiltSmthQ16, 2);
+
+            // FEC-QUAL-1: the LBRR copy is requantized far more coarsely, where the stronger
+            // tilt shaping hurts the waveform match; it keeps the reference strength.
+            shape.TiltSmthLbrrQ16 = SilkFixedPoint.Smlawb(
+                shape.TiltSmthLbrrQ16, referenceTiltQ16 - shape.TiltSmthLbrrQ16, 26214);
+            control.TiltLbrrQ14[k] = SilkEncoderMath.RshiftRound(shape.TiltSmthLbrrQ16, 2);
         }
     }
 
@@ -1390,9 +1397,10 @@ internal static class SilkEncoderAnalysis
         SilkEncoderControl control,
         Span<int> xwQ3,
         ReadOnlySpan<short> xBuffer,
-        int frameOffset)
+        int frameOffset,
+        SilkPrefilterState state,
+        int[] tiltQ14Values)
     {
-        SilkPrefilterState state = encoder.Prefilt;
         int subframeLength = encoder.SubframeLength;
         int subframeCount = encoder.SubframeCount;
         int order = encoder.ShapingLpcOrder;
@@ -1413,7 +1421,7 @@ internal static class SilkEncoderAnalysis
                 control.HarmShapeGainQ14[k], 16384 - control.HarmBoostQ14[k]);
             int harmShapeFirPackedQ12 = harmShapeGainQ12 >> 2;
             harmShapeFirPackedQ12 |= (harmShapeGainQ12 >> 1) << 16;
-            int tiltQ14 = control.TiltQ14[k];
+            int tiltQ14 = tiltQ14Values[k];
             int lfShapeQ14 = control.LfShpQ14[k];
 
             WarpedLpcAnalysisFilter(
