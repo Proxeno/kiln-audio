@@ -2,6 +2,7 @@
 
 using System.IO;
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Decoder;
 
@@ -260,13 +261,12 @@ internal sealed class OpusDecoderCore
             return DecodeFecFrame(data, audioSize, pcm);
         }
 
-        if (mode == OpusMode.Silk)
-        {
-            // Only a SILK-only frame accumulates into an unwritten buffer (the optional 2.5 ms
-            // CELT flush covers just its start); CELT-only and hybrid frames overwrite every
-            // sample with the CELT layer before SILK is added.
-            pcm[..(audioSize * _channels)].Clear();
-        }
+        // Only a SILK-only frame can reach the merge below with an unwritten buffer. Its one
+        // accumulating case is the optional 2.5 ms CELT flush (which covers just the start of the
+        // frame); without it the SILK output is copied straight in, with no clear and no add.
+        // CELT-only and hybrid frames overwrite every sample with the CELT layer before SILK is
+        // added.
+        bool silkAccumulates = false;
 
         bool transition = _prevMode is not null
             && ((mode == OpusMode.Celt && _prevMode != OpusMode.Celt && !_prevRedundancy)
@@ -363,15 +363,21 @@ internal sealed class OpusDecoderCore
         {
             // RFC 6716 §4.5: a hybrid-to-SILK transition flushes the CELT overlap by decoding a
             // 2.5 ms silence frame at CELT start band 0.
+            pcm[..(audioSize * _channels)].Clear();
+            silkAccumulates = true;
             _celt.DecodeSilenceFlush(endBand, _streamChannels, pcm);
         }
 
         if (mode != OpusMode.Celt)
         {
             int count = audioSize * _channels;
-            for (int i = 0; i < count; i++)
+            if (mode == OpusMode.Silk && !silkAccumulates)
             {
-                pcm[i] += _pcmSilk[i];
+                _pcmSilk.AsSpan(0, count).CopyTo(pcm);
+            }
+            else
+            {
+                CeltVec<PortableOps>.AddInPlace(pcm[..count], _pcmSilk.AsSpan(0, count));
             }
         }
 
@@ -474,10 +480,7 @@ internal sealed class OpusDecoderCore
         if (mode != OpusMode.Celt)
         {
             int count = audioSize * _channels;
-            for (int i = 0; i < count; i++)
-            {
-                pcm[i] += _pcmSilk[i];
-            }
+            CeltVec<PortableOps>.AddInPlace(pcm[..count], _pcmSilk.AsSpan(0, count));
         }
 
         _finalRange = dec.Rng;

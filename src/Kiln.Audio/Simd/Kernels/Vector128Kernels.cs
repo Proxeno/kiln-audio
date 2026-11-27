@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Kiln.Audio.Simd.Kernels;
 
 /// <summary>The portable 128-bit tier: <see cref="System.Runtime.Intrinsics.Vector128{T}"/> shuffles and separately rounded multiply-add. Used on SSE2-only x64, WASM and any other 128-bit host, and bit-identical to the scalar tier except where a kernel reassociates a sum.</summary>
-internal readonly struct Vector128Kernels : ICeltKernels
+internal readonly partial struct Vector128Kernels : ICeltKernels
 {
     private const MethodImplOptions Inline = MethodImplOptions.AggressiveInlining;
 

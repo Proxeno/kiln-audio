@@ -3,6 +3,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Silk;
 
@@ -101,6 +102,8 @@ internal sealed partial class SilkSynthesis
     private readonly int[] _stereoPredPrevQ13 = new int[2];
     private bool _previousDecodeOnlyMiddle;
 
+    private readonly AudioKernelTier _tier = AudioKernels.Select();
+
     private int _rateHz;
     private int _channels;
     private int _bandwidthIndex;
@@ -171,6 +174,26 @@ internal sealed partial class SilkSynthesis
     public void Synthesize(SilkFrameResult frame, Span<short> pcmOut)
     {
         ArgumentNullException.ThrowIfNull(frame);
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                SynthesizeCore<Avx2FmaKernels>(frame, pcmOut);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                SynthesizeCore<AdvSimdArm64Kernels>(frame, pcmOut);
+                break;
+            case AudioKernelTier.Vector128:
+                SynthesizeCore<Vector128Kernels>(frame, pcmOut);
+                break;
+            default:
+                SynthesizeCore<ScalarKernels>(frame, pcmOut);
+                break;
+        }
+    }
+
+    private void SynthesizeCore<TK>(SilkFrameResult frame, Span<short> pcmOut)
+        where TK : struct, ISilkKernels
+    {
         long profileStart = SilkPerf4Profile.Start();
         ConfigureForFrame(frame);
 
@@ -196,7 +219,7 @@ internal sealed partial class SilkSynthesis
                 _channelState[1].ResetPredictionMemory();
             }
 
-            SynthesizeChannel(_channelState[0], mid, _mid.AsSpan(0, _frameLength));
+            SynthesizeChannel<TK>(_channelState[0], mid, _mid.AsSpan(0, _frameLength));
             PlcUpdate(0, mid);
             PlcGlue(0, _mid.AsSpan(0, _frameLength));
             Cng(0, _mid.AsSpan(0, _frameLength), mid);
@@ -204,7 +227,7 @@ internal sealed partial class SilkSynthesis
             if (sideCoded)
             {
                 SilkChannelFrame side = frame.Regular(f, 1);
-                SynthesizeChannel(_channelState[1], side, _side.AsSpan(0, _frameLength));
+                SynthesizeChannel<TK>(_channelState[1], side, _side.AsSpan(0, _frameLength));
                 PlcUpdate(1, side);
                 PlcGlue(1, _side.AsSpan(0, _frameLength));
                 Cng(1, _side.AsSpan(0, _frameLength), side);
@@ -218,7 +241,7 @@ internal sealed partial class SilkSynthesis
             if (_channels == 2)
             {
                 long stereoStart = SilkPerf4Profile.Start();
-                StereoUnmix(mid, frameOffset, pcmOut);
+                StereoUnmix<TK>(mid, frameOffset, pcmOut);
                 SilkPerf4Profile.Stop(9, stereoStart);
             }
             else
@@ -239,8 +262,29 @@ internal sealed partial class SilkSynthesis
         SilkPerf4Profile.Stop(12, profileStart);
     }
 
-    /// <summary>Reconstructs one channel's SILK frame (RFC 6716 §4.2.7.9, <c>silk_decode_core</c>).</summary>
+    /// <summary>Reconstructs one channel's SILK frame on the instance's kernel tier.</summary>
     private void SynthesizeChannel(ChannelState state, SilkChannelFrame frame, Span<short> output)
+    {
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                SynthesizeChannel<Avx2FmaKernels>(state, frame, output);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                SynthesizeChannel<AdvSimdArm64Kernels>(state, frame, output);
+                break;
+            case AudioKernelTier.Vector128:
+                SynthesizeChannel<Vector128Kernels>(state, frame, output);
+                break;
+            default:
+                SynthesizeChannel<ScalarKernels>(state, frame, output);
+                break;
+        }
+    }
+
+    /// <summary>Reconstructs one channel's SILK frame (RFC 6716 §4.2.7.9, <c>silk_decode_core</c>).</summary>
+    private void SynthesizeChannel<TK>(ChannelState state, SilkChannelFrame frame, Span<short> output)
+        where TK : struct, ISilkKernels
     {
         long channelStart = SilkPerf4Profile.Start();
         int order = _lpcOrder;
@@ -352,10 +396,7 @@ internal sealed partial class SilkSynthesis
             if (gainQ16 != state.PrevGainQ16)
             {
                 gainAdjustmentQ16 = SilkFixedPoint.Div32VarQ(state.PrevGainQ16, gainQ16, 16);
-                for (int i = 0; i < MaxLpcOrder; i++)
-                {
-                    sLpcQ14[i] = SilkFixedPoint.Smulww(gainAdjustmentQ16, sLpcQ14[i]);
-                }
+                TK.ScaleWideInPlace(sLpcQ14[..MaxLpcOrder], gainAdjustmentQ16);
             }
             else
             {
@@ -372,6 +413,7 @@ internal sealed partial class SilkSynthesis
             if (voiced)
             {
                 int lag = state.PitchL[k];
+                long rewhitenStart = SilkPerf4Profile.Start();
 
                 // Rewhitening at the start of the frame, and again at the third subframe when the
                 // LPC coefficients change (RFC 6716 §4.2.7.9.1).
@@ -383,11 +425,9 @@ internal sealed partial class SilkSynthesis
                         output[..(2 * subframeLength)].CopyTo(state.OutBuf.AsSpan(ltpMemoryLength));
                     }
 
-                    LpcAnalysisFilter(
-                        state.SLtp,
-                        startIndex,
-                        state.OutBuf,
-                        startIndex + (k * subframeLength),
+                    TK.LpcAnalysis(
+                        state.SLtp.AsSpan(startIndex),
+                        state.OutBuf.AsSpan(startIndex + (k * subframeLength)),
                         aQ12,
                         ltpMemoryLength - startIndex,
                         order);
@@ -398,25 +438,23 @@ internal sealed partial class SilkSynthesis
                             SilkFixedPoint.Smulwb(inverseGainQ31, ltpScaleQ14), 2);
                     }
 
-                    for (int i = 0; i < lag + (LtpOrder / 2); i++)
-                    {
-                        state.SLtpQ15[ltpBufferIndex - i - 1] = SilkFixedPoint.Smulwb(
-                            inverseGainQ31, state.SLtp[ltpMemoryLength - i - 1]);
-                    }
+                    int scaled = lag + (LtpOrder / 2);
+                    TK.ScaleToQ15(
+                        state.SLtpQ15.AsSpan(ltpBufferIndex - scaled, scaled),
+                        state.SLtp.AsSpan(ltpMemoryLength - scaled, scaled),
+                        inverseGainQ31);
                 }
                 else if (gainAdjustmentQ16 != 1 << 16)
                 {
-                    for (int i = 0; i < lag + (LtpOrder / 2); i++)
-                    {
-                        state.SLtpQ15[ltpBufferIndex - i - 1] = SilkFixedPoint.Smulww(
-                            gainAdjustmentQ16, state.SLtpQ15[ltpBufferIndex - i - 1]);
-                    }
+                    int adjusted = lag + (LtpOrder / 2);
+                    TK.ScaleWideInPlace(state.SLtpQ15.AsSpan(ltpBufferIndex - adjusted, adjusted), gainAdjustmentQ16);
                 }
 
+                SilkPerf4Profile.Stop(22, rewhitenStart);
                 int predictionLag = ltpBufferIndex - lag + (LtpOrder / 2);
                 int ltpCoef = k * LtpOrder;
                 long ltpStart = SilkPerf4Profile.Start();
-                DecSilkLtp.Synthesize(
+                TK.LtpSynthesize(
                     state.SLtpQ15,
                     predictionLag,
                     ltpBufferIndex,
@@ -436,7 +474,7 @@ internal sealed partial class SilkSynthesis
 
             // Short-term LPC synthesis (RFC 6716 §4.2.7.9.2).
             sliceStart = SilkPerf4Profile.Start();
-            SilkLpcKernel.Synthesize(
+            TK.LpcSynthesize(
                 sLpcQ14,
                 aQ12,
                 residualQ14,
@@ -461,8 +499,29 @@ internal sealed partial class SilkSynthesis
         SilkPerf4Profile.Stop(11, channelStart);
     }
 
-    /// <summary>Converts mid/side to left/right (RFC 6716 §4.2.8, <c>silk_stereo_MS_to_LR</c>).</summary>
+    /// <summary>Converts mid/side to left/right on the instance's kernel tier.</summary>
     private void StereoUnmix(SilkChannelFrame mid, int frameOffset, Span<short> pcmOut)
+    {
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                StereoUnmix<Avx2FmaKernels>(mid, frameOffset, pcmOut);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                StereoUnmix<AdvSimdArm64Kernels>(mid, frameOffset, pcmOut);
+                break;
+            case AudioKernelTier.Vector128:
+                StereoUnmix<Vector128Kernels>(mid, frameOffset, pcmOut);
+                break;
+            default:
+                StereoUnmix<ScalarKernels>(mid, frameOffset, pcmOut);
+                break;
+        }
+    }
+
+    /// <summary>Converts mid/side to left/right (RFC 6716 §4.2.8, <c>silk_stereo_MS_to_LR</c>).</summary>
+    private void StereoUnmix<TK>(SilkChannelFrame mid, int frameOffset, Span<short> pcmOut)
+        where TK : struct, ISilkKernels
     {
         int frameLength = _frameLength;
         int interpLength = 8 * (_rateHz / 1000);
@@ -479,53 +538,31 @@ internal sealed partial class SilkSynthesis
         _stereoSide[0] = _tmpSide[frameLength];
         _stereoSide[1] = _tmpSide[frameLength + 1];
 
-        int pred0Q13 = _stereoPredPrevQ13[0];
-        int pred1Q13 = _stereoPredPrevQ13[1];
         int denomQ16 = (1 << 16) / interpLength;
         int delta0Q13 = SilkFixedPoint.RshiftRound(
             SilkFixedPoint.Smulbb(mid.StereoWeight0Q13 - _stereoPredPrevQ13[0], denomQ16), 16);
         int delta1Q13 = SilkFixedPoint.RshiftRound(
             SilkFixedPoint.Smulbb(mid.StereoWeight1Q13 - _stereoPredPrevQ13[1], denomQ16), 16);
 
-        for (int n = 0; n < interpLength; n++)
-        {
-            pred0Q13 += delta0Q13;
-            pred1Q13 += delta1Q13;
-            PredictSide(n, pred0Q13, pred1Q13);
-        }
-
-        pred0Q13 = mid.StereoWeight0Q13;
-        pred1Q13 = mid.StereoWeight1Q13;
-        for (int n = interpLength; n < frameLength; n++)
-        {
-            PredictSide(n, pred0Q13, pred1Q13);
-        }
+        TK.StereoUnmix(
+            _tmpMid,
+            _tmpSide,
+            frameLength,
+            interpLength,
+            _stereoPredPrevQ13[0],
+            _stereoPredPrevQ13[1],
+            delta0Q13,
+            delta1Q13,
+            mid.StereoWeight0Q13,
+            mid.StereoWeight1Q13,
+            pcmOut.Slice(frameOffset, 2 * frameLength));
 
         _stereoPredPrevQ13[0] = mid.StereoWeight0Q13;
         _stereoPredPrevQ13[1] = mid.StereoWeight1Q13;
-
-        for (int n = 0; n < frameLength; n++)
-        {
-            int left = _tmpMid[n + 1] + _tmpSide[n + 1];
-            int right = _tmpMid[n + 1] - _tmpSide[n + 1];
-            pcmOut[frameOffset + (2 * n)] = (short)SilkFixedPoint.Sat16(left);
-            pcmOut[frameOffset + (2 * n) + 1] = (short)SilkFixedPoint.Sat16(right);
-        }
-    }
-
-    /// <summary>Predicts one side sample during stereo unmixing (RFC 6716 §4.2.8).</summary>
-    private void PredictSide(int n, int pred0Q13, int pred1Q13)
-    {
-        int sum = SilkFixedPoint.Lshift(
-            SilkFixedPoint.Add(_tmpMid[n] + _tmpMid[n + 2], SilkFixedPoint.Lshift(_tmpMid[n + 1], 1)),
-            9);
-        sum = SilkFixedPoint.Smlawb(SilkFixedPoint.Lshift(_tmpSide[n + 1], 8), sum, pred0Q13);
-        sum = SilkFixedPoint.Smlawb(sum, SilkFixedPoint.Lshift(_tmpMid[n + 1], 11), pred1Q13);
-        _tmpSide[n + 1] = (short)SilkFixedPoint.Sat16(SilkFixedPoint.RshiftRound(sum, 8));
     }
 
     /// <summary>Runs the LPC analysis filter used for LTP rewhitening (RFC 6716 §4.2.7.9.1).</summary>
-    private static void LpcAnalysisFilter(
+    private void LpcAnalysisFilter(
         short[] output,
         int outputOffset,
         short[] input,
@@ -534,23 +571,23 @@ internal sealed partial class SilkSynthesis
         int length,
         int order)
     {
-        for (int ix = order; ix < length; ix++)
+        Span<short> o = output.AsSpan(outputOffset);
+        Span<short> i = input.AsSpan(inputOffset);
+        switch (_tier)
         {
-            int inputIndex = inputOffset + ix - 1;
-            int predictionQ12 = SilkFixedPoint.Smulbb(input[inputIndex], coefficients[0]);
-            for (int j = 1; j < order; j++)
-            {
-                predictionQ12 = unchecked(predictionQ12
-                    + (SilkFixedPoint.Smulbb(input[inputIndex - j], coefficients[j])));
-            }
-
-            int residualQ12 = unchecked(
-                SilkFixedPoint.Lshift(input[inputIndex + 1], 12) - predictionQ12);
-            output[outputOffset + ix] = (short)SilkFixedPoint.Sat16(
-                SilkFixedPoint.RshiftRound(residualQ12, 12));
+            case AudioKernelTier.Avx2Fma:
+                Avx2FmaKernels.LpcAnalysis(o, i, coefficients, length, order);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                AdvSimdArm64Kernels.LpcAnalysis(o, i, coefficients, length, order);
+                break;
+            case AudioKernelTier.Vector128:
+                Vector128Kernels.LpcAnalysis(o, i, coefficients, length, order);
+                break;
+            default:
+                ScalarKernels.LpcAnalysis(o, i, coefficients, length, order);
+                break;
         }
-
-        output.AsSpan(outputOffset, order).Clear();
     }
 }
 
@@ -572,7 +609,7 @@ internal static class SilkPerf4Profile
 #endif
 
     /// <summary>Number of accumulators.</summary>
-    internal const int SlotCount = 22;
+    internal const int SlotCount = 28;
 
     /// <summary>Stage names, in slot order.</summary>
     internal static string[] Names => Counters.Names;
@@ -623,7 +660,8 @@ internal static class SilkPerf4Profile
             "reserved", "nlsf-decode", "nlsf-to-lpc", "excitation", "ltp-block", "ltp-synth",
             "lpc-synth", "gain-adjust", "state-copy", "stereo", "reserved", "channel", "frame",
             "decode", "silkhdr", "lbrr", "regular", "gains-ec", "nlsf-ec", "ltp-ec",
-            "exc-ec", "decode-other",
+            "exc-ec", "decode-other", "rewhiten", "out-deint", "out-resample", "out-float",
+            "api-int16", "api-total",
         ];
 
         /// <summary>Accumulated stopwatch ticks per slot.</summary>
