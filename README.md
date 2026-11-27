@@ -146,7 +146,8 @@ documentation.
 - **Encoder interoperability.** The streams the test suite encodes are decoded by libopus 1.5.2,
   used as a black-box oracle, with no range mismatch.
 - **Encoder quality gates.** Segmental SNR must stay at or above frozen baselines of the RFC 6716
-  Appendix A reference encoder, for SILK, stereo SILK and hybrid. The gap to libopus 1.5.2 is
+  Appendix A reference encoder, for SILK, stereo SILK and hybrid, and a generated full-band test
+  signal checks that a fullband stream keeps the 13 to 19 kHz band. The gap to libopus 1.5.2 is
   measured and reported in [docs/performance.md](docs/performance.md); it is not gated.
 - **SIMD parity.** There are four kernel sets: AdvSimd on arm64, AVX2+FMA on x64, a portable
   128-bit set, and scalar. Each vector set is tested against scalar: the integer SILK kernels are
@@ -180,16 +181,18 @@ hybrid streams are mostly a little faster than libopus; SILK-only streams are 2 
 
 | Configuration | Complexity | libopus (µs) | Kiln (µs) | Ratio |
 |---|---|---|---|---|
-| CELT mono, 32 kbit/s | 0 | 12.7 | 17.7 | 1.40 |
-| CELT mono, 32 kbit/s | 5 | 35.9 | 31.7 | 0.88 |
-| CELT mono, 32 kbit/s | 10 | 43.8 | 32.3 | 0.74 |
-| CELT stereo, 64 kbit/s | 0 | 18.3 | 30.0 | 1.64 |
+| CELT mono, 32 kbit/s | 0 | 9.5 | 12.7 | 1.34 |
+| CELT mono, 32 kbit/s | 5 | 34.4 | 25.7 | 0.75 |
+| CELT stereo, 64 kbit/s | 0 | 18.5 | 25.3 | 1.37 |
+| CELT stereo, 64 kbit/s | 5 | 47.2 | 40.2 | 0.85 |
 | SILK wideband mono, 20 kbit/s | 0 | 44.5 | 103.0 | 2.31 |
 | SILK wideband mono, 20 kbit/s | 5 | 135.8 | 121.6 | 0.90 |
 | Hybrid fullband mono, 32 kbit/s | 0 | 31.7 | 101.2 | 3.19 |
 | Hybrid fullband mono, 32 kbit/s | 5 | 70.0 | 131.7 | 1.88 |
 
-The slowest row is 132 µs for a 20 ms frame. The low-complexity gap has a known cause: Kiln's SILK
+The slowest row is 132 µs for a 20 ms frame. The CELT rows and the SILK/hybrid rows were measured
+on two branches that have since been merged; the hybrid figure with both sets of changes has not
+been re-measured. The low-complexity gap has a known cause: Kiln's SILK
 encoder runs the delayed-decision quantizer at every complexity, where libopus uses a cheaper
 greedy quantizer at complexity 0. So complexity 0 in Kiln buys less speed than it does in libopus.
 
@@ -209,6 +212,10 @@ tested for correctness on x64 in CI, but their speed has not been recorded.
 - **Hybrid and automatic mode selection are mono, 48 kHz, 10/20 ms only.** A stereo `Audio`
   encoder, or one at another input rate, uses CELT for every frame. A stereo `Voip` encoder uses
   SILK. Both produce valid Opus; they do not switch modes per frame.
+- **`Bandwidth` is an upper bound, not a switch, in automatic mode.** The encoder picks the audio
+  bandwidth from the bitrate as the reference encoder does: at complexity 0 and constant bitrate a
+  mono `Voip` stream is wideband at 24 kbit/s, super-wideband at 32 kbit/s and fullband from about
+  35 kbit/s. There is no option to force fullband at a lower bitrate.
 - **No in-band FEC or DTX on CELT-only configurations.** Requesting either with options that
   select CELT throws `NotSupportedException` at construction instead of being silently ignored.
 - **No multistream or surround** (RFC 7845 channel mapping families), **no Ogg container**, no

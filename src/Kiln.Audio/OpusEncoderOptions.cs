@@ -67,8 +67,10 @@ public sealed record OpusEncoderOptions
     public bool UseDtx { get; init; }
 
     /// <summary>
-    /// Optional bandwidth limit. In the automatic SILK/hybrid/CELT case it caps the audio bandwidth
-    /// (null means fullband). In the SILK-only case it is the SILK internal bandwidth: narrowband
+    /// Optional bandwidth limit. In the automatic SILK/hybrid/CELT case it is an upper bound on the
+    /// audio bandwidth (null means fullband), not a forced value: the encoder still chooses a
+    /// narrower bandwidth at low bitrates, as the reference does, and selects fullband only from
+    /// roughly 30 to 40 kbit/s depending on complexity and content. In the SILK-only case it is the SILK internal bandwidth: narrowband
     /// (8 kHz), mediumband (12 kHz) or wideband (16 kHz), with null meaning wideband.
     /// <see cref="OpusBandwidth.SuperWideband"/> and <see cref="OpusBandwidth.Fullband"/> outside
     /// the automatic case select the CELT-only path. Must be a defined <see cref="OpusBandwidth"/>

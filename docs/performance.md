@@ -46,19 +46,16 @@ The ratio ranges from 0.85 to 1.06 with stereo output and from 0.94 to 1.12 with
 
 ## Encode speed
 
-Microseconds per 20 ms frame, CBR, libopus pinned to the same mode and complexity. Rows marked
-SIMD-3 and ENC-NSQ-1 use the 320 s RFC 8251 corpus, best of 7 ("SIMD-3: encoder kernel sets",
-"Measurements"; "ENC-NSQ-1", later and so used for the SILK and hybrid rows). Rows marked
-CELT-only come from "Encoder (CELT-only, 48 kHz mono)", "Encode speed (fair, in process)"
-(libopus best of 5, Kiln best of 15).
+Microseconds per 20 ms frame, CBR, libopus pinned to the same mode and complexity.
+All rows use the 320 s RFC 8251 corpus, best of 7 ("ENC-CELT-1", "Results", after column, for the
+CELT rows; "ENC-NSQ-1" for the SILK and hybrid rows).
 
 | Configuration | Complexity | libopus | Kiln | Ratio | Section |
 | ------------- | ---------- | ------- | ---- | ----- | ------- |
-| CELT stereo 64 kbps | 0 | 18.29 | 30.03 | 1.64 | SIMD-3 |
-| CELT stereo 64 kbps | 5 | 47.06 | 66.34 | 1.41 (noise) | SIMD-3 |
-| CELT mono 32 kbps | 0 | 12.68 | 17.70 | 1.40 | CELT-only |
-| CELT mono 32 kbps | 5 | 35.93 | 31.73 | 0.88 | CELT-only |
-| CELT mono 32 kbps | 10 | 43.77 | 32.33 | 0.74 | CELT-only |
+| CELT stereo 64 kbps | 0 | 18.5 | 25.3 | 1.37 | ENC-CELT-1 |
+| CELT stereo 64 kbps | 5 | 47.2 | 40.2 | 0.85 | ENC-CELT-1 |
+| CELT mono 32 kbps | 0 | 9.5 | 12.7 | 1.34 | ENC-CELT-1 |
+| CELT mono 32 kbps | 5 | 34.4 | 25.7 | 0.75 | ENC-CELT-1 |
 | SILK WB mono 20 kbps | 0 | 44.5 | 103.0 | 2.31 | ENC-NSQ-1 |
 | SILK WB mono 20 kbps | 5 | 135.8 | 121.6 | 0.90 | ENC-NSQ-1 |
 | Hybrid FB mono 32 kbps | 0 | 31.7 | 101.2 | 3.19 | ENC-NSQ-1 |
@@ -69,7 +66,12 @@ analysis and the spreading decision, 2 enables transient and TF analysis, 3 the 
 decision, 4 and above a two-pass coarse-energy trial and 5 and above the pitch pre-filter. In the
 SILK encoder the delayed-decision quantizer uses 1 trellis state at 2-3, 2 at 4-5, 3 at 6-7 and 4
 at 8-10, and 4 at 0-1 (libopus uses 1 there; sections "Complexity mapping", "What SILK-QUAL-1
-changed"). Kiln is slower than libopus at complexity 0 in every row (1.40-3.19x).
+changed"). Kiln is slower than libopus at complexity 0 in every row (1.34-3.19x).
+
+ENC-CELT-1 and ENC-NSQ-1 ran in parallel and each measured its own branch. The CELT rows come
+from ENC-CELT-1 and the SILK and hybrid rows from ENC-NSQ-1; the hybrid encoder with both lanes'
+changes combined has not been re-measured (ENC-CELT-1 alone measured hybrid at 130.2 and 152.4 us,
+before the ENC-NSQ-1 SILK changes).
 
 ## Encoder quality
 
@@ -108,6 +110,30 @@ Hybrid: the gate is `HybridEncoderQualityTests` against frozen RFC figures (supe
 kbps 5.01/5.76 dB, fullband 24/32 kbps 4.97/5.56 dB). Kiln's and libopus's hybrid figures are
 written by that test to `kiln-hybrid-g2-report.txt` and are not recorded in this file, so no hybrid
 gap to libopus is stated here.
+
+Hybrid, same corpus and metric, complexity 0 (`HybridEncoderQualityTests`, measured 2026-11-27 on
+the 1.0 candidate; RFC figures frozen in `HybridRfcBaseline.cs`):
+
+| Configuration | Ours | RFC | libopus | Gap to libopus |
+| ------------- | ---- | --- | ------- | -------------- |
+| SWB cap, 24 kbps | 6.13 | 5.01 | 5.83 | +0.31 |
+| SWB cap, 32 kbps | 6.24 | 5.76 | 6.31 | -0.07 |
+| FB cap, 24 kbps | 6.13 | 4.97 | 5.77 | +0.36 |
+| FB cap, 32 kbps | 6.24 | 5.56 | 6.27 | -0.03 |
+
+Read these rows with care. `OpusEncoderOptions.Bandwidth` is an upper bound in the automatic path,
+and at these bitrates and complexity 0 the mode selector chooses wideband (24 kbps) or
+super-wideband (32 kbps) whichever cap is set, while the RFC encoder and libopus are forced to the
+named bandwidth with `-bandwidth`. That is why the SWB and FB rows are identical for Kiln, and the
+comparison is between different coded bandwidths. The corpus is band-limited, so this does not
+show in segmental SNR.
+
+`HybridFullbandQualityTests` (added for 1.0) uses a generated 48 kHz signal with content from 13
+to 19 kHz. On it, at 24 and 32 kbps and complexity 0: ours 1.47 and 3.51 dB under either cap; the
+RFC encoder 1.52 and 1.50 dB forced to SWB, -0.12 and 1.07 dB forced to FB; libopus 2.35 and
+2.31 dB forced to SWB, 0.40 and 0.33 dB forced to FB. libopus forced to FB keeps the 13 to 19 kHz
+band within 0.9 to 1.9 dB; Kiln at these bitrates does not code that band (about -77 dB). The
+gate checks band retention at 48 and 64 kbps, where the selector chooses fullband.
 
 ## Allocations
 
@@ -152,14 +178,13 @@ Kiln encoder timings use `EncodeBenchmarks` and `micro enc` in the benchmark pro
 
 - Decode is not faster everywhere: vector 09 is 1.05x (stereo) and 1.12x (mono), SILK-only vectors
   02-04 are 1.02-1.06x stereo and 1.08-1.09x mono, hybrid vector 10 is 1.04x and 1.09x (SIMD-2).
-- Encode at complexity 0 is slower than libopus in every measured configuration: CELT mono 1.40x,
-  CELT stereo 1.64x, SILK WB 2.31x, hybrid fullband 3.19x. For SILK, Kiln runs the delayed-decision
+- Encode at complexity 0 is slower than libopus in every measured configuration: CELT mono 1.34x,
+  CELT stereo 1.37x, SILK WB 2.31x, hybrid fullband 3.19x. For SILK, Kiln runs the delayed-decision
   quantizer at complexity 0 where libopus runs a greedy one (ENC-NSQ-1).
-- Hybrid encode at complexity 5 is 1.88x libopus; the hybrid CELT half is listed as remaining work
-  (ENC-NSQ-1). CELT stereo 64 kbps at complexity 5 is 1.41x (SIMD-3, within noise).
-- Encoder work recorded as not done in SIMD-3: the CELT pulse coder (`Icwrs`, O(n*k)), encoder
-  spread rotation and Haar on the kernel sets, forward MDCT on the tier FFT, transient/TF/spread
-  vector passes, Burg inner loops.
+- Hybrid encode at complexity 5 is 1.88x libopus (ENC-NSQ-1), and the combined ENC-NSQ-1 plus
+  ENC-CELT-1 hybrid figure has not been measured.
+- CELT encode at complexity 0: the greedy PVQ pulse search is about half of the frame time and is
+  still a serial chain (ENC-CELT-1, "Remaining gap").
 - Quality: SILK mediumband 20 kbps at complexity 0 trails libopus by 0.19 dB (20 ms) and 0.13 dB
   (60 ms); SILK at complexity 5 and 10 trails by up to 0.6 dB in some configurations; CELT-only at
   complexity 10 and 32 kbps trails by 0.351 dB. SILK `opus_compare` scores are not reported.
@@ -1617,14 +1642,14 @@ shaping and delayed-decision path where libopus runs its plain greedy quantizer.
 bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
 are what is left for cx0 and hybrid.
 
-## ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
+### ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
 
 Goal: CELT encode at or below 1.0x libopus. Same machine and harness as SIMD-3 (`micro enc run`, the libopus in-process
 encode bench, best of 7, whole corpus, CBR). The "before" window was disturbed by other lanes on the machine (its
 libopus numbers are 1.4x the quiet-machine ones for stereo), so the before ratios are each taken against the libopus
 figure of the same window.
 
-### What moved
+#### What moved
 
 - **Pulse index.** `CeltEncoderVq.EncodePulses` is now O(n) table reads: the exact inverse of the decoder's `Cwrsi`
   walk, reading the decoder's `PvqCwrs`/`PvqTable` cells (made `internal`). The O(n*k) `Icwrs`/`Unext` recurrence and
@@ -1644,7 +1669,7 @@ figure of the same window.
   for contiguous blocks.
 - `EncProf` marks 30-35 split quant-all-bands; `micro enc run` prints an FNV hash of all packets.
 
-### Results (us per 20 ms frame)
+#### Results (us per 20 ms frame)
 
 | Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
 | --- | --- | --- | --- | --- | --- |
@@ -1661,14 +1686,14 @@ Profile, stereo 64k (us): cx0 prefilter 2.4 to 0.4, MDCT 4.2 to 1.6, quant-all-b
 16.5 to 7.5, transient 5.5 to 2.3, spreading decision 5.4 to 0.2, TF 2.5 to 2.1, MDCT 4.0 to 1.9, quant-all-bands
 24.5 to 21.3. cx0 quant split: PVQ search 12.7, pulse index plus entropy 2.3, theta 2.0, Haar/Hadamard 1.3, rotation 0.5.
 
-### Output changes
+#### Output changes
 
 Not byte-identical to SIMD-3 for the configs above (hashes differ): the tier FFT and `TK.Rotate`/`TK.Haar` use fused
 multiply-add on arm64. Kernels written for this lane are unfused and exact. The CELT encoder, interop, KernelTier,
 Mdct/Fft and conformance gates pass (609 of 610 in the first window; the one failure was the new test's own
 reference, replaced).
 
-### Remaining gap
+#### Remaining gap
 
 The greedy PVQ pulse placement is 12.7 us of the cx0 25 us: a serial chain per pulse (the placed pulse updates xy/yy,
 which the next pulse's compare needs) plus a mispredicted branch whenever a group beats the running best. An exact
