@@ -2,6 +2,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
@@ -22,7 +23,7 @@ namespace Kiln.Audio.Celt;
 /// synthesis chain owns a large amount of cross-frame state (MDCT overlap, post-filter history,
 /// de-emphasis memory, and a rolling 2048-sample per-channel history), and keeping it separate
 /// lets the bitstream decoder stay allocation-free and independently testable. The
-/// synthesized PCM is interleaved and normalized to [-1, 1]; use <see cref="CeltPcm.ToInt16"/>
+/// synthesized PCM is interleaved and normalized to [-1, 1]; use <see cref="CeltPcm.ToInt16(float)"/>
 /// for the saturating float-to-int16 step.
 /// </para>
 /// <para>
@@ -276,9 +277,15 @@ internal sealed partial class CeltSynthesizer
     private void BuildTimeSignal(CeltFrameResult frame, int samples, int channel)
     {
         ReadOnlySpan<float> spectrum = _freq.AsSpan(channel * samples, samples);
-        Span<float> raw = _rawOutput.AsSpan(0, samples);
         float[] overlap = _rawOverlap[channel];
 
+        // Shift the rolling history first; the frame is then written straight into its tail.
+        float[] history = _history[channel];
+        Array.Copy(history, samples, history, 0, HistorySize - samples);
+        Span<float> raw = history.AsSpan(HistorySize - samples, samples);
+
+        // PERF-6: the inverse transforms are left unscaled (the 2/N factor and the N/2 the
+        // reference multiplies by straight afterwards cancel).
         if (frame.ShortBlocks != 0)
         {
             if (samples + Overlap > _block.Length)
@@ -292,15 +299,11 @@ internal sealed partial class CeltSynthesizer
             Span<float> block = _block.AsSpan(0, samples + Overlap);
             block.Clear();
             int blocks = frame.ShortBlocks;
-            float scale = _shortMdct.CoefficientCount * 0.5f;
             for (int b = 0; b < blocks; b++)
             {
-                _shortMdct.Inverse(spectrum[b..], _imdct, stride: blocks);
+                _shortMdct.InverseUnscaled(spectrum[b..], _imdct, stride: blocks);
                 int offset = b * CeltTables.ShortBlockSamples;
-                for (int k = 0; k < _shortMdct.Length; k++)
-                {
-                    block[offset + k] += scale * _imdct[k];
-                }
+                AddInPlace(block.Slice(offset, _shortMdct.Length), _imdct);
             }
 
             for (int j = 0; j < Overlap; j++)
@@ -309,33 +312,42 @@ internal sealed partial class CeltSynthesizer
                 overlap[j] = block[samples + j];
             }
 
-            for (int j = Overlap; j < samples; j++)
-            {
-                raw[j] = block[j];
-            }
+            block.Slice(Overlap, samples - Overlap).CopyTo(raw[Overlap..]);
         }
         else
         {
             // The long-block inverse covers the whole frame exactly once, so the windowed output
-            // is written straight into the overlap-add instead of through an intermediate buffer.
-            Mdct mdct = _mdct[frame.Lm];
-            mdct.Inverse(spectrum, _imdct);
-            float scale = mdct.CoefficientCount * 0.5f;
+            // is written straight into the overlap-add.
+            _mdct[frame.Lm].InverseUnscaled(spectrum, _imdct);
             for (int j = 0; j < Overlap; j++)
             {
-                raw[j] = (scale * _imdct[j]) + overlap[j];
-                overlap[j] = scale * _imdct[samples + j];
+                raw[j] = _imdct[j] + overlap[j];
+                overlap[j] = _imdct[samples + j];
             }
 
-            for (int j = Overlap; j < samples; j++)
+            _imdct.AsSpan(Overlap, samples - Overlap).CopyTo(raw[Overlap..]);
+        }
+    }
+
+    private static void AddInPlace(Span<float> destination, ReadOnlySpan<float> source)
+    {
+        int count = destination.Length;
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && SimdConfig.UseSimd && source.Length >= count)
+        {
+            ref float d = ref MemoryMarshal.GetReference(destination);
+            ref float s = ref MemoryMarshal.GetReference(source);
+            for (; i + 4 <= count; i += 4)
             {
-                raw[j] = scale * _imdct[j];
+                (Vector128.LoadUnsafe(ref d, (nuint)i) + Vector128.LoadUnsafe(ref s, (nuint)i))
+                    .StoreUnsafe(ref d, (nuint)i);
             }
         }
 
-        float[] history = _history[channel];
-        Array.Copy(history, samples, history, 0, HistorySize - samples);
-        raw.CopyTo(history.AsSpan(HistorySize - samples, samples));
+        for (; i < count; i++)
+        {
+            destination[i] += source[i];
+        }
     }
 
     /// <summary>Applies the §4.3.7.1 post-filter, cross-fading the parameter sets in place.</summary>

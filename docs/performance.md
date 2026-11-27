@@ -539,6 +539,105 @@ synthesis 2.61 / 2.69 / 8.33 to 2.16 / 2.24 / 6.68.
 Not done: closed-form small-N unranking, vectorized inverse MDCT changes, fusing int16 conversion.
 Remaining gap is mostly the PVQ band-decode path (about 6 us/frame on 01) and the inverse MDCT.
 
+## PERF-6: CELT quant_bands/renorm/IMDCT hot paths
+
+Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window each
+side). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
+
+| Vector | PERF-5 base (this window) | PERF-6 |
+| --- | --- | --- |
+| 01 | 1.27 | 1.18 |
+| 07 | 1.31 | 1.16 |
+| 11 | 1.19 | 1.08 |
+| 02 / 03 / 04 (SILK) | 1.16 / 1.13 / 1.14 | 1.16 / 1.13 / 1.13 |
+
+Per-stage (us/frame, vector 01 / 07 / 11): decode 6.15 / 3.28 / 15.16 to 6.04 / 3.23 / 15.43
+(unchanged); synthesis 2.15 / 2.24 / 6.69 to 1.75 / 1.80 / 5.20; int16 0.31 / 0.25 / 0.90 to
+0.05 / 0.05 / 0.18.
+
+- **Bulk int16 conversion** (`CeltPcm.ToInt16(span, span)`): Vector128 scale, clamp, add 0.5,
+  floor, convert and narrow; bit-identical to the scalar overload. Used by `OpusDecoder` and the
+  benchmarks.
+- **Inverse MDCT**: the stride-1 pre-rotation deinterleaves four coefficient pairs per step, the
+  de-shuffle is a vector interleave, and the mirror's middle copies are vector copies. The `2/N`
+  scale and the synthesizer's `N/2` cancel, so `InverseUnscaled` skips both multiplies.
+- **Synthesis**: the overlap-add writes straight into the rolling history (no `_rawOutput` pass);
+  short-block accumulation is vectorized.
+- `MathF.Sqrt` replaces `(float)Math.Sqrt` on float values in PVQ gain (identical result).
+
+Not done: closed-form N=2/3/4 unranking, explicit-stack theta recursion, fused de-emphasis with
+int16. PVQ decode (about 6 us/frame on 01) is unchanged and is the remaining gap: roughly 1.2 us
+of the 1.18 ratio on 01 is decode. Target of 1.0 is not met on any vector.
+
+## PERF-7: CELT PVQ/quant_bands decode hot paths
+
+Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window per
+side). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process. Gates: 375 tests
+pass, 0 warnings, 0 errors, final range exact, 0 B allocated.
+
+| Vector | Before | PERF-7 |
+| --- | --- | --- |
+| 01 | 1.19 (decode 6.12) | 1.14 (decode 5.78) |
+| 07 | 1.18 (decode 3.28) | 1.12 (decode 3.05) |
+| 11 | 1.04 (decode 14.84) | 1.03 (decode 14.58) |
+
+**Profile** (`micro perf4`, instrumented, us/frame; the timers cost about 20 ns per call, so
+nested stages overcount). The profiler gained `noisefill`, `quantband` (whole `QuantBand`) and
+`lowband-out` slots. Vector 01 before: pvq-bands 6.63, quantband 5.64, pulses 3.52 (32.6 leaves per
+frame, of which rotation 0.96), theta 0.48 (17.3 per frame), noise fill 0.16, lowband copy 0.19,
+coarse energy 0.48, allocation 0.51, fine energy 0.09, TF 0.07, denormalise 0.18, anti-collapse
+about 0. After: pvq-bands 6.25, quantband 5.19, pulses 3.00, rotation 0.69 (now only 7.9 calls),
+theta 0.56. Vector 07 before/after: pvq-bands 3.40 / 3.15, pulses 1.34 / 1.05. Vector 11:
+18.1 / 18.1 (pulses 10.8 / 9.9). Raw output is in the lane scratch files, not committed.
+
+- **Spread rotation**: `(cos, sin)` depends only on `(spread, length, k)`, so a 512-entry
+  direct-mapped cache per decoder replaces the double-precision `Math.SinCos`. A hit returns the
+  value the miss computed (bit-identical). The `2k >= n` and no-spread early outs moved to the
+  caller so dense leaves skip the call.
+- **Pulse search**: the pulse-cache row is resolved once per leaf; `Bits2Pulses` and the
+  bit-cost lookups index it by reference (the unused `Pulses2Bits`/`CacheRow` helpers are gone).
+- **CWRS unrank**: for the last two dimensions `S(2,k) = 2k-1`, so the search for the pulse
+  count is closed form, `(i+1)/2` clipped to `k-1`. This removes a data-dependent loop (and its
+  mispredicts) from every vector. Index-exact; `Perf7Tests` checks the bijection for all
+  `k <= 128` and the conformance vectors check the order.
+- **`TellFrac`**: the three fractional bits are the count of seven precomputed thresholds the
+  16-bit range has reached, replacing three dependent multiply/shift rounds. `Perf7Tests`
+  compares it with the reference loop for every normalized range.
+
+Tried and not done: fusing de-emphasis with the int16 pass (int16 is 0.05 us/frame, nothing to
+gain), explicit-stack theta recursion and closed-form N=3/4 unranking (the leaf cost is dominated by
+the two range-decoder divides, the data-dependent unrank branches and `1/sqrt`; none of these is
+removed by restructuring). Remaining gap on 01/07 is about 0.9 us/frame decode-side; 11 is 3 % over.
+
+## PERF-8: division-free range decode (measured, no gain, not merged as code)
+
+Same-window measurement on the M5 Max (`micro decode`, and `scripts/bench-libopus-inproc.sh` in the
+same lock window). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
+
+| Vector | Baseline decode | Reciprocal + rsqrt table decode | Ratio (both) |
+| --- | --- | --- | --- |
+| 01 | 5.78 us | 5.82 / 5.81 us | 1.14 |
+| 07 | 3.06 us | 3.07 / 3.07 us | 1.13 |
+| 11 | 14.33 us | 14.62 / 14.49 us | 1.02 |
+
+Tried, bit-exact, and measured as a pair:
+
+- `Decode`: `rng / ft` for `2 <= ft <= 256` (every `DecodeUInt` chunk and small theta totals)
+  replaced by `high64(rng * (floor((2^64-1)/ft) + 1))`. Exact for every 32-bit dividend
+  (`n*d < 2^64` keeps the rounding excess under the `1/d` gap); tested exhaustively below 2^20 and on
+  both sides of every multiple near 2^32 for all 255 divisors.
+- `1 / sqrt(energy)` in `AlgUnquant` replaced by a 2048-entry table built with the same expression
+  (bit-identical).
+
+Result: no measurable change (within 1 % noise, 11 slightly worse). The 32-bit integer divide and
+the float sqrt/divide are cheap on this core, so the per-leaf chain is not latency-bound on them.
+The code was therefore not kept. Not tried, by analysis: a float-estimate `val / ext` (needs
+`frecpe` plus two Newton steps, about 25 cycles, no better than the divide) and
+`ReciprocalSqrtEstimate` (same cost as `sqrt` + `div`). The remaining 0.6-0.9 us/frame on 01/07 is
+therefore not in the divides; the next step needs a cycle-level profile (Instruments) of
+`QuantBand`/`Cwrsi` branch mispredicts rather than more arithmetic substitution. The target of 1.0
+is not met on 01/07; vector 11 is within 2 %.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:

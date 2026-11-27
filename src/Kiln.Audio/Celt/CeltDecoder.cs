@@ -163,6 +163,9 @@ internal sealed class CeltDecoder
     private readonly float[] _reorderScratch = new float[CeltTables.MaxFrameSamples];
     private readonly float[] _coarsePrevious = new float[2];
     private readonly int[] _iy = new int[CeltTables.MaxFrameSamples];
+
+    /// <summary>PERF-7: direct-mapped cache of the spread rotation's (cos, sin) per (spread, length, k).</summary>
+    private readonly RotationEntry[] _rotationCache = CreateRotationCache();
     private readonly byte[] _collapseMasks = new byte[2 * BandCount];
 
     private readonly int[] _tfResolution = new int[BandCount];
@@ -1343,6 +1346,25 @@ internal sealed class CeltDecoder
         Span<float> lowbandScratch,
         int fill)
     {
+        long start24 = Perf4Profile.Start();
+        int result = QuantBandCore(ref dec, x, n, b, blocks, lowband, lm, lowbandOut, gain, lowbandScratch, fill);
+        Perf4Profile.Stop(24, start24);
+        return result;
+    }
+
+    private int QuantBandCore(
+        ref RangeDecoder dec,
+        Span<float> x,
+        int n,
+        int b,
+        int blocks,
+        Span<float> lowband,
+        int lm,
+        Span<float> lowbandOut,
+        float gain,
+        Span<float> lowbandScratch,
+        int fill)
+    {
         int n0 = n;
         int nB = n;
         bool longBlocks = blocks == 1;
@@ -1431,8 +1453,10 @@ internal sealed class CeltDecoder
 
         if (!lowbandOut.IsEmpty)
         {
-            float scale = (float)Math.Sqrt(n0);
+            long start26 = Perf4Profile.Start();
+            float scale = MathF.Sqrt(n0);
             DecKernels.ScaleCopy(lowbandOut, x[..n0], scale);
+            Perf4Profile.Stop(26, start26);
         }
 
         return collapseMask & ((1 << blocks) - 1);
@@ -1599,14 +1623,21 @@ internal sealed class CeltDecoder
             }
         }
 
-        int pulses = Bits2Pulses(lm, b);
-        int currentBits = Pulses2Bits(lm, pulses);
+        // PERF-7: the pulse-cache row is looked up once for the whole search.
+        if (cacheOffset < 0)
+        {
+            throw new InvalidOperationException("The band has no pulse cache.");
+        }
+
+        ref byte cacheRow = ref Unsafe.Add(ref MemoryMarshal.GetReference(CeltTables.CacheBits), cacheOffset);
+        int pulses = Bits2Pulses(ref cacheRow, b);
+        int currentBits = pulses == 0 ? 0 : Unsafe.Add(ref cacheRow, pulses) + 1;
         _ctx.RemainingBits -= currentBits;
         while (_ctx.RemainingBits < 0 && pulses > 0)
         {
             _ctx.RemainingBits += currentBits;
             pulses--;
-            currentBits = Pulses2Bits(lm, pulses);
+            currentBits = pulses == 0 ? 0 : Unsafe.Add(ref cacheRow, pulses) + 1;
             _ctx.RemainingBits -= currentBits;
         }
 
@@ -1617,6 +1648,7 @@ internal sealed class CeltDecoder
         }
         else
         {
+            long start23 = Perf4Profile.Start();
             int mask = (1 << blocks) - 1;
             fill &= mask;
             if (fill == 0)
@@ -1650,6 +1682,8 @@ internal sealed class CeltDecoder
 
                 RenormaliseVector(x, gain);
             }
+
+            Perf4Profile.Stop(23, start23);
         }
 
         Perf4Profile.Stop(9, start9);
@@ -1998,10 +2032,15 @@ internal sealed class CeltDecoder
         // second pass over the pulse vector.
         Cwrsi(n, k, index, iy, out float energy, out int mask, blocks);
 
-        float g = (1f / (float)Math.Sqrt(energy)) * gain;
+        float g = (1f / MathF.Sqrt(energy)) * gain;
         DecKernels.ScaleIntToFloat(x, iy, g);
 
-        ExpRotation(x, n, -1, blocks, k, _ctx.Spread);
+        // PERF-7: most leaves are too dense to rotate; skip the call (and its setup) for them.
+        if (2 * k < n && _ctx.Spread != SpreadNone)
+        {
+            ExpRotation(x, n, -1, blocks, k, _ctx.Spread, _rotationCache);
+        }
+
         Perf4Profile.Stop(10, start10);
         return mask;
     }
@@ -2099,12 +2138,24 @@ internal sealed class CeltDecoder
                 }
 
                 int kk = k - 1;
-                uint prefix = Unsafe.Add(ref row, kk).Zero;
-                while (prefix > i)
+                if (remaining == 2)
                 {
-                    kk--;
-                    prefix = Unsafe.Add(ref row, kk).Zero;
+                    // PERF-7: for two dimensions S(2,k') = 2k'-1 (S(2,0) = 0), so the largest
+                    // k' <= k-1 with S(2,k') <= i is (i+1)/2, clipped, with no search loop.
+                    uint closed = (i + 1) >> 1;
+                    kk = closed < (uint)kk ? (int)closed : kk;
                 }
+                else
+                {
+                    uint search = Unsafe.Add(ref row, kk).Zero;
+                    while (search > i)
+                    {
+                        kk--;
+                        search = Unsafe.Add(ref row, kk).Zero;
+                    }
+                }
+
+                uint prefix = Unsafe.Add(ref row, kk).Zero;
 
                 i -= prefix;
                 int magnitude = k - kk;
@@ -2137,8 +2188,25 @@ internal sealed class CeltDecoder
         collapseMask = blocks <= 1 ? 1 : fused ? mask : ExtractCollapseMask(y, n, blocks);
     }
 
+    private const int RotationCacheBits = 9;
+
+    private struct RotationEntry
+    {
+        public int Key;
+        public float Cos;
+        public float Sin;
+    }
+
+    private static RotationEntry[] CreateRotationCache()
+    {
+        var cache = new RotationEntry[1 << RotationCacheBits];
+        Array.Fill(cache, new RotationEntry { Key = -1 });
+        return cache;
+    }
+
     /// <summary>Decodes the second half of the band splitter's angle (RFC 6716 §4.3.4.2).</summary>
-    private static void ExpRotation(Span<float> x, int length, int direction, int stride, int k, int spread)
+    private static void ExpRotation(
+        Span<float> x, int length, int direction, int stride, int k, int spread, RotationEntry[] cache)
     {
         long start13 = Perf4Profile.Start();
         if (2 * k >= length || spread == SpreadNone)
@@ -2147,17 +2215,38 @@ internal sealed class CeltDecoder
             return;
         }
 
-        int factor = CeltTables.SpreadFactor[spread - 1];
-        float gain = (float)length / (float)(length + (factor * k));
-        float theta = 0.5f * (gain * gain);
+        // PERF-7: (cos, sin) depend only on (spread, length, k), and the same few triples recur
+        // every frame, so a direct-mapped cache replaces the double-precision SinCos. A hit returns
+        // the value the miss path computed, so the result is unchanged.
+        int key = ((spread - 1) << 24) | (length << 12) | k;
+        ref RotationEntry entry = ref cache[(int)(((uint)key * 2654435761u) >> (32 - RotationCacheBits))];
+        float c;
+        float s;
+        if (entry.Key == key && length < 4096 && k < 4096)
+        {
+            c = entry.Cos;
+            s = entry.Sin;
+        }
+        else
+        {
+            int factor = CeltTables.SpreadFactor[spread - 1];
+            float gain = (float)length / (float)(length + (factor * k));
+            float theta = 0.5f * (gain * gain);
 
-        // PERF-4: cos(pi/2 * theta) and cos(pi/2 * (1 - theta)) are the cosine and sine of the
-        // same angle, so one SinCos replaces two range reductions. The difference from the two
-        // separate calls is a last-bit rounding of the argument, far below the CELT tolerance.
-        double angle = 0.5 * Math.PI * theta;
-        (double sin, double cos) = Math.SinCos(angle);
-        float c = (float)cos;
-        float s = (float)sin;
+            // PERF-4: cos(pi/2 * theta) and cos(pi/2 * (1 - theta)) are the cosine and sine of the
+            // same angle, so one SinCos replaces two range reductions.
+            double angle = 0.5 * Math.PI * theta;
+            (double sin, double cos) = Math.SinCos(angle);
+            c = (float)cos;
+            s = (float)sin;
+            if (length < 4096 && k < 4096)
+            {
+                entry.Key = key;
+                entry.Cos = c;
+                entry.Sin = s;
+            }
+        }
+
         int stride2 = 0;
         if (length >= 8 * stride)
         {
@@ -2302,7 +2391,7 @@ internal sealed class CeltDecoder
             energy += x[i] * x[i];
         }
 
-        float g = (1f / (float)Math.Sqrt(energy)) * gain;
+        float g = (1f / MathF.Sqrt(energy)) * gain;
         DecKernels.ScaleInPlace(x, g);
         Perf4Profile.Stop(12, start12);
     }
@@ -2513,20 +2602,16 @@ internal sealed class CeltDecoder
         _seed = dec.Rng;
     }
 
-    /// <summary>Returns the pulse cache row offset for a band at a frame size (RFC 6716 §4.3.3).</summary>
-    private static int CacheRow(int lm, int band) => CeltTables.CacheIndex[((lm + 1) * BandCount) + band];
-
     /// <summary>Chooses the number of pulses that fits a bit budget (RFC 6716 §4.3.3).</summary>
-    private int Bits2Pulses(int lm, int bits)
+    private static int Bits2Pulses(ref byte cache, int bits)
     {
-        ReadOnlySpan<byte> cache = CeltTables.CacheBits.Slice(CacheRow(lm, _ctx.Band));
         int lo = 0;
-        int hi = cache[0];
+        int hi = cache;
         bits--;
         for (int i = 0; i < CeltTables.LogMaxPseudo; i++)
         {
             int mid = (lo + hi + 1) >> 1;
-            if (cache[mid] >= bits)
+            if (Unsafe.Add(ref cache, mid) >= bits)
             {
                 hi = mid;
             }
@@ -2536,18 +2621,7 @@ internal sealed class CeltDecoder
             }
         }
 
-        return bits - (lo == 0 ? -1 : cache[lo]) <= cache[hi] - bits ? lo : hi;
-    }
-
-    /// <summary>Returns the exact bit cost of a pulse count for the current band (RFC 6716 §4.3.3).</summary>
-    private int Pulses2Bits(int lm, int pulses)
-    {
-        if (pulses == 0)
-        {
-            return 0;
-        }
-
-        return CeltTables.CacheBits[CacheRow(lm, _ctx.Band) + pulses] + 1;
+        return bits - (lo == 0 ? -1 : Unsafe.Add(ref cache, lo)) <= Unsafe.Add(ref cache, hi) - bits ? lo : hi;
     }
 
     /// <summary>
@@ -2853,7 +2927,7 @@ internal static class Perf4Profile
 #endif
 
     /// <summary>Number of accumulators.</summary>
-    internal const int SlotCount = 24;
+    internal const int SlotCount = 27;
 
     /// <summary>Stage names, in slot order.</summary>
     internal static string[] Names => Counters.Names;
@@ -2904,7 +2978,7 @@ internal static class Perf4Profile
             "frame", "flags", "coarse", "tf", "dynalloc", "alloc", "interp", "fine",
             "pvq-bands", "partition", "pulses", "theta", "renorm", "rotation", "anticollapse",
             "finalise", "publish", "denorm", "imdct", "postfilter", "deemph", "synth-total",
-            "synth-other", "spare",
+            "synth-other", "noisefill", "quantband", "tf-haar-had", "lowband-out",
         ];
 
         /// <summary>Accumulated stopwatch ticks per slot.</summary>
