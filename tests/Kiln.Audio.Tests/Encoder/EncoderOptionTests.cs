@@ -15,6 +15,13 @@ public class EncoderOptionTests
     };
 
     [Fact]
+    public void The_default_options_are_accepted()
+    {
+        using var encoder = new OpusEncoder(new OpusEncoderOptions());
+        encoder.Options.Should().Be(new OpusEncoderOptions());
+    }
+
+    [Fact]
     public void The_default_options_select_the_silk_voip_encoder()
     {
         using var encoder = new OpusEncoder(new OpusEncoderOptions());

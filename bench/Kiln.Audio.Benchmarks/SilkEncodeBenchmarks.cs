@@ -17,11 +17,12 @@ namespace Kiln.Audio.Benchmarks;
 /// <para>
 /// Compare against libopus with <c>scripts/bench-libopus-inproc.sh encode &lt;pcm&gt; 48000 1 voip
 /// 20000 20 &lt;complexity&gt; 0</c> at the same complexity. Complexity selects the analysis
-/// effort: 0-1 use the minimum-complexity pitch search, an order-8 shaping filter and the low
-/// complexity LTP quantizer with 2 NLSF survivors; 2-3 raise the pitch LPC to order 8 and the
-/// shaping filter to order 10 with 4 survivors; 4-5 use order 10/12, interpolation, the full LTP
-/// quantizer and 8 survivors; 6-7 use 12/14 and 16 survivors; 8-10 use the maximum-complexity
-/// pitch search, 16/16 and 32 survivors. Warping is enabled from complexity 4 up.
+/// effort: 0-1 use the minimum-complexity pitch search, an order-8 shaping filter, the full LTP
+/// quantizer with 8 NLSF survivors and a four-state delayed-decision trellis; 2-3 raise the pitch
+/// LPC to order 8 and the shaping filter to order 10 with 4 survivors and one state; 4-5 use
+/// order 10/12, interpolation, 8 survivors and two states; 6-7 use 12/14, 16 survivors and three
+/// states; 8-10 use the maximum-complexity pitch search, 16/16, 32 survivors and four states.
+/// Warped shaping is enabled at every complexity.
 /// </para>
 /// </remarks>
 [MemoryDiagnoser]

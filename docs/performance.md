@@ -525,59 +525,121 @@ overload and the float overload. `EncoderAllocationTests` proves this with
 
 ## SILK encoder quality
 
-Aggregate segmental SNR (dB, higher is better) of the SILK encoder (`OpusApplication.Voip`, mono) over the RFC 8251 vectors 2, 3, 4 and 6 mixed to mono, 48 kHz input. Every encoder is decoded with libopus 1.5.2 and scored against the same reference: the input passed through an independent long windowed-sinc resampler (`tests/Kiln.Audio.Tests/SilkEncoder/IdealResampler.cs`, more than 80 dB stopband, zero delay). 20 ms segments, each clamped to [-10, 60] dB.
+This section records the SILK encoder's quality against libopus 1.5.2, the methodology, and what
+SILK-QUAL-1 changed. It is evidence, not a CI gate; the gate lives in `SilkEncoderQualityTests`.
 
-**Where we stand:** at complexity 0 we match or beat the RFC 6716 Appendix A reference encoder in every configuration (this is the hard G2 gate, with the RFC figures frozen in `SilkRfcBaseline.cs`). We trail libopus 1.5.2 by 0.6 to 1.2 dB in most configurations (measured range: 0.0 to 0.9 dB at complexity 0, 0.4 to 2.0 dB at complexity 5 and 10; the largest gaps are wideband and mediumband at 8 and 12 kbps). Lane SILK-QUAL is working on closing this gap. The gap to libopus is reported by the test, not asserted.
+### Method
 
-| Band | Frame | Bitrate | Complexity | Ours | RFC reference | libopus 1.5.2 | Ours - libopus |
-|---|---|---|---|---|---|---|---|
-| Narrowband | 20 ms | 8 kbps | 0 | 3.17 | 3.04 | 3.61 | -0.44 |
-| Narrowband | 20 ms | 8 kbps | 5 | 3.06 | - | 4.20 | -1.14 |
-| Narrowband | 20 ms | 8 kbps | 10 | 3.18 | - | 4.44 | -1.26 |
-| Narrowband | 20 ms | 12 kbps | 0 | 5.20 | 4.98 | 5.52 | -0.32 |
-| Narrowband | 20 ms | 12 kbps | 5 | 5.18 | - | 5.65 | -0.47 |
-| Narrowband | 20 ms | 12 kbps | 10 | 5.24 | - | 5.74 | -0.50 |
-| Narrowband | 60 ms | 8 kbps | 0 | 3.22 | 3.09 | 3.65 | -0.43 |
-| Narrowband | 60 ms | 8 kbps | 5 | 3.13 | - | 4.22 | -1.09 |
-| Narrowband | 60 ms | 8 kbps | 10 | 3.30 | - | 4.51 | -1.21 |
-| Narrowband | 60 ms | 12 kbps | 0 | 5.25 | 5.03 | 5.50 | -0.25 |
-| Narrowband | 60 ms | 12 kbps | 5 | 5.25 | - | 5.65 | -0.40 |
-| Narrowband | 60 ms | 12 kbps | 10 | 5.27 | - | 5.76 | -0.49 |
-| Mediumband | 20 ms | 8 kbps | 0 | 2.45 | 2.42 | 2.78 | -0.33 |
-| Mediumband | 20 ms | 8 kbps | 5 | 2.20 | - | 3.77 | -1.57 |
-| Mediumband | 20 ms | 8 kbps | 10 | 2.29 | - | 4.17 | -1.88 |
-| Mediumband | 20 ms | 12 kbps | 0 | 4.79 | 4.66 | 5.01 | -0.22 |
-| Mediumband | 20 ms | 12 kbps | 5 | 4.70 | - | 5.47 | -0.77 |
-| Mediumband | 20 ms | 12 kbps | 10 | 4.70 | - | 5.72 | -1.02 |
-| Mediumband | 20 ms | 20 kbps | 0 | 6.26 | 5.95 | 6.73 | -0.47 |
-| Mediumband | 20 ms | 20 kbps | 5 | 6.24 | - | 6.80 | -0.56 |
-| Mediumband | 20 ms | 20 kbps | 10 | 6.21 | - | 6.84 | -0.63 |
-| Mediumband | 60 ms | 8 kbps | 0 | 2.55 | 2.52 | 2.82 | -0.27 |
-| Mediumband | 60 ms | 8 kbps | 5 | 2.22 | - | 3.78 | -1.56 |
-| Mediumband | 60 ms | 8 kbps | 10 | 2.30 | - | 4.23 | -1.93 |
-| Mediumband | 60 ms | 12 kbps | 0 | 4.84 | 4.72 | 4.84 | +0.00 |
-| Mediumband | 60 ms | 12 kbps | 5 | 4.72 | - | 5.39 | -0.67 |
-| Mediumband | 60 ms | 12 kbps | 10 | 4.73 | - | 5.63 | -0.90 |
-| Mediumband | 60 ms | 20 kbps | 0 | 6.32 | 5.98 | 6.72 | -0.40 |
-| Mediumband | 60 ms | 20 kbps | 5 | 6.26 | - | 6.81 | -0.55 |
-| Mediumband | 60 ms | 20 kbps | 10 | 6.23 | - | 6.87 | -0.64 |
-| Wideband | 20 ms | 8 kbps | 0 | 1.70 | 1.71 | 1.71 | -0.01 |
-| Wideband | 20 ms | 8 kbps | 5 | 1.53 | - | 3.00 | -1.47 |
-| Wideband | 20 ms | 8 kbps | 10 | 1.56 | - | 3.53 | -1.97 |
-| Wideband | 20 ms | 12 kbps | 0 | 3.61 | 3.58 | 4.50 | -0.89 |
-| Wideband | 20 ms | 12 kbps | 5 | 3.40 | - | 5.16 | -1.76 |
-| Wideband | 20 ms | 12 kbps | 10 | 3.47 | - | 5.48 | -2.01 |
-| Wideband | 20 ms | 20 kbps | 0 | 6.02 | 5.78 | 6.44 | -0.42 |
-| Wideband | 20 ms | 20 kbps | 5 | 5.91 | - | 6.64 | -0.73 |
-| Wideband | 20 ms | 20 kbps | 10 | 5.96 | - | 6.70 | -0.74 |
-| Wideband | 60 ms | 8 kbps | 0 | 1.82 | 1.72 | 1.78 | +0.04 |
-| Wideband | 60 ms | 8 kbps | 5 | 1.57 | - | 3.06 | -1.49 |
-| Wideband | 60 ms | 8 kbps | 10 | 1.61 | - | 3.61 | -2.00 |
-| Wideband | 60 ms | 12 kbps | 0 | 3.51 | 3.48 | 4.37 | -0.86 |
-| Wideband | 60 ms | 12 kbps | 5 | 3.31 | - | 5.08 | -1.77 |
-| Wideband | 60 ms | 12 kbps | 10 | 3.35 | - | 5.42 | -2.07 |
-| Wideband | 60 ms | 20 kbps | 0 | 6.02 | 5.75 | 6.43 | -0.41 |
-| Wideband | 60 ms | 20 kbps | 5 | 5.92 | - | 6.62 | -0.70 |
-| Wideband | 60 ms | 20 kbps | 10 | 5.95 | - | 6.72 | -0.77 |
+- Corpus: the mono downmix of RFC 8251 vectors 02, 03, 04 and 06, which is the corpus SILK-ENC-1
+  used. Tuning decisions were checked on vectors 04 and 06 as a held-out pair.
+- Reference: `IdealResampler` (windowed-sinc, zero delay) resamples the 48 kHz original to the
+  codec's internal rate (8, 12 or 16 kHz). It is independent of the encoder's own resampler.
+- Both codecs' packets are decoded by the libopus oracle at the internal rate and scored with
+  aggregate segmental SNR (20 ms segments, clamped to [-10, 60] dB). The decode is aligned to the
+  reference above 150 Hz, where both codecs encode the same content; the encoder's own high-pass
+  (60-100 Hz) makes full-band alignment ill-conditioned. The delay search is coarse-to-fine
+  (step 8 then step 1).
+- `opus_compare` quality percent is reported as `n/a`. The tool only scores 48 kHz, and its
+  intended reference is a 48 kHz signal with the same bandwidth; comparing a band-limited SILK
+  decode to the full-band original produces meaningless negative scores for both codecs. A
+  correct harness needs an independent band-limited 48 kHz reference, which roughly quintuples
+  the gate's runtime (measured: 5m19s versus 1m06s), so it is deferred. The scored gate is
+  segSNR at the internal rate.
 
-The RFC reference was run only at complexity 0 (the gated setting). To regenerate the RFC column, build the RFC 6716 Appendix A source with FIXED_POINT=1 and run the `SilkRfcBaselineGenerator` test with `KILN_SILK_RFC_OPUS_DEMO` set to its `opus_demo`. The per-run output of the quality tests is in the xUnit output of `SilkEncoderQualityTests`.
+The earlier SILK-ENC-1 harness searched delays on a fixed four-sample grid and used the encoder's
+own resampler as the reference. At 12 kHz that misaligned up to two samples and understated every
+band; the numbers below supersede it and are not comparable with the SILK-ENC-1 report.
+
+### Results at complexity 0 (the gate)
+
+`ours` and `libopus` are aggregate segmental SNR in dB over the four vectors; positive `gap` means
+we beat libopus.
+
+| Band | Frame | kbps | ours | libopus | gap |
+| ---- | ----- | ---- | ---- | ------- | --- |
+| NB | 20 ms | 8  | 3.64 | 3.60 | +0.04 |
+| NB | 60 ms | 8  | 3.72 | 3.64 | +0.08 |
+| NB | 20 ms | 12 | 5.03 | 5.51 | -0.48 |
+| NB | 60 ms | 12 | 5.08 | 5.49 | -0.41 |
+| MB | 20 ms | 8  | 3.52 | 2.77 | +0.75 |
+| MB | 60 ms | 8  | 3.64 | 2.81 | +0.83 |
+| MB | 20 ms | 12 | 5.07 | 5.01 | +0.06 |
+| MB | 60 ms | 12 | 5.10 | 4.84 | +0.26 |
+| MB | 20 ms | 20 | 6.16 | 6.73 | -0.57 |
+| MB | 60 ms | 20 | 6.11 | 6.72 | -0.61 |
+| WB | 20 ms | 8  | 3.17 | 1.71 | +1.47 |
+| WB | 60 ms | 8  | 3.35 | 1.77 | +1.58 |
+| WB | 20 ms | 12 | 4.57 | 4.50 | +0.07 |
+| WB | 60 ms | 12 | 4.60 | 4.37 | +0.23 |
+| WB | 20 ms | 20 | 6.14 | 6.44 | -0.30 |
+| WB | 60 ms | 20 | 6.08 | 6.43 | -0.35 |
+
+Ten of sixteen complexity-0 configurations meet the target; six remain 0.30-0.61 dB behind (NB
+12 kbps, and MB/WB 20 kbps). Before SILK-QUAL-1, all sixteen were behind by 0.01-0.90 dB.
+
+### Complexity 5 and 10
+
+Complexity 5 and 10 are reported, not gated. The delayed-decision quantizer and warped shaping pay
+off most at the low rates: for example WB 8 kbps 20 ms rises from 1.53 dB (greedy NSQ, complexity
+5) to 2.81 dB, and 1.60 to 3.27 dB at complexity 10; MB 8 kbps 60 ms rises from 2.23 to 3.21 dB at
+complexity 5. At complexity 5 and 10 the remaining gap to libopus is 0.1-0.9 dB across the matrix
+(e.g. WB 8 kbps 60 ms -0.10 dB, MB 20 kbps -0.75 dB).
+
+### What changed
+
+1. **Delayed-decision NSQ at every complexity.** `SilkEncoderCore` now always runs
+   `SilkNsqDelayedDecision` instead of the greedy `SilkNsq`, with trellis snapshots for the rate
+   loop. Complexity 2-3 use one state, 4-5 two, 6-7 three and 8-10 four, as in the reference;
+   complexity 0-1 use four states here (the reference uses one). The winner's LCG seed is written
+   back to the frame indices; without that the transmitted seed does not match the surviving
+   state's sign pattern and multi-state output decodes as noise.
+2. **Warped noise shaping everywhere.** `WarpingQ16 = fs_kHz * 0.015` is now on at every
+   complexity (the reference only enables it from complexity 4), now that the quantizer supports
+   it.
+3. **Higher resolution at complexity 0.** NLSF MSVQ survivors rise from 2 to 8 and the low
+   complexity LTP quantizer is disabled at complexity 0, which is where the 8 and 12 kbps gains
+   come from.
+4. **Spending the 20 kbps budget.** The RFC 1.0 target-rate table leaves about 2 kbps unused at
+   20 kbps. The target SNR now rises by up to 3 dB above 14 kbps, which brings bit usage to
+   ~48.9 bytes per 20 ms frame (19.6 kbps) and recovers 0.1-0.2 dB. A larger boost overfills the
+   budget and loses quality at 60 ms, so 3 dB is the chosen point.
+
+### Encode cost
+
+Measured with a stopwatch over the whole vector 02 corpus (1251 frames of 20 ms, MB, 20 kbps) on
+the shared build machine, so treat the numbers as indicative:
+
+| Complexity | Greedy NSQ (before) | Delayed decision (after) | Ratio |
+| ---------- | ------------------- | ------------------------ | ----- |
+| 0 | 71.8 µs/frame | 83.4-85.5 µs/frame | 1.16-1.19x |
+| 5 | 268 µs/frame | 274 µs/frame | ~1.02x (within run-to-run noise) |
+
+Both are inside the 1.5x budget. Allocations remain zero per frame and the bitstream stays valid
+(`SilkEncoderInteropTests`, `SilkEncoderSmokeTests`, `SilkEncoderAllocationTests`).
+
+### Remaining gap and next ideas
+
+The six failing complexity-0 cases are NB 12 kbps and MB/WB 20 kbps, 0.3-0.6 dB behind. The
+quantizer search is no longer the limiter (four states at complexity 0 already match complexity
+10); the gap is in the analysis and the rate control at high rates.
+
+1. **Rate-distortion index selection** for gains, LTP and NLSFs, instead of nearest-index plus a
+   global gain multiplier. The 20 kbps gap is where a weighted error-plus-lambda·bits criterion
+   should pay.
+2. **Noise shaping tuning by bitrate and activity**, searched on a training split and validated on
+   held-out vectors. The harmonic/tilt/low-frequency strengths are still the RFC 1.0 constants.
+3. **Per-frame bit allocation across 40/60 ms packets and the bit reservoir**, favouring voiced
+   onsets. The 60 ms cases are consistently the weaker ones at 20 kbps.
+4. **LPC analysis** (windowing, noise-floor regularization, Burg conditioning). The remaining
+   high-rate error is broad-band, which points at the short-term predictor rather than the
+   excitation.
+
+### Frozen RFC baseline and the ratchet
+
+The hard gate at complexity 0 is a ratchet, not a fixed libopus target. The RFC 6716 Appendix A
+figures are frozen in `tests/Kiln.Audio.Tests/SilkEncoder/SilkRfcBaseline.cs`, measured with this
+harness (build the RFC source with `FIXED_POINT=1`, then run `SilkRfcBaselineGenerator` with
+`KILN_SILK_RFC_OPUS_DEMO` set to its `opus_demo`). Per configuration the test asserts
+`ours >= max(RFC, frozen ours - 0.05 dB)` where we still trail libopus, and
+`ours >= frozen libopus` where we already beat it. The six remaining gaps stay reported in the
+test output and in the table above; the ratchet is what makes the gate green without hiding them.

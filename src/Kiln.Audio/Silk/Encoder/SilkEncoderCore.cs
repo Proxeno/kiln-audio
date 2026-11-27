@@ -51,8 +51,13 @@ internal sealed class SilkEncoderCore
         new int[SilkEncoderMath.VadBandCount],
     ];
 
-    private readonly SilkNsqState _nsqStart = new();
-    private readonly SilkNsqState _nsqLower = new();
+    private readonly SilkNsqDelayedDecision _delayedDecision = new();
+    private readonly SilkNsqDelayedDecision _delayedDecisionStart = new();
+    private readonly SilkNsqDelayedDecision _delayedDecisionLower = new();
+    private readonly sbyte[] _delayedDecisionPulses = new sbyte[SilkEncoderMath.MaxFrameLength];
+    private readonly short[] _delayedDecisionOutput = new short[SilkEncoderMath.MaxFrameLength];
+    private readonly short[] _delayedDecisionPredictionQ12 = new short[2 * SilkEncoderMath.MaxLpcOrder];
+    private readonly int _delayedDecisionStates;
     private readonly SilkSideInfo _lastEncodedIndices = new();
     private readonly SilkSideInfo[] _encodedPerFrame =
     [
@@ -98,6 +103,9 @@ internal sealed class SilkEncoderCore
         _complexity = Math.Clamp(complexity, 0, 10);
         _useCbr = useCbr;
         _silkFrames = durationMs == 10 ? 1 : durationMs / 20;
+        // Complexity 0 and 1 use a four-state trellis (the reference uses one) so the delayed
+        // decision and warped shaping also pay off at the fastest setting.
+        _delayedDecisionStates = _complexity < 2 ? 4 : SilkNsqDelayedDecision.StatesForComplexity(_complexity);
 
         _resampler = new SilkInputResampler(apiRate, bandwidthHz);
         _resampled = new short[bandwidthHz * durationMs / 1000];
@@ -373,9 +381,11 @@ internal sealed class SilkEncoderCore
         };
 
         // The warped noise-shaping filter is only valid in the delayed-decision quantizer
-        // (silk_NSQ_del_dec); the single-state quantizer used here assumes unwarped shaping
-        // coefficients, so warping stays off until the delayed-decision quantizer is wired in.
+        // (silk_NSQ_del_dec), which this encoder now always uses. The reference only enables
+        // warped shaping from complexity 4; because delayed decision runs at every complexity
+        // here, warping is enabled everywhere, scaled by the internal rate.
         int complexity = _complexity;
+        int warpingQ16 = fsKhz * 983; // WARPING_MULTIPLIER = 0.015 in Q16
         if (complexity < 2)
         {
             _state.PitchEstimationComplexity = SilkEncoderTables.PitchEstimationMinComplexity;
@@ -384,9 +394,9 @@ internal sealed class SilkEncoderCore
             _state.ShapingLpcOrder = 8;
             _state.LaShape = 3 * fsKhz;
             _state.UseInterpolatedNlsfs = 0;
-            _state.LtpQuantLowComplexity = 1;
-            _state.NlsfMsvqSurvivors = 2;
-            _state.WarpingQ16 = 0;
+            _state.LtpQuantLowComplexity = 0;
+            _state.NlsfMsvqSurvivors = 8;
+            _state.WarpingQ16 = warpingQ16;
         }
         else if (complexity < 4)
         {
@@ -398,7 +408,7 @@ internal sealed class SilkEncoderCore
             _state.UseInterpolatedNlsfs = 0;
             _state.LtpQuantLowComplexity = 0;
             _state.NlsfMsvqSurvivors = 4;
-            _state.WarpingQ16 = 0;
+            _state.WarpingQ16 = warpingQ16;
         }
         else if (complexity < 6)
         {
@@ -410,7 +420,7 @@ internal sealed class SilkEncoderCore
             _state.UseInterpolatedNlsfs = 1;
             _state.LtpQuantLowComplexity = 0;
             _state.NlsfMsvqSurvivors = 8;
-            _state.WarpingQ16 = 0;
+            _state.WarpingQ16 = warpingQ16;
         }
         else if (complexity < 8)
         {
@@ -422,7 +432,7 @@ internal sealed class SilkEncoderCore
             _state.UseInterpolatedNlsfs = 1;
             _state.LtpQuantLowComplexity = 0;
             _state.NlsfMsvqSurvivors = 16;
-            _state.WarpingQ16 = 0;
+            _state.WarpingQ16 = warpingQ16;
         }
         else
         {
@@ -434,7 +444,7 @@ internal sealed class SilkEncoderCore
             _state.UseInterpolatedNlsfs = 1;
             _state.LtpQuantLowComplexity = 0;
             _state.NlsfMsvqSurvivors = 32;
-            _state.WarpingQ16 = 0;
+            _state.WarpingQ16 = warpingQ16;
         }
 
         _state.PitchEstimationLpcOrder = Math.Min(_state.PitchEstimationLpcOrder, _state.PredictLpcOrder);
@@ -473,6 +483,15 @@ internal sealed class SilkEncoderCore
                     + (fractionQ6 * (SilkEncoderTables.SnrTableQ1[k] - SilkEncoderTables.SnrTableQ1[k - 1]));
                 break;
             }
+        }
+
+        // The RFC 1.0 SNR table leaves about 2 kbps of the budget unused at 20 kbps. Spend it:
+        // above 14 kbps the target SNR rises by up to 3 dB, which tracks the observed bit usage
+        // back to the configured rate.
+        if (target > 14000)
+        {
+            int boostQ7 = Math.Min((target - 14000) * (3 * 128) / 6000, 3 * 128);
+            _state.SnrDbQ7 += boostQ7;
         }
     }
 
@@ -514,7 +533,7 @@ internal sealed class SilkEncoderCore
 
         RangeEncoder savedStart = rangeEncoder;
         RangeEncoder savedLower = default;
-        _nsqStart.CopyFrom(state.Nsq);
+        _delayedDecisionStart.CopyFrom(_delayedDecision);
         int seedStart = state.Indices.Seed;
         int ecPrevLagStart = state.EcPrevLagIndex;
         int ecPrevSignalStart = state.EcPrevSignalType;
@@ -534,17 +553,48 @@ internal sealed class SilkEncoderCore
                 if (iter > 0)
                 {
                     rangeEncoder = savedStart;
-                    state.Nsq.CopyFrom(_nsqStart);
+                    _delayedDecision.CopyFrom(_delayedDecisionStart);
                     state.Indices.Seed = seedStart;
                     state.EcPrevLagIndex = ecPrevLagStart;
                     state.EcPrevSignalType = ecPrevSignalStart;
                 }
 
-                SilkNsq.Process(
-                    state, state.Nsq, state.Indices, _xfwQ3, state.Pulses,
-                    control.PredCoefQ12[0], control.PredCoefQ12[1], control.LtpCoefQ14, control.Ar2Q13,
-                    control.HarmShapeGainQ14, control.TiltQ14, control.LfShpQ14,
-                    control.GainsQ16, control.PitchL, control.LambdaQ10, control.LtpScaleQ14);
+                control.PredCoefQ12[0].CopyTo(
+                    _delayedDecisionPredictionQ12.AsSpan(0, SilkEncoderMath.MaxLpcOrder));
+                control.PredCoefQ12[1].CopyTo(
+                    _delayedDecisionPredictionQ12.AsSpan(SilkEncoderMath.MaxLpcOrder, SilkEncoderMath.MaxLpcOrder));
+                var nsqParameters = new SilkNsqParameters(
+                    _xfwQ3,
+                    _delayedDecisionPredictionQ12,
+                    control.LtpCoefQ14,
+                    control.Ar2Q13,
+                    control.HarmShapeGainQ14,
+                    control.TiltQ14,
+                    control.LfShpQ14,
+                    control.GainsQ16,
+                    control.PitchL,
+                    state.Indices.SignalType,
+                    state.Indices.QuantOffsetType,
+                    control.LambdaQ10,
+                    control.LtpScaleQ14,
+                    state.Indices.Seed,
+                    state.Indices.NlsfInterpCoefQ2,
+                    state.SubframeCount,
+                    state.SubframeLength,
+                    state.LtpMemLength,
+                    state.PredictLpcOrder,
+                    state.ShapingLpcOrder,
+                    state.WarpingQ16);
+                _delayedDecision.Run(
+                    nsqParameters, _delayedDecisionStates,
+                    _delayedDecisionPulses, _delayedDecisionOutput, out int nsqSeed);
+                // The surviving trellis state may have started from a different seed than the
+                // frame's; the winner's seed is what the decoder must use.
+                state.Indices.Seed = nsqSeed;
+                for (int i = 0; i < frameLength; i++)
+                {
+                    state.Pulses[i] = _delayedDecisionPulses[i];
+                }
 
                 SilkEntropyEncoder.EncodeIndices(ref rangeEncoder, state, frameIndex, conditionalCoding);
                 _lastEncodedIndices.CopyFrom(state.Indices);
@@ -566,7 +616,7 @@ internal sealed class SilkEncoderCore
                 {
                     rangeEncoder = savedLower;
                     _rangeLowerBytes.AsSpan(0, _rangeLowerCount).CopyTo(_rangeBuffer);
-                    state.Nsq.CopyFrom(_nsqLower);
+                    _delayedDecision.CopyFrom(_delayedDecisionLower);
                     state.Shape.LastGainIndex = lastGainIndexLower;
                 }
 
@@ -600,7 +650,7 @@ internal sealed class SilkEncoderCore
                     savedLower = rangeEncoder;
                     _rangeLowerCount = rangeEncoder.RangeBytes;
                     _rangeBuffer.AsSpan(0, _rangeLowerCount).CopyTo(_rangeLowerBytes);
-                    _nsqLower.CopyFrom(state.Nsq);
+                    _delayedDecisionLower.CopyFrom(_delayedDecision);
                     lastGainIndexLower = state.Shape.LastGainIndex;
                 }
             }
