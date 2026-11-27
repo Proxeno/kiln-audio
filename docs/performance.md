@@ -1,4 +1,200 @@
-# Decoder performance baseline (PERF-1)
+# Performance
+
+Kiln.Audio is compared with libopus 1.5.2 on one machine, in process, with the same inputs on both
+sides. This page summarises the latest measurements and names the log section each figure comes
+from; the log itself is under [History](#history). Ratios are Kiln time divided by libopus time,
+so a value above 1.0 means Kiln is slower.
+
+## What is measured and how
+
+- Machine: Apple M5 Max (arm64), macOS 27.0.1. Runtime: .NET 11.0.0 (the projects target
+  `net10.0`; the host is rolled forward because only the .NET 11 runtime is installed).
+- Reference: libopus 1.5.2 built locally with its own NEON intrinsics enabled
+  (`OPUS_ARM_MAY_HAVE_NEON_INTR`, `-O3`), so Kiln is compared with an optimised libopus.
+- Harness: in process on both sides (`bench/native/libopus_bench.c` for libopus, the
+  `Kiln.Audio.Benchmarks` project for Kiln). Only the codec call is timed; no process start-up or
+  file IO. Statistic: best of N passes (decode N = 15 on both sides; encoder tables N = 7).
+- The machine is shared with other work. PERF-1 recorded up to about 15 % run-to-run variation on
+  decode, and ENC-PERF-1 and PERF-2 recorded 20-50 % on some single runs. Treat differences
+  smaller than 10-15 % between two ratios as noise.
+- **Architecture.** Every number is arm64. No x64 benchmark numbers exist in this repository; the
+  x64 AVX2+FMA kernels are parity-tested against scalar but not benchmarked here.
+
+## Decode speed
+
+`OpusDecoder.Decode(packet, short[])` over each whole RFC 8251 vector, 48 kHz output, best of 15.
+Source: "SIMD-2" section, table "Decode ratios (public API, same window as libopus)", "after"
+columns. Times are for the whole vector. The Content column is the TOC census in
+`docs/test-vectors.md`.
+
+| Vector | Content | libopus stereo (ms) | Kiln stereo (ms) | Ratio stereo | Ratio mono |
+| ------ | ------- | ------------------- | ---------------- | ------------ | ---------- |
+| 01 | CELT-only | 36.90 | 36.95 | 1.00 | 1.05 |
+| 02 | SILK NB | 9.05 | 9.28 | 1.03 | 1.08 |
+| 03 | SILK MB | 9.18 | 9.39 | 1.02 | 1.08 |
+| 04 | SILK WB | 12.62 | 13.33 | 1.06 | 1.09 |
+| 05 | Hybrid SWB | 22.64 | 20.76 | 0.92 | 0.99 |
+| 06 | Hybrid FB | 22.39 | 21.12 | 0.94 | 1.03 |
+| 07 | CELT-only | 18.32 | 16.10 | 0.88 | 1.02 |
+| 08 | SILK and CELT frames | 18.55 | 16.61 | 0.90 | 1.00 |
+| 09 | SILK and CELT frames | 35.73 | 37.52 | 1.05 | 1.12 |
+| 10 | Hybrid and CELT frames | 39.94 | 41.41 | 1.04 | 1.09 |
+| 11 | CELT-only | 28.84 | 24.51 | 0.85 | 0.94 |
+| 12 | SILK and hybrid frames, mono-coded | 9.76 | 8.84 | 0.91 | 1.04 |
+
+The ratio ranges from 0.85 to 1.06 with stereo output and from 0.94 to 1.12 with mono output.
+
+## Encode speed
+
+Microseconds per 20 ms frame, CBR, libopus pinned to the same mode and complexity.
+All rows use the 320 s RFC 8251 corpus, best of 7 ("ENC-CELT-1", "Results", after column, for the
+CELT rows; "ENC-NSQ-1" for the SILK and hybrid rows).
+
+| Configuration | Complexity | libopus | Kiln | Ratio | Section |
+| ------------- | ---------- | ------- | ---- | ----- | ------- |
+| CELT stereo 64 kbps | 0 | 18.5 | 25.3 | 1.37 | ENC-CELT-1 |
+| CELT stereo 64 kbps | 5 | 47.2 | 40.2 | 0.85 | ENC-CELT-1 |
+| CELT mono 32 kbps | 0 | 9.5 | 12.7 | 1.34 | ENC-CELT-1 |
+| CELT mono 32 kbps | 5 | 34.4 | 25.7 | 0.75 | ENC-CELT-1 |
+| SILK WB mono 20 kbps | 0 | 44.5 | 103.0 | 2.31 | ENC-NSQ-1 |
+| SILK WB mono 20 kbps | 5 | 135.8 | 121.6 | 0.90 | ENC-NSQ-1 |
+| Hybrid FB mono 32 kbps | 0 | 31.7 | 101.2 | 3.19 | ENC-NSQ-1 |
+| Hybrid FB mono 32 kbps | 5 | 70.0 | 131.7 | 1.88 | ENC-NSQ-1 |
+
+Complexity uses libopus's 0-10 scale. In the CELT encoder, 0 disables transient analysis, TF
+analysis and the spreading decision, 2 enables transient and TF analysis, 3 the spreading
+decision, 4 and above a two-pass coarse-energy trial and 5 and above the pitch pre-filter. In the
+SILK encoder the delayed-decision quantizer uses 1 trellis state at 2-3, 2 at 4-5, 3 at 6-7 and 4
+at 8-10, and 4 at 0-1 (libopus uses 1 there; sections "Complexity mapping", "What SILK-QUAL-1
+changed"). Kiln is slower than libopus at complexity 0 in every row (1.34-3.19x).
+
+ENC-CELT-1 and ENC-NSQ-1 ran in parallel and each measured its own branch. The CELT rows come
+from ENC-CELT-1 and the SILK and hybrid rows from ENC-NSQ-1; the hybrid encoder with both lanes'
+changes combined has not been re-measured (ENC-CELT-1 alone measured hybrid at 130.2 and 152.4 us,
+before the ENC-NSQ-1 SILK changes).
+
+## Encoder quality
+
+The gate is aggregate segmental SNR (20 ms segments, each clamped to [-10, 60] dB; both encoders'
+packets decoded by libopus) at complexity 0, which must not fall below a frozen baseline measured
+with the RFC 6716 Appendix A reference encoder, less 0.05 dB. The libopus 1.5.2 gap is reported by
+the tests but not gated. The frozen figures are in
+`tests/Kiln.Audio.Tests/SilkEncoder/SilkRfcBaseline.cs` and
+`tests/Kiln.Audio.Tests/OpusEncoderTop/HybridRfcBaseline.cs`.
+
+SILK, mono downmix of vectors 02, 03, 04 and 06, 20 ms frames, complexity 0 (source: "SILK encoder
+quality", "Results at complexity 0 (the gate)", latest lane SILK-QUAL-3; in the 60 ms rows ours is
+within 0.13 dB of these). Gap is ours minus libopus.
+
+| Band | kbps | Ours (dB) | RFC reference (dB) | libopus (dB) | Gap (dB) |
+| ---- | ---- | --------- | ------------------ | ------------ | -------- |
+| NB | 8 | 4.01 | 3.04 | 3.60 | +0.41 |
+| NB | 12 | 5.52 | 4.98 | 5.51 | +0.01 |
+| MB | 8 | 4.06 | 2.42 | 2.77 | +1.29 |
+| MB | 12 | 5.34 | 4.66 | 5.01 | +0.33 |
+| MB | 20 | 6.55 | 5.95 | 6.73 | -0.19 |
+| WB | 8 | 3.92 | 1.71 | 1.71 | +2.21 |
+| WB | 12 | 5.01 | 3.58 | 4.50 | +0.52 |
+| WB | 20 | 6.55 | 5.78 | 6.44 | +0.11 |
+
+Fourteen of the sixteen SILK complexity-0 configurations meet or beat libopus; the other two are
+mediumband 20 kbps, 0.19 dB (20 ms) and 0.13 dB (60 ms) behind. At complexity 5 and 10 (reported,
+not gated) the gap to libopus is 0 to 0.6 dB across the matrix ("Complexity 5 and 10").
+
+CELT-only, mono downmix of every vector, 20 ms CBR (source: "Encoder (CELT-only, 48 kHz mono)",
+"Quality (G2)"). Complexity 0: ours 14.342 dB against libopus 13.334 dB at 24 kbps (+1.008) and
+16.197 against 15.237 dB at 32 kbps (+0.960). Complexity 10: +0.026 dB at 24 kbps and -0.351 dB at
+32 kbps.
+
+Hybrid: the gate is `HybridEncoderQualityTests` against frozen RFC figures (super-wideband 24/32
+kbps 5.01/5.76 dB, fullband 24/32 kbps 4.97/5.56 dB). Kiln's and libopus's hybrid figures are
+written by that test to `kiln-hybrid-g2-report.txt` and are not recorded in this file, so no hybrid
+gap to libopus is stated here.
+
+Hybrid, same corpus and metric, complexity 0 (`HybridEncoderQualityTests`, measured 2026-11-27 on
+the 1.0 candidate; RFC figures frozen in `HybridRfcBaseline.cs`):
+
+| Configuration | Ours | RFC | libopus | Gap to libopus |
+| ------------- | ---- | --- | ------- | -------------- |
+| SWB cap, 24 kbps | 6.13 | 5.01 | 5.83 | +0.31 |
+| SWB cap, 32 kbps | 6.24 | 5.76 | 6.31 | -0.07 |
+| FB cap, 24 kbps | 6.13 | 4.97 | 5.77 | +0.36 |
+| FB cap, 32 kbps | 6.24 | 5.56 | 6.27 | -0.03 |
+
+Read these rows with care. `OpusEncoderOptions.Bandwidth` is an upper bound in the automatic path,
+and at these bitrates and complexity 0 the mode selector chooses wideband (24 kbps) or
+super-wideband (32 kbps) whichever cap is set, while the RFC encoder and libopus are forced to the
+named bandwidth with `-bandwidth`. That is why the SWB and FB rows are identical for Kiln, and the
+comparison is between different coded bandwidths. The corpus is band-limited, so this does not
+show in segmental SNR.
+
+`HybridFullbandQualityTests` (added for 1.0) uses a generated 48 kHz signal with content from 13
+to 19 kHz. On it, at 24 and 32 kbps and complexity 0: ours 1.47 and 3.51 dB under either cap; the
+RFC encoder 1.52 and 1.50 dB forced to SWB, -0.12 and 1.07 dB forced to FB; libopus 2.35 and
+2.31 dB forced to SWB, 0.40 and 0.33 dB forced to FB. libopus forced to FB keeps the 13 to 19 kHz
+band within 0.9 to 1.9 dB; Kiln at these bitrates does not code that band (about -77 dB). The
+gate checks band retention at 48 and 64 kbps, where the selector chooses fullband.
+
+## Allocations
+
+`OpusDecoder.Decode` allocated 0 B per frame on the six PERF-1 vectors ("Decode results"). The CELT
+`Encode` allocates nothing after construction, for all four frame durations and both overloads
+(`EncoderAllocationTests`, "Encoder (CELT-only, 48 kHz mono)", "Allocations"). The SILK encoder is
+recorded as zero per frame (`SilkEncoderAllocationTests`, "Encode cost"). A measured allocation
+figure for the hybrid encoder and for the later public decode path is not recorded in this file.
+
+## SIMD coverage
+
+| Kernel set | Selected when | Notes |
+| ---------- | ------------- | ----- |
+| `Avx2FmaKernels` | x64 with AVX2 and FMA3 | 128-bit VEX forms with FMA; no `Vector256` |
+| `AdvSimdArm64Kernels` | arm64 | `AdvSimd`/`AdvSimd.Arm64` directly, fused multiply-add |
+| `Vector128Kernels` | any other host with accelerated `Vector128` (SSE2-only x64, WASM) | portable |
+| `ScalarKernels` | fallback, and `KILN_AUDIO_DISABLE_SIMD=1` | reference path |
+
+All four implement `ICeltKernels`, `ISilkKernels`, `ISilkEncoderKernels` and `IEncoderKernels`. The
+set is chosen once per decoder or encoder instance in its constructor (`AudioKernels.Select()`),
+with no dispatch inside a frame. Each vector set is tested against scalar: `KernelTierParityTests`
+(CELT, within 2e-6 of signal RMS), `SilkDecodeKernelTierParityTests` (integer kernels bit-exact,
+resampler kernels within one 16-bit step), `SilkKernelTierParityTests` and
+`SilkNsqLaneParityTests` (SILK encoder, bit-identical), `EncoderKernelTests`, `SimdParityTests`.
+The x64 set cannot run on the arm64 build machine; the log says x64 CI runs the same tests.
+
+## Reproducing
+
+```bash
+bash scripts/fetch-test-vectors.sh
+bash scripts/build-libopus-oracle.sh --keep-lib          # libopus.a, headers and flags in .oracle/lib
+bash scripts/bench-libopus-inproc.sh pubapi [passes]     # libopus, public-API decode, vectors 01-12
+dotnet <Kiln.Audio.Benchmarks.dll> micro pubapi [passes] # Kiln, same vectors and statistic
+scripts/bench-libopus-inproc.sh encode /path/to/mono48.pcm 48000 1 restricted-lowdelay \
+    <bitrate> 20 <complexity> 1 5                        # libopus encode
+```
+
+`bench-libopus-inproc.sh` prints the libopus build flags and refuses to run if it cannot read them.
+Kiln encoder timings use `EncodeBenchmarks` and `micro enc` in the benchmark project.
+
+## Known gaps
+
+- Decode is not faster everywhere: vector 09 is 1.05x (stereo) and 1.12x (mono), SILK-only vectors
+  02-04 are 1.02-1.06x stereo and 1.08-1.09x mono, hybrid vector 10 is 1.04x and 1.09x (SIMD-2).
+- Encode at complexity 0 is slower than libopus in every measured configuration: CELT mono 1.34x,
+  CELT stereo 1.37x, SILK WB 2.31x, hybrid fullband 3.19x. For SILK, Kiln runs the delayed-decision
+  quantizer at complexity 0 where libopus runs a greedy one (ENC-NSQ-1).
+- Hybrid encode at complexity 5 is 1.88x libopus (ENC-NSQ-1), and the combined ENC-NSQ-1 plus
+  ENC-CELT-1 hybrid figure has not been measured.
+- CELT encode at complexity 0: the greedy PVQ pulse search is about half of the frame time and is
+  still a serial chain (ENC-CELT-1, "Remaining gap").
+- Quality: SILK mediumband 20 kbps at complexity 0 trails libopus by 0.19 dB (20 ms) and 0.13 dB
+  (60 ms); SILK at complexity 5 and 10 trails by up to 0.6 dB in some configurations; CELT-only at
+  complexity 10 and 32 kbps trails by 0.351 dB. SILK `opus_compare` scores are not reported.
+- x64 AVX2+FMA kernels are parity-tested but have no recorded benchmark.
+
+## History
+
+Lane-by-lane measurement log, oldest first. Numbers in older sections are superseded by later ones.
+
+### PERF-1: decoder performance baseline
 
 This is the reproducible performance baseline for Kiln.Audio: how fast it decodes the RFC 8251
 test vectors compared with libopus 1.5.2, plus the cost of the individual kernels and which of
@@ -10,7 +206,7 @@ in-process C harness that times only `opus_decode`/`opus_encode` on data already
 same way the Kiln BenchmarkDotNet jobs time an in-memory loop. **Every libopus number below comes
 from the in-process harness**, so the ratios are like for like.
 
-## Machine and runtime
+#### Machine and runtime
 
 | Item | Value |
 | ---- | ----- |
@@ -30,7 +226,7 @@ on **.NET 11.0.0**; the `Runtime` line in the BenchmarkDotNet summary says so.
 This is a shared machine; repeated runs varied by up to ~15% on the CELT vectors, ~50% on the
 smallest kernel and ~10% on the MDCT kernels. Treat the numbers as indicative, not exact.
 
-## Harness
+#### Harness
 
 `bench/native/libopus_bench.c` is our own small C program; it is not libopus code. It links
 against the oracle's static `libopus.a` and implements two in-memory loops:
@@ -54,7 +250,7 @@ bash scripts/bench-libopus-inproc.sh                  # the six PERF comparison 
 is unchanged. It copies `libopus.a`, the public headers and the exact compile flags to
 `.oracle/lib`, which is gitignored.
 
-### Reference build flags
+##### Reference build flags
 
 The oracle CMake build produced the static library with:
 
@@ -71,7 +267,7 @@ static library on this arm64 build. The Kiln numbers are therefore compared agai
 optimized libopus, not a scalar reference. (The harness itself is compiled with `-O2`; that only
 affects the loop around the library, never the timed codec call.)
 
-## Method
+#### Method
 
 **Kiln.** The `.bit` files are parsed into memory in `[GlobalSetup]`, so no file IO is measured.
 Each benchmark invocation resets the decoder and synthesizer, then decodes the whole vector. The
@@ -89,7 +285,7 @@ in-memory treatment; a value above 1 means Kiln is slower. The SILK comparison s
 at internal-rate PCM while libopus runs its own output path, so it is at worst slightly generous
 to libopus.
 
-## Decode results
+#### Decode results
 
 Frame counts (Opus frames decoded) are 5,524 for 01, 4,186 for 07, 1,501 for 11, 1,185 for 02, 998
 for 03 and 1,265 for 04. Allocations are 0 B for every vector, which is 0 B per frame, before and
@@ -120,7 +316,7 @@ dominated by the bitstream and NLSF work outside the kernels this lane changed, 
 vector is a two-second-scale benchmark on a machine that other lanes share, so treat the SILK
 rows as noise-limited.
 
-## Kernel results
+#### Kernel results
 
 One invocation of each kernel, BenchmarkDotNet mean, 0 B allocated. `Fft480` is new in PERF-1.
 
@@ -141,7 +337,7 @@ measurement of the same `Mdct.Forward` before this restructure). PERF-0 had no s
 benchmark, so the old recursive FFT was only measured through the MDCT; `Fft480` is new in PERF-1.
 The forward and inverse MDCT now meet the PERF-1 target of 6 µs at 960 points.
 
-## SIMD kernels
+#### SIMD kernels
 
 Each kernel lives in `src/Kiln.Audio/Simd/` and has a scalar reference path and a portable
 `Vector128<T>` path (AdvSimd on arm64, SSE on x64); SIMD-1 (below) moved these onto per-ISA kernel sets. No `Vector256`/`Vector512` path is shipped
@@ -187,7 +383,7 @@ every kernel onto its scalar path. `SimdParityTests` runs both paths in-process 
 on every kernel, so the scalar path is exercised in CI without a separate job; running the suite
 with the variable set exercises it end to end.
 
-## PERF-2: decoder hot paths
+### PERF-2: decoder hot paths
 
 PERF-2 targets the CELT entropy and frequency-domain decode plus the SILK synthesis loop. The
 changes are pure optimizations: the SILK output is bit-exact, the final range is exact on every
@@ -206,7 +402,7 @@ varied by up to 40% between runs. The per-stage figures come from two runs with 
 (before on the PERF-1 base, after on this branch); the SILK mediumband row (03) is the clearest
 victim of the noise, since even its untouched decode stage moved by 30%.
 
-### Decode ratios (PERF-2)
+#### Decode ratios (PERF-2)
 
 Per-frame microseconds for the whole vector, best observed mean on each side. `libopus` is the
 fastest of two in-process harness runs. The whole-vector rows were taken at different times, so
@@ -225,7 +421,7 @@ The CELT 07 and SILK 03 rows improved the most (the PVQ/denormalization and LTP 
 respectively). CELT 11 showed no reliable change: its synthesis is dominated by the inverse MDCT,
 which this lane does not own. None of the six vectors reached the ≤1.0 target.
 
-### Stage split (µs per Opus frame, 0 B allocated)
+#### Stage split (µs per Opus frame, 0 B allocated)
 
 | Vector | Mode | Stage | Before | After |
 | ------ | ---- | ----- | ------ | ----- |
@@ -248,7 +444,7 @@ which this lane does not own. None of the six vectors reached the ≤1.0 target.
 "Synthesis" for CELT is denormalization, the inverse MDCT with overlap-add, the post-filter and
 de-emphasis; for SILK it is NLSF→LPC, excitation reconstruction, LTP and LPC synthesis.
 
-### Kernel A/B (same process, one benchmark run)
+#### Kernel A/B (same process, one benchmark run)
 
 | Kernel | Work per invocation | Scalar | Vector | Speedup |
 | ------ | ------------------- | ------ | ------ | ------- |
@@ -256,7 +452,7 @@ de-emphasis; for SILK it is NLSF→LPC, excitation reconstruction, LTP and LPC s
 | CELT denormalization (`DecKernels.ScaleCopy`) | 176-coefficient band | 64.3 ns | 20.7 ns | 3.1x |
 | CELT PVQ pulse scaling (`DecKernels.ScaleIntToFloat`) | 176 pulses | 70.9 ns | 19.4 ns | 3.7x |
 
-### Algorithmic changes
+#### Algorithmic changes
 
 - The PVQ `V(N,K)` table is a single flat `uint[]` with a fixed row stride instead of a
   two-dimensional array, so the several reads per bin in `cwrs` cost one offset add rather than a
@@ -270,7 +466,7 @@ de-emphasis; for SILK it is NLSF→LPC, excitation reconstruction, LTP and LPC s
   its reads (`lag >= 10`), falling back to the reference scalar chain otherwise. `Smulwb` is
   evaluated in 32-bit lanes exactly as in `SilkLpcKernel`.
 
-## Remaining gaps and next ideas
+### Remaining gaps and next ideas
 
 1. **CELT decode** (ratios in the PERF-2 decode table above). After PERF-2 the per-frame split is
    roughly half bitstream/frequency-domain decode and half synthesis. The single largest synthesis
@@ -293,7 +489,7 @@ de-emphasis; for SILK it is NLSF→LPC, excitation reconstruction, LTP and LPC s
    targets are the NLSF→LPC conversion and the excitation reconstruction, neither of which is in
    this lane's file set, plus vectorizing the LPC analysis filter.
 
-## PERF-3: real-input MDCT and SILK decode hot paths
+### PERF-3: real-input MDCT and SILK decode hot paths
 
 PERF-3 replaces the CELT MDCT/IMDCT with the reference's real-input structure: **one
 size-`N/4` complex FFT per direction** instead of the two size-`N/2` DCT-IV FFTs of PERF-1
@@ -316,7 +512,7 @@ output is unchanged.
 including the bit-exact SILK LPC parity theory for orders 10 and 16), `CeltVectorConformanceTests`,
 `OpusDecoderConformanceTests` and `SilkPcmOracleTests` all pass. Every measured path allocates 0 B.
 
-### MDCT kernel cost
+#### MDCT kernel cost
 
 `Perf3Measure` (`dotnet run -c Release --no-build --project bench/Kiln.Audio.Benchmarks -- micro
 mdct`, run under the machine-wide lock) times the kernels with a Stopwatch best-of-25 batch after a
@@ -336,7 +532,7 @@ same machine.
 Both 960 targets (≤ 2.5 µs) and both 120 targets (≤ 0.4 µs) are met. The size-480 complex FFT
 alone is 1.11/1.12 µs (forward/inverse), so the FFT is now roughly half of the 960-block cost.
 
-### SILK kernel cost
+#### SILK kernel cost
 
 Same Stopwatch harness (`... -- micro silk`). The LPC synthesis figure is one 80-sample subframe.
 
@@ -347,7 +543,7 @@ Same Stopwatch harness (`... -- micro silk`). The LPC synthesis figure is one 80
 | LPC synthesis, order 10 | **0.21** | was 0.29; unrolled |
 | LPC synthesis, order 16 | 0.53 | was 0.55; unrolled, serial dependency dominates |
 
-### Decode ratios
+#### Decode ratios
 
 libopus from `scripts/bench-libopus-inproc.sh`, Kiln from `... -- micro decode` (tier-1 warmed;
 decode + synthesis + int16), both run under the machine-wide lock. The two runs were consecutive;
@@ -366,7 +562,7 @@ for CELT and noisier for SILK.
 CELT 11's synthesis stage fell from PERF-2's 20.15 µs to 8.26 µs/frame, which is the MDCT halving
 showing up. No vector reaches the ≤ 1.0 target.
 
-### Remaining gaps
+#### Remaining gaps
 
 1. **CELT decode is now bitstream/frequency-domain bound.** The per-frame split is 6.46/2.53/0.30 µs
    for vector 01 and 16.31/8.26/0.88 µs for 11 (bitstream+frequency / synthesis / int16). The
@@ -378,7 +574,7 @@ showing up. No vector reaches the ≤ 1.0 target.
 3. **`Vector256` is emulated on the arm64 target**, so the existing `Vector128` radix butterflies
    stay; the measured FFT does not benefit from a 256-bit path here.
 
-## PERF-4: CELT bitstream decode and SILK WB synthesis
+### PERF-4: CELT bitstream decode and SILK WB synthesis
 
 PERF-4 profiles the CELT frequency-domain decoder at stage granularity, then attacks the stages it
 measured as dominant. The changes are bit-exact where the path is integer (final range, PVQ
@@ -400,7 +596,7 @@ stage that contains another (the partition recursion contains PVQ and the angle 
 reported once per nesting level, so its column overcounts. The top-level columns are the reliable
 comparison; the leaf columns show shares.
 
-### Stage profile (instrumented, µs per frame)
+#### Stage profile (instrumented, µs per frame)
 
 The instrumentation itself costs roughly 1-3 µs/frame at these call counts, so the table is for
 attribution, not for absolute totals.
@@ -443,7 +639,7 @@ reconstruction, NLSF→LPC and LTP rewhitening:
 | synthesis: LTP (rewhitening + filter) | 0.375 | 0.481 | 0.685 |
 | synthesis: stereo unmix | 0.178 | 0.269 | 0.421 |
 
-### Decode ratios (same-window)
+#### Decode ratios (same-window)
 
 `... micro decode` (tier-1 warmed) and `scripts/bench-libopus-inproc.sh`, built and run back to
 back under the machine-wide lock. Kiln total is decode + synthesis + int16.
@@ -462,7 +658,7 @@ loop cut vector 04 from 1.40 to 1.14 and the NB/MB vectors to 1.14-1.15. CELT is
 noise because its time is in PVQ work that this lane only trimmed at the edges. **No vector meets
 the ≤ 1.0 target.**
 
-### Changes
+#### Changes
 
 - **Division-free SILK symbol decode.** `RangeDecoder.DecodePdf` decodes a 256-total probability
   table by inverting the search condition: instead of computing `fs = 256 - (val/(rng/256) + 1)`
@@ -493,7 +689,7 @@ the ≤ 1.0 target.**
 Static tables are built once at type initialization; the decode and synthesis paths still allocate
 0 B per frame.
 
-### Remaining gaps
+#### Remaining gaps
 
 1. **CELT PVQ is the wall.** `AlgUnquant`/`Cwrsi` plus the spread rotation are three quarters or
    more of CELT frequency-domain decode on all three vectors (the leaf timers overcount by one
@@ -511,7 +707,7 @@ Static tables are built once at type initialization; the decode and synthesis pa
    Decode is dominated by the excitation symbol stream, which has no obvious redundancy left.
 4. **Zero allocations hold**, and the profiler is compiled out of Release builds.
 
-## PERF-5: CELT PVQ, rotation and de-emphasis hot paths
+### PERF-5: CELT PVQ, rotation and de-emphasis hot paths
 
 Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window per
 change set). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
@@ -539,7 +735,7 @@ synthesis 2.61 / 2.69 / 8.33 to 2.16 / 2.24 / 6.68.
 Not done: closed-form small-N unranking, vectorized inverse MDCT changes, fusing int16 conversion.
 Remaining gap is mostly the PVQ band-decode path (about 6 us/frame on 01) and the inverse MDCT.
 
-## PERF-6: CELT quant_bands/renorm/IMDCT hot paths
+### PERF-6: CELT quant_bands/renorm/IMDCT hot paths
 
 Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window each
 side). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
@@ -569,7 +765,7 @@ Not done: closed-form N=2/3/4 unranking, explicit-stack theta recursion, fused d
 int16. PVQ decode (about 6 us/frame on 01) is unchanged and is the remaining gap: roughly 1.2 us
 of the 1.18 ratio on 01 is decode. Target of 1.0 is not met on any vector.
 
-## PERF-7: CELT PVQ/quant_bands decode hot paths
+### PERF-7: CELT PVQ/quant_bands decode hot paths
 
 Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window per
 side). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process. Gates: 375 tests
@@ -609,7 +805,7 @@ gain), explicit-stack theta recursion and closed-form N=3/4 unranking (the leaf 
 the two range-decoder divides, the data-dependent unrank branches and `1/sqrt`; none of these is
 removed by restructuring). Remaining gap on 01/07 is about 0.9 us/frame decode-side; 11 is 3 % over.
 
-## PERF-8: division-free range decode (measured, no gain, not merged as code)
+### PERF-8: division-free range decode (measured, no gain, not merged as code)
 
 Same-window measurement on the M5 Max (`micro decode`, and `scripts/bench-libopus-inproc.sh` in the
 same lock window). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
@@ -638,12 +834,12 @@ therefore not in the divides; the next step needs a cycle-level profile (Instrum
 `QuantBand`/`Cwrsi` branch mispredicts rather than more arithmetic substitution. The target of 1.0
 is not met on 01/07; vector 11 is within 2 %.
 
-## Encoder (CELT-only, 48 kHz mono)
+### Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
 48 kHz, mono, CBR, 20 ms frames. It uses the same machine and runtime as the decoder baseline.
 
-### Method
+#### Method
 
 **Fair libopus reference.** Since `bench/native/libopus_bench.c` and
 `scripts/bench-libopus-inproc.sh` merged with PERF-1, libopus is measured **in process**, the same
@@ -674,7 +870,7 @@ it at 24 and 32 kbps, 20 ms, CBR, and both outputs are decoded with libopus. Seg
 the tool's naive DFT is linear in audio length, and a per-vector excerpt keeps the gate test to a
 couple of minutes.
 
-### Complexity mapping
+#### Complexity mapping
 
 | Complexity | What it enables in this encoder |
 | --- | --- |
@@ -695,7 +891,7 @@ matching libopus; it is signalled off below that, so the complexity-0 rows above
 The pre-filter search uses the reference's decimated correlation with a Vector128/Vector256 dot
 product and a scalar reference.
 
-### Encode speed (fair, in process)
+#### Encode speed (fair, in process)
 
 The corpus is 320.62 s of audio encoded as 16,031 frames of 20 ms. Per-frame time is the best of
 five libopus passes and the best of fifteen Kiln passes. Ratios above 1 mean Kiln is slower.
@@ -725,7 +921,7 @@ quality is 10 at both rates. At that matched quality Kiln takes **17.70 µs** ag
 **43.77 µs** at 32 kbps (2.5x faster) and **14.63 µs** against **52.96 µs** at 24 kbps (3.6x
 faster). The iso-quality target is met.
 
-### Stage breakdown (32 kHz, complexity 0)
+#### Stage breakdown (32 kHz, complexity 0)
 
 A stopwatch-instrumented build (since removed) timed each stage in the frame pipeline. On this
 shared machine the instrumented pass itself varied by several microseconds between runs, so the
@@ -758,7 +954,7 @@ instrumented pass: scalar 5.75 µs against vector 1.36 µs for N=96/K=32, and 5.
 for N=176/K=40 (1.56x). The large-band case is limited by the serial argmax comparison, not by
 arithmetic.
 
-### SIMD kernels
+#### SIMD kernels
 
 The encoder now uses `Vector128<T>` in `src/Kiln.Audio/Simd/EncPvqKernel.cs` and
 `src/Kiln.Audio/Simd/EncKernels.cs`; every kernel keeps a scalar reference and a parity test in
@@ -776,7 +972,7 @@ complexity 2 and above. At complexity 0 and 1 the reference TF gate above change
 (the G1 interop tests run at complexity 5 and are unaffected; the G2 quality run decodes the
 complexity-0 stream from both codecs and reports no range mismatch).
 
-### Quality (G2)
+#### Quality (G2)
 
 | Bitrate | Complexity | Ours segSNR (dB) | libopus segSNR (dB) | Gap (ours − libopus) | Ours `opus_compare` | libopus `opus_compare` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -798,7 +994,7 @@ lossy decode that is being re-encoded: the metric charges the second generation 
 same input, libopus scores +25% at 64 kbps and +74% at 128 kbps, so the negative values are a
 property of the double compression, not of the comparison.
 
-### Input rates, stereo and VBR (ENC-2)
+#### Input rates, stereo and VBR (ENC-2)
 
 CELT runs internally at 48 kHz. For API rates below 48 kHz the encoder uses the reference's
 original upsampler: one input sample is zero-stuffed every `48000/rate` internal samples, then the
@@ -816,7 +1012,7 @@ thresholds from the effective rate, and the per-frame dual-stereo analysis. `Use
 false) enables the reference's target-plus-reservoir rate control; `ConstrainedVbr` (default true)
 applies the reservoir bound. Defaults keep the previous constant-bitrate behaviour.
 
-### Kernel results
+#### Kernel results
 
 Direct in-process measurements (best of five, five thousand iterations each); the machine is
 shared, so treat sub-10% differences as noise.
@@ -834,7 +1030,7 @@ shared, so treat sub-10% differences as noise.
 Small vectors gain little from `Vector128` (the comparison chain dominates); the 96-wide band that
 carries most of the pulses is where the 4.2x applies.
 
-### Algorithmic delay
+#### Algorithmic delay
 
 The stream delay is the 2.5 ms overlap: a sample at input index `i` appears at output index
 `i + 120` at 48 kHz. An impulse test measures 119-120 samples. The decoder look-ahead is therefore
@@ -842,13 +1038,13 @@ The stream delay is the 2.5 ms overlap: a sample at input index `i` appears at o
 budget **one frame plus 2.5 ms**: `N + 120` samples, which is 1080 samples (22.5 ms) for the
 primary 20 ms frame.
 
-### Allocations
+#### Allocations
 
 `Encode` allocates zero bytes after construction, for all four frame durations, for the 16-bit
 overload and the float overload. `EncoderAllocationTests` proves this with
 `GC.GetAllocatedBytesForCurrentThread` over a whole file.
 
-### Remaining gaps and next ideas
+#### Remaining gaps and next ideas
 
 1. **Complexity 0 is still 1.4-1.6x behind libopus at the same complexity** (17.70 vs 12.68 µs at
    32 kbps; 14.63 vs 9.18 µs at 24 kbps). The fixed forward MDCT is about 5 µs, i.e. roughly half
@@ -868,13 +1064,13 @@ overload and the float overload. `EncoderAllocationTests` proves this with
 5. **Front end.** Pre-emphasis, band energy and normalise are now equal to or below 0.4 µs each;
    band energy deliberately keeps its scalar summation order because it feeds the bitstream.
 
-## SILK encoder quality
+### SILK encoder quality
 
 This section records the SILK encoder's quality against libopus 1.5.2, the methodology, and what
 SILK-QUAL-1, SILK-QUAL-2 and SILK-QUAL-3 changed. It is evidence, not a CI gate; the gate lives in
 `SilkEncoderQualityTests`.
 
-### Method
+#### Method
 
 - Corpus: the mono downmix of RFC 8251 vectors 02, 03, 04 and 06, which is the corpus SILK-ENC-1
   used. Tuning decisions were checked on vectors 04 and 06 as a held-out pair.
@@ -896,7 +1092,7 @@ The earlier SILK-ENC-1 harness searched delays on a fixed four-sample grid and u
 own resampler as the reference. At 12 kHz that misaligned up to two samples and understated every
 band; the numbers below supersede it and are not comparable with the SILK-ENC-1 report.
 
-### Results at complexity 0 (the gate)
+#### Results at complexity 0 (the gate)
 
 `ours` and `libopus` are aggregate segmental SNR in dB over the four vectors; positive `gap` means
 we beat libopus.
@@ -927,7 +1123,7 @@ at both frame durations and wideband 20 kbps at both frame durations now meet or
 mediumband 20 kbps still trails, by 0.19 dB (20 ms) and 0.13 dB (60 ms); both are improvements over
 SILK-QUAL-2's 0.21 and 0.30 dB.
 
-### Complexity 5 and 10
+#### Complexity 5 and 10
 
 Complexity 5 and 10 are reported, not gated. The delayed-decision quantizer and warped shaping pay
 off most at the low rates, and are what produce the WB 8 kbps wins (3.55 dB at c5 and 3.84 dB at
@@ -936,7 +1132,7 @@ change at every complexity, so c5/c10 improved as well. The remaining c5/c10 gap
 0-0.6 dB across the matrix: WB 8 kbps beats it by 0.3-0.6 dB, while NB 8 kbps trails by 0.3-0.5 dB
 and the 12-20 kbps cases trail by 0.1-0.6 dB.
 
-### What SILK-QUAL-1 changed
+#### What SILK-QUAL-1 changed
 
 1. **Delayed-decision NSQ at every complexity.** `SilkEncoderCore` now always runs
    `SilkNsqDelayedDecision` instead of the greedy `SilkNsq`, with trellis snapshots for the rate
@@ -955,7 +1151,7 @@ and the 12-20 kbps cases trail by 0.1-0.6 dB.
    ~48.9 bytes per 20 ms frame (19.6 kbps) and recovers 0.1-0.2 dB. A larger boost overfills the
    budget and loses quality at 60 ms, so 3 dB is the chosen point.
 
-### What SILK-QUAL-2 changed
+#### What SILK-QUAL-2 changed
 
 All three are encoder-side decisions; the bitstream stays valid and the decoder follows the
 transmitted flags.
@@ -980,7 +1176,7 @@ shaping strength and richer c0 analysis. Richer analysis at complexity 0 (the co
 and stronger shaping both made quality worse; the three above are the survivors and were checked
 on vectors 04 and 06 as a held-out pair.
 
-### What SILK-QUAL-3 changed
+#### What SILK-QUAL-3 changed
 
 All four changes act only in the high-rate regime (`HighRate != 0`, i.e. above 1.2 bits per
 internal-rate sample: NB 12 kbps, MB 20 kbps, WB 20 kbps). The ten low-rate configurations that
@@ -1014,7 +1210,7 @@ that side-information bits do not buy excitation pulses in this rate range.
 Payload bytes: the high-rate changes stay in the same range as SILK-QUAL-2 (MB/WB about 13-14%
 above libopus). The narrowband SNR lift raises narrowband from about 5% to about 15% above libopus.
 
-### Encode cost
+#### Encode cost
 
 Measured with a stopwatch over the whole vector 02 corpus (1251 frames of 20 ms, MB, 20 kbps) on
 the shared build machine, so treat the numbers as indicative:
@@ -1038,7 +1234,7 @@ mediumband lambda produces fewer excitation pulses). The added work is one multi
 scale, one multiply and a few adds for the allocation normalization, and a lookup for the lambda,
 all allocation-free. The ratio against SILK-QUAL-2 is about 1.0x, well inside the 1.5x budget.
 
-### Remaining gap and next ideas
+#### Remaining gap and next ideas
 
 SILK-QUAL-3 leaves one gap: MB 20 kbps, 0.19 dB (20 ms) and 0.13 dB (60 ms) behind libopus, both
 improved from SILK-QUAL-2. Every other complexity-0 configuration meets or beats libopus. The four
@@ -1054,7 +1250,7 @@ SILK-QUAL-3's 1.5x. What remains for mediumband:
 3. **Rate-distortion NLSF/gain selection that accounts for the noise-shaping loop**, which the
    plain squared-error RD of SILK-QUAL-3 did not capture.
 
-### Frozen RFC baseline and the ratchet
+#### Frozen RFC baseline and the ratchet
 
 The hard gate at complexity 0 is a ratchet, not a fixed libopus target. The RFC 6716 Appendix A
 figures are frozen in `tests/Kiln.Audio.Tests/SilkEncoder/SilkRfcBaseline.cs`, measured with this
@@ -1066,7 +1262,7 @@ the fourteen configurations that now beat or meet libopus are pinned to its figu
 mediumband 20 kbps rows to their new measured score minus 0.05 dB, so the gain is locked in. The
 remaining gaps stay reported in the test output and in the table above.
 
-## PUB-PERF-1: public-API benchmark, SILK output resampler, CELT output path
+### PUB-PERF-1: public-API benchmark, SILK output resampler, CELT output path
 
 The earlier "ratio" tables timed internal stages (`CeltDecoder`/`CeltSynthesizer`, SILK at its
 internal rate), not what a user calls. PUB-PERF-1 adds a benchmark of the shipped entry point and
@@ -1145,14 +1341,14 @@ SILK and hybrid vectors (02-06, 10, 12) went from 5-16x libopus to 1.4-2.0x. The
 those is the SILK decode itself, not the output stage. Two `SilkEncoderQualityTests` rows (MB and
 WB, 60 ms, 20 kbps, complexity 0) fail on unmodified train-next as well and are unrelated.
 
-## SIMD-1: per-ISA kernel sets and the CELT decode/synthesis kernels
+### SIMD-1: per-ISA kernel sets and the CELT decode/synthesis kernels
 
 Owner directive: scalar loops that should be vectorized, and 256-bit code that runs emulated on
 Apple silicon, are red flags; the video codec avoids both with an intrinsics abstraction. SIMD-1
 adds the audio equivalent and moves the CELT decode/synthesis kernels onto it. The design and the
 per-loop audit that motivated it are in the lane's perf review (section 3 and the audit table).
 
-### Kernel-set design
+#### Kernel-set design
 
 - `ICeltKernels` (`src/Kiln.Audio/Simd/Kernels/ICeltKernels.cs`) is an interface of **static
   abstract** members. Tiers are `struct`s, and the CELT decoder and synthesizer are generic over
@@ -1180,7 +1376,7 @@ per-loop audit that motivated it are in the lane's perf review (section 3 and th
   `CeltPostFilterKernel`) remain as the scalar/portable building blocks and for the encoder; the
   tiers forward to them where nothing changed, so `SimdParityTests` still guards them.
 
-### What moved, loop by loop
+#### What moved, loop by loop
 
 | Loop | Before | Now |
 | --- | --- | --- |
@@ -1212,7 +1408,7 @@ uses the 128-bit VEX forms with FMA: 256-bit widening of the elementwise kernels
 could not be validated on the arm64 build machine. The FFT factor order (4,4,2,3,5) is kept so the
 encoder's forward MDCT is not perturbed.
 
-### Measurements
+#### Measurements
 
 One lock window on the M5 Max: `micro decode` (tier-1 warmed; decode + synthesis + int16) from a
 `train-next` baseline worktree and from this branch, alternated five times each, best of five;
@@ -1234,7 +1430,7 @@ Float output changed only by FMA and reassociation: the conformance vectors, fin
 tests pass unchanged and `KernelTierParityTests` bounds every tier against `ScalarKernels` at
 2e-6 of the signal RMS.
 
-## SIMD-3: encoder kernel sets (SILK + CELT analysis)
+### SIMD-3: encoder kernel sets (SILK + CELT analysis)
 
 SIMD-3 extends the SIMD-1 kernel-set design to the encoder. The same tier structs (`ScalarKernels`,
 `Vector128Kernels`, `AdvSimdArm64Kernels`, `Avx2FmaKernels`) now also implement `ISilkEncoderKernels`
@@ -1245,7 +1441,7 @@ read `AudioKernels.Select()` once in their constructors and switch once per fram
 uses 128-bit `pmaddwd` (`X86IntOps`, not runnable on the arm64 build machine, covered by the same parity
 tests on x64 CI).
 
-### Profile (us per 20 ms frame, `micro enc run ... profile`, `KILN_ENC_PROFILE` build)
+#### Profile (us per 20 ms frame, `micro enc run ... profile`, `KILN_ENC_PROFILE` build)
 
 | Stage | SILK WB 20k cx0 | SILK WB 20k cx5 | CELT st 64k cx0 | CELT st 64k cx5 |
 | --- | --- | --- | --- | --- |
@@ -1259,7 +1455,7 @@ tests on x64 CI).
 
 The SILK delayed-decision NSQ (60-63%) and CELT quant-all-bands (38-67%) dominate. Hybrid was not profiled.
 
-### What moved
+#### What moved
 
 - `InnerProd`, `InnerProd64`, `CorrLags` (four lags per pass, target loaded once), `LpcAnalysisFilter`
   (transposed form, eight samples per pass) feed pitch analysis (stage 1 and 3 correlations, the whitening
@@ -1270,7 +1466,7 @@ The SILK delayed-decision NSQ (60-63%) and CELT quant-all-bands (38-67%) dominat
   accumulation structure of the single-lag dot (unfused on every vector tier), so encoder output is unchanged.
 - `EncProf` (`[Conditional("KILN_ENC_PROFILE")]`) stage marks, and `micro enc` in the benchmark harness.
 
-### Measurements (best of 7, whole 320 s corpus, CBR, M5 Max; libopus pinned to the same mode)
+#### Measurements (best of 7, whole 320 s corpus, CBR, M5 Max; libopus pinned to the same mode)
 
 | Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
 | --- | --- | --- | --- | --- | --- |
@@ -1281,7 +1477,7 @@ The SILK delayed-decision NSQ (60-63%) and CELT quant-all-bands (38-67%) dominat
 | Hybrid FB mono 32k cx0 | 31.44 | not measured | 134.37 | n/a | 4.27 |
 | Hybrid FB mono 32k cx5 | 69.65 | not measured | 169.54 | n/a | 2.43 |
 
-### Remaining gap
+#### Remaining gap
 
 Not done in this lane: the NSQ delayed-decision loop (per-sample `LpcPrediction`, the serial warped shaping chain
 and `CopyState`; the right design is lanes = states), the CELT pulse coder (O(n*k) `Icwrs`, replace with the
@@ -1289,14 +1485,14 @@ table rank), encoder spread rotation and Haar through `TK.Rotate`/`TK.Haar`, for
 vector fold and post-write, transient/TF/spread vector passes, the strided short-block IMDCT pre-rotation, and
 Burg's inner loops and `SumSqrShift`. The 3x SILK cx0 gap is mostly the deliberate four-state trellis.
 
-## SIMD-2: SILK decode kernel set and the public SILK path
+### SIMD-2: SILK decode kernel set and the public SILK path
 
 SIMD-1 moved the CELT decode/synthesis kernels onto per-ISA kernel sets and left SILK alone. After
 PUB-PERF-1 the SILK/hybrid vectors (02-06, 10, 12) were still 1.26-2.05x libopus through the
 public API. SIMD-2 profiles that path stage by stage, adds `ISilkKernels` to the same tier structs
 and `AudioKernels.Select()` selection, and moves the loops that dominate onto it.
 
-### Profile first (public API, 48 kHz stereo, instrumented build)
+#### Profile first (public API, 48 kHz stereo, instrumented build)
 
 `dotnet <Benchmarks.dll> micro silkpub` (built with `-p:DefineConstants=KILN_PERF4_PROFILE`) times
 each stage of `OpusDecoder.Decode(packet, short[])` over vectors 02-06, 10 and 12. Microseconds per
@@ -1324,7 +1520,7 @@ so it was load-bound at about 27 cycles per output, with a horizontal sum and a 
 output on top. The per-stage timers are instrumented (a few percent overhead), so only the
 non-instrumented table below is a ratio.
 
-### What changed
+#### What changed
 
 - **Kernel set.** `ISilkKernels` (`Simd/Kernels/ISilkKernels.cs`) is implemented by the same four
   tier structs as `ICeltKernels` (`ScalarKernels`, `Vector128Kernels`, `AdvSimdArm64Kernels`,
@@ -1359,7 +1555,7 @@ non-instrumented table below is a ratio.
   same symbol and the same state (`SilkIcdfDecodeTests` compares every table on random streams),
   with one multiply and compare per candidate. About 0.26 us of 2.77.
 
-### Decode ratios (public API, same window as libopus)
+#### Decode ratios (public API, same window as libopus)
 
 Before: the unmodified tree, libopus run in the same script. After: this branch. Ratio below 1.0
 means Kiln is faster.
@@ -1403,7 +1599,7 @@ Float output differs from the previous resampler only by fused multiply-add and 
 (`SilkPcmOracleTests`), and `SilkDecodeKernelTierParityTests` pins every kernel of every tier to
 the scalar tier (bit-exact for the integer kernels, one step for the resampler kernels).
 
-### Remaining gap
+#### Remaining gap
 
 - SILK-only 8/12/16 kHz stereo (02-04) are at 1.02-1.06x and mono (02-04) at 1.08-1.09x, 05/06/12
   at or below 1.0x stereo. What is left is the excitation range decode (2.5-2.8 us of 8.5-11.3 us,
@@ -1417,7 +1613,7 @@ the scalar tier (bit-exact for the integer kernels, one step for the resampler k
   (band decode and the band 17-21 synthesis), which SIMD-1 already moved. The packet is a mix of
   CELT-only and hybrid frames, so the CELT share is what keeps it above 1.0.
 
-## ENC-NSQ-1: SILK encoder NSQ + analysis hot paths
+### ENC-NSQ-1: SILK encoder NSQ + analysis hot paths
 
 The delayed-decision quantizer (`SilkNsqDelayedDecision`) now runs one SIMD lane per trellis state
 (`SilkNsqVec<TOps>`, state-major SoA histories; the winner search and state replacement stay scalar). The
@@ -1439,21 +1635,21 @@ encoder, all tiers) and `SilkNsqLaneParityTests` (against a verbatim copy of the
 NSQ stage (WB 20k): cx0 92.0 -> 59.0 us/frame, cx5 103.3 -> 71.3 us/frame (the stage includes every CBR
 rate-loop iteration).
 
-### Remaining gap
+#### Remaining gap
 
 WB 20k is high-rate (one trellis state), so cx0 cost is per-sample work, not trellis width: Kiln runs the warped
 shaping and delayed-decision path where libopus runs its plain greedy quantizer. A single-state fast path that is
 bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
 are what is left for cx0 and hybrid.
 
-## ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
+### ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
 
 Goal: CELT encode at or below 1.0x libopus. Same machine and harness as SIMD-3 (`micro enc run`, the libopus in-process
 encode bench, best of 7, whole corpus, CBR). The "before" window was disturbed by other lanes on the machine (its
 libopus numbers are 1.4x the quiet-machine ones for stereo), so the before ratios are each taken against the libopus
 figure of the same window.
 
-### What moved
+#### What moved
 
 - **Pulse index.** `CeltEncoderVq.EncodePulses` is now O(n) table reads: the exact inverse of the decoder's `Cwrsi`
   walk, reading the decoder's `PvqCwrs`/`PvqTable` cells (made `internal`). The O(n*k) `Icwrs`/`Unext` recurrence and
@@ -1473,7 +1669,7 @@ figure of the same window.
   for contiguous blocks.
 - `EncProf` marks 30-35 split quant-all-bands; `micro enc run` prints an FNV hash of all packets.
 
-### Results (us per 20 ms frame)
+#### Results (us per 20 ms frame)
 
 | Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
 | --- | --- | --- | --- | --- | --- |
@@ -1490,14 +1686,14 @@ Profile, stereo 64k (us): cx0 prefilter 2.4 to 0.4, MDCT 4.2 to 1.6, quant-all-b
 16.5 to 7.5, transient 5.5 to 2.3, spreading decision 5.4 to 0.2, TF 2.5 to 2.1, MDCT 4.0 to 1.9, quant-all-bands
 24.5 to 21.3. cx0 quant split: PVQ search 12.7, pulse index plus entropy 2.3, theta 2.0, Haar/Hadamard 1.3, rotation 0.5.
 
-### Output changes
+#### Output changes
 
 Not byte-identical to SIMD-3 for the configs above (hashes differ): the tier FFT and `TK.Rotate`/`TK.Haar` use fused
 multiply-add on arm64. Kernels written for this lane are unfused and exact. The CELT encoder, interop, KernelTier,
 Mdct/Fft and conformance gates pass (609 of 610 in the first window; the one failure was the new test's own
 reference, replaced).
 
-### Remaining gap
+#### Remaining gap
 
 The greedy PVQ pulse placement is 12.7 us of the cx0 25 us: a serial chain per pulse (the placed pulse updates xy/yy,
 which the next pulse's compare needs) plus a mispredicted branch whenever a group beats the running best. An exact
