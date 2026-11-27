@@ -260,7 +260,13 @@ internal sealed class OpusDecoderCore
             return DecodeFecFrame(data, audioSize, pcm);
         }
 
-        pcm[..(audioSize * _channels)].Clear();
+        if (mode == OpusMode.Silk)
+        {
+            // Only a SILK-only frame accumulates into an unwritten buffer (the optional 2.5 ms
+            // CELT flush covers just its start); CELT-only and hybrid frames overwrite every
+            // sample with the CELT layer before SILK is added.
+            pcm[..(audioSize * _channels)].Clear();
+        }
 
         bool transition = _prevMode is not null
             && ((mode == OpusMode.Celt && _prevMode != OpusMode.Celt && !_prevRedundancy)

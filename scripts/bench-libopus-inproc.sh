@@ -12,6 +12,7 @@
 # Usage:
 #   scripts/bench-libopus-inproc.sh                 # the six default vectors
 #   scripts/bench-libopus-inproc.sh 01 07 11        # selected vectors
+#   scripts/bench-libopus-inproc.sh pubapi [passes]  # vectors 01-12, 48 kHz stereo and mono
 #   scripts/bench-libopus-inproc.sh decode <bit> <rate> <channels> [iters]
 #   scripts/bench-libopus-inproc.sh encode <pcm> <rate> <channels> \
 #       <application> <bitrate> <frame_ms> <complexity> <cbr> [iters]
@@ -42,6 +43,22 @@ fi
 
 echo "== libopus reference build =="
 cat "${lib_dir}/flags.txt"
+
+# The CMake cache of the build tree is the authoritative record of how the linked library was
+# configured; fail rather than benchmark against a library whose flags cannot be read.
+cache="${oracle_root}/build/CMakeCache.txt"
+if [[ ! -r "${cache}" ]]; then
+    echo "cannot read ${cache}; refusing to benchmark a library with unknown flags" >&2
+    exit 1
+fi
+for key in CMAKE_BUILD_TYPE CMAKE_C_FLAGS_RELEASE OPUS_FIXED_POINT OPUS_HARDENING; do
+    line="$(grep -E "^${key}:" "${cache}" || true)"
+    if [[ -z "${line}" ]]; then
+        echo "${key} is missing from ${cache}; refusing to benchmark" >&2
+        exit 1
+    fi
+    echo "cmake ${line}"
+done
 if grep -q 'OPUS_ARM_MAY_HAVE_NEON_INTR' "${lib_dir}/flags.txt"; then
     echo "simd=arm64 NEON intrinsics enabled (compiled into the static library)"
 elif grep -q 'OPUS_X86_MAY_HAVE_SSE' "${lib_dir}/flags.txt"; then
@@ -63,6 +80,17 @@ run_vector() {
     fi
     "${bench_bin}" decode "${file}" "${rate}" "${channels}"
 }
+
+if [[ "${1:-}" == "pubapi" ]]; then
+    passes="${2:-15}"
+    for channels in 2 1; do
+        for n in 01 02 03 04 05 06 07 08 09 10 11 12; do
+            echo -n "vector=${n} "
+            "${bench_bin}" decode "${vectors_dir}/testvector${n}.bit" 48000 "${channels}" "${passes}" | grep '^mode='
+        done
+    done
+    exit 0
+fi
 
 if [[ $# -eq 0 ]]; then
     run_vector 01 48000 2
