@@ -1288,3 +1288,131 @@ and `CopyState`; the right design is lanes = states), the CELT pulse coder (O(n*
 table rank), encoder spread rotation and Haar through `TK.Rotate`/`TK.Haar`, forward MDCT on the tier FFT with a
 vector fold and post-write, transient/TF/spread vector passes, the strided short-block IMDCT pre-rotation, and
 Burg's inner loops and `SumSqrShift`. The 3x SILK cx0 gap is mostly the deliberate four-state trellis.
+
+## SIMD-2: SILK decode kernel set and the public SILK path
+
+SIMD-1 moved the CELT decode/synthesis kernels onto per-ISA kernel sets and left SILK alone. After
+PUB-PERF-1 the SILK/hybrid vectors (02-06, 10, 12) were still 1.26-2.05x libopus through the
+public API. SIMD-2 profiles that path stage by stage, adds `ISilkKernels` to the same tier structs
+and `AudioKernels.Select()` selection, and moves the loops that dominate onto it.
+
+### Profile first (public API, 48 kHz stereo, instrumented build)
+
+`dotnet <Benchmarks.dll> micro silkpub` (built with `-p:DefineConstants=KILN_PERF4_PROFILE`) times
+each stage of `OpusDecoder.Decode(packet, short[])` over vectors 02-06, 10 and 12. Microseconds per
+packet, vector 02 (8 kHz SILK, 20 ms) and vector 04 (16 kHz SILK):
+
+| Stage | 02 before | 02 after | 04 before | 04 after |
+| --- | --- | --- | --- | --- |
+| range decode, all parameters | 3.38 | 3.11 | 3.68 | 3.40 |
+| of which excitation pulses | 2.77 | 2.51 | 3.06 | 2.80 |
+| NLSF to LPC | 0.40 | 0.39 | 0.67 | 0.67 |
+| excitation reconstruction | 0.45 | 0.45 | 0.81 | 0.83 |
+| LTP block (rewhitening, sLTP scaling, LTP) | 0.43 | 0.19 | 0.69 | 0.22 |
+| LPC synthesis | 0.56 | 0.42 | 1.14 | 0.97 |
+| stereo unmix | 0.18 | 0.04 | 0.36 | 0.07 |
+| synthesis, whole frame | 2.50 | 1.99 | 4.18 | 3.27 |
+| output deinterleave | 0.11 | 0.02 | 0.22 | 0.02 |
+| **output resampler** | **8.39** | **2.89** | **8.69** | **4.13** |
+| float conversion and interleave | 0.89 | 0.12 | 0.88 | 0.12 |
+| int16 conversion | 0.20 | 0.20 | 0.20 | 0.20 |
+| public `Decode`, whole packet | 16.30 | 8.49 | 18.67 | 11.31 |
+
+The output resampler was half the packet. Its FIR is ~518 taps at 48 kHz (86 taps per phase at an
+8 kHz input), and the old kernel did one dot product per output: two loads per fused multiply-add,
+so it was load-bound at about 27 cycles per output, with a horizontal sum and a scalar round per
+output on top. The per-stage timers are instrumented (a few percent overhead), so only the
+non-instrumented table below is a ratio.
+
+### What changed
+
+- **Kernel set.** `ISilkKernels` (`Simd/Kernels/ISilkKernels.cs`) is implemented by the same four
+  tier structs as `ICeltKernels` (`ScalarKernels`, `Vector128Kernels`, `AdvSimdArm64Kernels`,
+  `Avx2FmaKernels`, each a `partial struct` with a `*.SilkDecode.cs` file). `SilkSynthesis`,
+  `SilkOutput` and `SilkResampler` take the tier once at construction (`AudioKernels.Select()`,
+  honouring `KILN_AUDIO_DISABLE_SIMD` and `AudioKernels.Scope`) and enter a generic body with one
+  `switch` per frame; PLC and FEC reuse the same dispatchers. The shared vector bodies,
+  `SilkDecVec<TOps>`, are written against `ISilkOps` (`PortableSilkOps`, `ArmSilkOps`,
+  `X86SilkOps`); the x64 tier is 128-bit VEX with FMA, and there is no `Vector256`/`Vector<T>`
+  anywhere. (The SIMD-3 encoder kernels share the tier structs but have their own `SilkVec`;
+  the decode names carry a `Dec` prefix.)
+- **Bit-exact integer kernels.** `Smulwb` is one `SQDMULH` on arm64 (`(2 * a * (c << 15)) >> 32`
+  equals `(a * c) >> 16` exactly, and cannot saturate for a 16-bit `c`) and the split-multiply
+  identity elsewhere; `Smulww` is `SMULL` + `SHRN` on arm64 and `pmuldq` on x64. LPC and LTP
+  synthesis use them; LTP rewhitening (`LpcAnalysis`) is eight outputs per step across the tap
+  loop (`SMLAL`, two accumulators) instead of a nested scalar FIR; sLTP scaling and gain
+  adjustment are vector loops; the stereo unmix does the side prediction, the saturated L/R and the
+  interleave in one pass, eight samples at a time, with the ramped weights as lane vectors;
+  deinterleave and the mono average are `UZP1/UZP2` and `SHADD`.
+- **Resampler.** For the integer upsampling ratios 3, 4 and 6 (8, 12 and 16 kHz to 48 kHz) the
+  kernel works over time lanes: four consecutive input samples per vector, one accumulator per
+  phase, the coefficients stored `[tap][phase]` so each load feeds every phase by element
+  (`FMLA` by lane on arm64), and two blocks in flight. Loads per output fall from about 44 to
+  about 11. The result is transposed to time-major, rounded to nearest even and saturated in
+  registers (`FCVTNS`, `SQXTN`). Other ratios use a four-outputs-at-a-time dot product with a
+  transposed reduction. Input conversion is a kernel too.
+- **Output stages.** Float conversion and interleave are kernels (0.89 to 0.12 us); the SILK-only
+  frame no longer clears the output and adds, it copies (`OpusDecoderCore`), and the hybrid/FEC
+  merge is a vector add.
+- **Range decode of the excitation.** The pulse-count, pulse-split, LSB and sign tables now have
+  inverse-CDF forms built once, and `RangeDecoder.DecodeIcdf8` replaces `DecodePdf` for them: the
+  same symbol and the same state (`SilkIcdfDecodeTests` compares every table on random streams),
+  with one multiply and compare per candidate. About 0.26 us of 2.77.
+
+### Decode ratios (public API, same window as libopus)
+
+Before: the unmodified tree, libopus run in the same script. After: this branch. Ratio below 1.0
+means Kiln is faster.
+
+48 kHz stereo, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 36.89 | 36.07 | 0.98 | 36.90 | 36.95 | 1.00 |
+| 02 | 9.05 | 18.52 | 2.05 | 9.05 | 9.28 | 1.03 |
+| 03 | 9.08 | 17.87 | 1.97 | 9.18 | 9.39 | 1.02 |
+| 04 | 12.70 | 21.00 | 1.65 | 12.62 | 13.33 | 1.06 |
+| 05 | 22.68 | 28.50 | 1.26 | 22.64 | 20.76 | 0.92 |
+| 06 | 22.19 | 28.46 | 1.28 | 22.39 | 21.12 | 0.94 |
+| 07 | 18.17 | 16.23 | 0.89 | 18.32 | 16.10 | 0.88 |
+| 08 | 18.43 | 17.03 | 0.92 | 18.55 | 16.61 | 0.90 |
+| 09 | 35.35 | 37.81 | 1.07 | 35.73 | 37.52 | 1.05 |
+| 10 | 39.41 | 44.84 | 1.14 | 39.94 | 41.41 | 1.04 |
+| 11 | 28.40 | 24.42 | 0.86 | 28.84 | 24.51 | 0.85 |
+| 12 | 9.69 | 16.20 | 1.67 | 9.76 | 8.84 | 0.91 |
+
+48 kHz mono, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 32.22 | 33.73 | 1.05 | 32.58 | 34.21 | 1.05 |
+| 02 | 7.33 | 14.18 | 1.93 | 7.32 | 7.87 | 1.08 |
+| 03 | 7.35 | 13.76 | 1.87 | 7.52 | 8.13 | 1.08 |
+| 04 | 10.33 | 16.57 | 1.60 | 10.44 | 11.35 | 1.09 |
+| 05 | 18.14 | 23.82 | 1.31 | 18.21 | 17.99 | 0.99 |
+| 06 | 17.93 | 23.70 | 1.32 | 18.55 | 19.02 | 1.03 |
+| 07 | 14.51 | 15.22 | 1.05 | 14.89 | 15.21 | 1.02 |
+| 08 | 14.34 | 14.77 | 1.03 | 14.71 | 14.73 | 1.00 |
+| 09 | 31.27 | 35.88 | 1.15 | 31.68 | 35.44 | 1.12 |
+| 10 | 33.93 | 40.00 | 1.18 | 34.29 | 37.51 | 1.09 |
+| 11 | 24.09 | 23.04 | 0.96 | 24.16 | 22.65 | 0.94 |
+| 12 | 8.21 | 14.92 | 1.82 | 8.30 | 8.60 | 1.04 |
+
+Float output differs from the previous resampler only by fused multiply-add and summation order
+(at most one 16-bit step, at a rounding tie); the SILK synthesis is bit-exact
+(`SilkPcmOracleTests`), and `SilkDecodeKernelTierParityTests` pins every kernel of every tier to
+the scalar tier (bit-exact for the integer kernels, one step for the resampler kernels).
+
+### Remaining gap
+
+- SILK-only 8/12/16 kHz stereo (02-04) are at 1.02-1.06x and mono (02-04) at 1.08-1.09x, 05/06/12
+  at or below 1.0x stereo. What is left is the excitation range decode (2.5-2.8 us of 8.5-11.3 us,
+  a serial bit-by-bit walk of the shell tree that libopus does at about the same speed), the
+  resampler at its fused multiply-add floor (about 22 FMA per output with the current 518-tap
+  prototype; a shorter prototype would change the frequency response and the calibrated alignment
+  delays), NLSF to LPC and the excitation LCG (both serial), and the int16 conversion (0.2 us; a
+  SILK-only direct int16 path would remove it).
+- Hybrid (10) is 1.04x stereo and 1.09x mono. In the instrumented profile the SILK work is about
+  4 us per packet (range decode 1.5, synthesis 0.8, resampler 1.4) of 28 us; the rest is CELT
+  (band decode and the band 17-21 synthesis), which SIMD-1 already moved. The packet is a mix of
+  CELT-only and hybrid frames, so the CELT share is what keeps it above 1.0.

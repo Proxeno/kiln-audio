@@ -597,6 +597,84 @@ internal static class SilkTables
         return pdf.Length - 1;
     }
 
+    /// <summary>
+    /// Converts a forward PDF whose entries sum to 256 to the inverse-CDF form
+    /// <see cref="RangeDecoder.DecodeIcdf8"/> reads: <c>256 - cumulative</c> per symbol, ending
+    /// in zero. Throws if the table does not sum to 256 or starts with a zero-probability symbol.
+    /// </summary>
+    internal static byte[] IcdfOf(byte[] pdf)
+    {
+        var icdf = new byte[pdf.Length];
+        int cumulative = 0;
+        for (int k = 0; k < pdf.Length; k++)
+        {
+            cumulative += pdf[k];
+            if (k == 0 && cumulative == 0)
+            {
+                throw new InvalidOperationException("A SILK PDF starts with a zero-probability symbol.");
+            }
+
+            icdf[k] = (byte)(256 - cumulative);
+        }
+
+        if (cumulative != 256)
+        {
+            throw new InvalidOperationException("A SILK PDF does not sum to 256.");
+        }
+
+        return icdf;
+    }
+
+    private static byte[][] IcdfRows(byte[][] rows)
+    {
+        var result = new byte[rows.Length][];
+        for (int i = 0; i < rows.Length; i++)
+        {
+            result[i] = IcdfOf(rows[i]);
+        }
+
+        return result;
+    }
+
+    /// <summary>Inverse-CDF form of <see cref="PulseCountPdf"/>.</summary>
+    internal static readonly byte[][] PulseCountIcdf = IcdfRows(PulseCountPdf);
+
+    private static readonly byte[][] PulseSplit16Icdf = IcdfRows(PulseSplit16Pdf);
+    private static readonly byte[][] PulseSplit8Icdf = IcdfRows(PulseSplit8Pdf);
+    private static readonly byte[][] PulseSplit4Icdf = IcdfRows(PulseSplit4Pdf);
+    private static readonly byte[][] PulseSplit2Icdf = IcdfRows(PulseSplit2Pdf);
+
+    /// <summary>Inverse-CDF form of <see cref="LsbPdf"/>.</summary>
+    internal static readonly byte[] LsbIcdf = IcdfOf(LsbPdf);
+
+    /// <summary>Inverse-CDF form of <see cref="SignPdf"/>.</summary>
+    internal static readonly byte[][][][] SignIcdf = BuildSignIcdf();
+
+    private static byte[][][][] BuildSignIcdf()
+    {
+        var result = new byte[SignPdf.Length][][][];
+        for (int a = 0; a < SignPdf.Length; a++)
+        {
+            result[a] = new byte[SignPdf[a].Length][][];
+            for (int b = 0; b < SignPdf[a].Length; b++)
+            {
+                result[a][b] = IcdfRows(SignPdf[a][b]);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Returns the inverse-CDF pulse-split table for a partition size and pulse count.</summary>
+    internal static ReadOnlySpan<byte> PulseSplitIcdf(int partitionSize, int pulseCount) => partitionSize switch
+    {
+        16 => PulseSplit16Icdf[pulseCount - 1],
+        8 => PulseSplit8Icdf[pulseCount - 1],
+        4 => PulseSplit4Icdf[pulseCount - 1],
+        2 => PulseSplit2Icdf[pulseCount - 1],
+        _ => throw new ArgumentOutOfRangeException(nameof(partitionSize), partitionSize, "Unknown partition size."),
+    };
+
     /// <summary>Returns the pulse-split PDF for a partition size and pulse count (Tables 47 to 50).</summary>
     /// <param name="partitionSize">Partition size: 16, 8, 4 or 2.</param>
     /// <param name="pulseCount">Pulse count in the partition, 1 to 16.</param>
