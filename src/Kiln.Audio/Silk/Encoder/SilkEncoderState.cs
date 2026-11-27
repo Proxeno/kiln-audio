@@ -261,6 +261,7 @@ internal sealed class SilkEncoderState
     internal int PacketSizeMs;
     internal int FrameCounter;
     internal int Complexity;
+    internal int HighRate;
     internal int NStatesDelayedDecision;
     internal int UseInterpolatedNlsfs;
     internal int ShapingLpcOrder;

@@ -129,6 +129,7 @@ internal ref struct RangeDecoder
         return (uint)((_nbitsTotal * 8) - lg);
     }
 
+
     /// <summary>
     /// Computes the first step of symbol decoding: the value <c>fs</c> in [0, ft) (RFC 6716 §4.1.2).
     /// </summary>
@@ -282,6 +283,67 @@ internal ref struct RangeDecoder
         _rng = previous - s;
         Normalize();
         return ret;
+    }
+
+    /// <summary>
+    /// Decodes a symbol from a forward probability table whose total frequency is 256
+    /// (RFC 6716 §4.1.3.3), without the integer divide the generic path needs.
+    /// </summary>
+    /// <param name="pdf">
+    /// The probability table: the entries sum to 256 and the symbol <c>k</c> occupies
+    /// <c>[fl[k], fl[k]+pdf[k])</c>.
+    /// </param>
+    /// <returns>The decoded symbol, or the last index for a malformed table.</returns>
+    /// <remarks>
+    /// The generic <see cref="Decode"/> path computes <c>fs</c> with <c>val / (rng/256)</c>.
+    /// Inverting the search condition lets the loop compare <c>val</c> against
+    /// <c>(256 - fh[k]) * (rng/256)</c> instead, which trades one hardware divide for one
+    /// multiply per candidate symbol. The arithmetic is identical, so the symbol and the
+    /// state update are bit-for-bit those of the divide-based path.
+    /// </remarks>
+    public int DecodePdf(ReadOnlySpan<byte> pdf)
+    {
+        uint ext = _rng >> 8;
+        if (ext == 0)
+        {
+            _error = true;
+            _ext = 0;
+            return pdf.Length - 1;
+        }
+
+        _ext = ext;
+        uint d = _val;
+        uint fl = 0;
+        uint fh = 0;
+        int symbol = -1;
+        for (int k = 0; k < pdf.Length; k++)
+        {
+            fl = fh;
+            fh += pdf[k];
+            if (fh == 0)
+            {
+                // A zero-probability symbol can never be selected; the comparison below would
+                // otherwise mis-handle the one code value that saturates the range.
+                continue;
+            }
+
+            if (d >= (256u - fh) * ext)
+            {
+                symbol = k;
+                break;
+            }
+        }
+
+        if (symbol < 0)
+        {
+            // The table sums to less than 256: take the last symbol rather than stall, exactly
+            // as the generic path does.
+            Update(fh, 256, 256);
+            return pdf.Length - 1;
+        }
+
+        Update(fl, fh, 256);
+        return symbol;
     }
 
     /// <summary>

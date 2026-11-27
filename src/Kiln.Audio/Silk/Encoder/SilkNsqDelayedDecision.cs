@@ -141,9 +141,33 @@ internal sealed class SilkNsqDelayedDecision
         _ => MaxStates,
     };
 
-    /// <summary>Copies the complete quantizer state, so the rate-control loop can roll back.</summary>
-    /// <param name="other">The state to copy from; it must have the same geometry.</param>
+    /// <summary>
+    /// Copies the persistent quantizer state from <paramref name="other"/>. The rate-control loop
+    /// uses this to rewind to the start of a frame before trying a new gain.
+    /// </summary>
+    /// <param name="other">The quantizer to snapshot from or restore.</param>
     internal void CopyFrom(SilkNsqDelayedDecision other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        other._xq.AsSpan().CopyTo(_xq);
+        other._sLtpShpQ14.AsSpan().CopyTo(_sLtpShpQ14);
+        other._sLpcQ14.AsSpan().CopyTo(_sLpcQ14);
+        other._sAr2Q14.AsSpan().CopyTo(_sAr2Q14);
+        _sLfArShpQ14 = other._sLfArShpQ14;
+        _lagPrev = other._lagPrev;
+        _sLtpBufIdx = other._sLtpBufIdx;
+        _sLtpShpBufIdx = other._sLtpShpBufIdx;
+        _prevGainQ16 = other._prevGainQ16;
+        _rewhiteFlag = other._rewhiteFlag;
+        LastCostQ10 = other.LastCostQ10;
+    }
+
+    /// <summary>
+    /// Copies the complete quantizer state, including every trellis state's history, so a second
+    /// quantizer (the LBRR path) starts exactly where this one stands.
+    /// </summary>
+    /// <param name="other">The state to copy from; it must have the same geometry.</param>
+    internal void CopyFullFrom(SilkNsqDelayedDecision other)
     {
         other._xq.AsSpan().CopyTo(_xq);
         other._sLtpShpQ14.AsSpan().CopyTo(_sLtpShpQ14);

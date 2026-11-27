@@ -170,16 +170,30 @@ internal sealed partial class CeltSynthesizer
                 $"The PCM destination must hold {samples * channels} samples.", nameof(pcmOut));
         }
 
+        long profileStart = Perf4Profile.Start();
+        long stageStart = Perf4Profile.Start();
         Denormalise(frame, samples, streamChannels, channels);
+        Perf4Profile.Stop(17, stageStart);
 
         for (int channel = 0; channel < channels; channel++)
         {
+            stageStart = Perf4Profile.Start();
             BuildTimeSignal(frame, samples, channel);
+            Perf4Profile.Stop(18, stageStart);
+
+            stageStart = Perf4Profile.Start();
             ApplyPostFilter(frame, samples, channel);
+            Perf4Profile.Stop(19, stageStart);
+
+            stageStart = Perf4Profile.Start();
             Deemphasise(samples, channel, pcmOut, channels);
+            Perf4Profile.Stop(20, stageStart);
         }
 
+        stageStart = Perf4Profile.Start();
         CapturePlcState(frame);
+        Perf4Profile.Stop(22, stageStart);
+        Perf4Profile.Stop(21, profileStart);
     }
 
     /// <summary>Denormalizes the normalized bands and maps the stream channels to the output channels.</summary>

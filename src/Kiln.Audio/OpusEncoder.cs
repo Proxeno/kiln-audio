@@ -3,6 +3,7 @@
 using Kiln.Audio.Celt;
 using Kiln.Audio.Celt.Encoder;
 using Kiln.Audio.Encoder;
+using Kiln.Audio.Entropy;
 using Kiln.Audio.Silk.Encoder;
 
 namespace Kiln.Audio;
@@ -10,18 +11,25 @@ namespace Kiln.Audio;
 /// <summary>Opus (RFC 6716) encoder.</summary>
 /// <remarks>
 /// <para>
-/// <see cref="OpusApplication.RestrictedLowDelay"/> selects the CELT-only encoder: mono or stereo,
-/// 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10, 20, 40 or 60 ms frames, constant or variable
-/// bitrate, and the pitch pre-filter. A 40 or 60 ms frame is encoded as two or three 20 ms frames
-/// in one code 1 or code 3 packet, exactly as the reference handles CELT durations above 20 ms.
-/// <see cref="OpusApplication.Voip"/> selects the SILK-only encoder (mono or stereo, 10, 20, 40 or
-/// 60 ms, at <see cref="OpusEncoderOptions.Bandwidth"/> narrowband, mediumband or wideband), with
-/// optional in-band FEC and DTX. <see cref="OpusApplication.Audio"/> keeps its CELT mapping.
+/// <see cref="OpusApplication.Voip"/> and <see cref="OpusApplication.Audio"/> select the
+/// automatic mode policy for mono 48 kHz 10 and 20 ms frames: each frame is coded as SILK-only,
+/// hybrid (SILK wideband plus CELT from band 17) or CELT-only from the bitrate, a per-frame
+/// voice/music estimate, the application, the <see cref="OpusEncoderOptions.Bandwidth"/> cap and
+/// the reference's decision thresholds. The SILK internal bandwidth is fixed at construction
+/// (wideband unless the cap is narrower). With <see cref="OpusEncoderOptions.UseInbandFec"/> the
+/// SILK layer is the multi-channel packet encoder, so SILK and hybrid frames carry LBRR.
 /// </para>
 /// <para>
-/// Hybrid mode and automatic mode switching are not implemented and are rejected with
-/// <see cref="NotSupportedException"/>. A Voip request outside the SILK modes (2.5 or 5 ms, or a
-/// super-wideband/fullband bandwidth hint) keeps the pre-SILK behaviour and encodes with CELT.
+/// Other Voip configurations select one encoder directly: SILK-only for mono or stereo 10 to
+/// 60 ms at a SILK bandwidth, and CELT for the rest (2.5 or 5 ms, super-wideband/fullband
+/// hints). The CELT encoder supports mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10,
+/// 20, 40 or 60 ms frames, constant or variable bitrate, and the pitch pre-filter; a 40 or 60 ms
+/// frame is two or three 20 ms frames in one code 1 or code 3 packet.
+/// <see cref="OpusApplication.RestrictedLowDelay"/> always selects CELT-only.
+/// </para>
+/// <para>
+/// The SILK-only path supports stereo, in-band FEC and DTX. The CELT-only path rejects in-band
+/// FEC and DTX.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
@@ -32,7 +40,8 @@ namespace Kiln.Audio;
 public sealed class OpusEncoder : IDisposable
 {
     private readonly CeltEncoder? _encoder;
-    private readonly SilkStereoPacketEncoder? _silk;
+    private readonly SilkEncoderCore? _silk;
+    private readonly SilkStereoPacketEncoder? _silkPacket;
     private readonly int _silkFrameSamples;
     private readonly byte _silkToc;
     private readonly OpusFrameDuration _tocDuration;
@@ -41,6 +50,17 @@ public sealed class OpusEncoder : IDisposable
     private readonly int _inputFrameSamples;
     private readonly short[] _conversionBuffer;
     private readonly byte[] _subFrameData;
+
+    // Automatic mode selection (Voip/Audio, mono, 48 kHz, 10 or 20 ms).
+    private readonly OpusModeSelector? _selector;
+    private readonly CeltEncoder? _autoCelt;
+    private readonly CeltRedundantEncoder? _redundantCelt;
+    private readonly ISilkLayerEncoder? _silkLayer;
+    private readonly OpusBandwidth _autoSilkBandwidth;
+    private readonly OpusBandwidth _autoMaxBandwidth;
+    private readonly int _autoFrameSamples;
+    private int _voiceEstimate;
+    private uint _autoRange;
     private bool _disposed;
 
     /// <summary>The length of a DTX packet: the TOC byte and an empty payload (RFC 6716 §3.2.1).</summary>
@@ -55,6 +75,80 @@ public sealed class OpusEncoder : IDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
+
+        Options = options;
+
+        // Automatic per-frame mode selection uses the SILK and CELT encoders side by side. The
+        // SILK layer is mono and 48 kHz only, and hybrid frames are 10 or 20 ms (§4.5.2). DTX is
+        // handled by the fixed SILK path, where it can suppress whole packets.
+        bool autoMode = options.Application != OpusApplication.RestrictedLowDelay
+            && options.Channels == 1
+            && options.SampleRate == 48000
+            && options.FrameDuration is OpusFrameDuration.Ms10 or OpusFrameDuration.Ms20
+            && !options.UseDtx;
+        if (autoMode)
+        {
+            _autoMaxBandwidth = options.Bandwidth ?? OpusBandwidth.Fullband;
+            _autoSilkBandwidth = options.Bandwidth switch
+            {
+                OpusBandwidth.Narrowband => OpusBandwidth.Narrowband,
+                OpusBandwidth.Mediumband => OpusBandwidth.Mediumband,
+                _ => OpusBandwidth.Wideband,
+            };
+
+            int frameDurationMs = options.FrameDuration == OpusFrameDuration.Ms10 ? 10 : 20;
+            int silkRate = _autoSilkBandwidth switch
+            {
+                OpusBandwidth.Narrowband => 8000,
+                OpusBandwidth.Mediumband => 12000,
+                _ => 16000,
+            };
+
+            _selector = new OpusModeSelector();
+            if (options.UseInbandFec)
+            {
+                // The multi-channel packet encoder writes the VAD bits, LBRR flags, redundant
+                // frames and the SILK frame into the packet's coder, which is what the hybrid and
+                // SILK-only writers need for in-band FEC.
+                _silkPacket = new SilkStereoPacketEncoder(
+                    48000,
+                    silkRate,
+                    frameDurationMs,
+                    options.BitrateBps,
+                    options.Complexity,
+                    options.UseCbr,
+                    channels: 1,
+                    useInbandFec: true,
+                    options.PacketLossPercent,
+                    useDtx: false);
+                _silkLayer = new SilkFecLayerAdapter(_silkPacket);
+            }
+            else
+            {
+                _silk = new SilkEncoderCore(
+                    48000, silkRate, frameDurationMs, options.BitrateBps, options.Complexity, options.UseCbr);
+                _silkLayer = new SilkLayerAdapter(_silk);
+            }
+
+            _autoCelt = new CeltEncoder(
+                options.FrameDuration,
+                options.BitrateBps,
+                options.Complexity,
+                channels: 1,
+                48000,
+                options.UseVbr,
+                options.ConstrainedVbr);
+            _redundantCelt = new CeltRedundantEncoder(Math.Clamp(options.BitrateBps, 3200, 257 * 1600), options.Complexity);
+            _autoFrameSamples = frameDurationMs * 48;
+
+            // The reference seeds its voice estimate from the application and refines it with a
+            // running speech/music classification (opus_encoder.c, voice_ratio).
+            _voiceEstimate = options.Application == OpusApplication.Voip ? 115 : 48;
+            _conversionBuffer = new short[_autoFrameSamples];
+            _subFrameData = [];
+            _tocDuration = options.FrameDuration;
+            return;
+        }
 
         // SILK owns Voip at SILK frame durations and a SILK bandwidth, mono or stereo. Anything
         // else that asks for Voip keeps the pre-SILK behaviour and encodes with CELT, so existing
@@ -87,8 +181,7 @@ public sealed class OpusEncoder : IDisposable
                 _ => throw new NotSupportedException("Unsupported SILK frame duration."),
             };
 
-            Options = options;
-            _silk = new SilkStereoPacketEncoder(
+            _silkPacket = new SilkStereoPacketEncoder(
                 options.SampleRate,
                 internalRate,
                 frameDurationMs,
@@ -162,6 +255,7 @@ public sealed class OpusEncoder : IDisposable
             options.ConstrainedVbr);
         _subFrameSamples = _encoder.FrameSamples;
         _inputFrameSamples = _subFrameSamples * _subFrameCount * options.Channels;
+        _silkFrameSamples = _inputFrameSamples;
         _conversionBuffer = new short[_inputFrameSamples];
 
         // VBR may use the whole maximum frame; CBR uses only the configured size.
@@ -175,7 +269,9 @@ public sealed class OpusEncoder : IDisposable
     /// Gets the range-coder final value of the most recently encoded frame. For a packet stream,
     /// this is the value a conformant decoder must report after decoding the packet.
     /// </summary>
-    public uint FinalRange => _silk?.FinalRange ?? (_encoder?.FinalRange ?? 0);
+    public uint FinalRange => _selector is not null
+        ? _autoRange
+        : _silkPacket?.FinalRange ?? (_encoder?.FinalRange ?? 0);
 
     /// <summary>Encodes one frame of interleaved 16-bit PCM into an Opus packet.</summary>
     /// <param name="pcm">
@@ -193,7 +289,13 @@ public sealed class OpusEncoder : IDisposable
     public int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_silk is not null)
+
+        if (_selector is not null)
+        {
+            return EncodeAuto(pcm, packet);
+        }
+
+        if (_silkPacket is not null)
         {
             if (pcm.Length != _silkFrameSamples)
             {
@@ -211,7 +313,7 @@ public sealed class OpusEncoder : IDisposable
             }
 
             packet[0] = _silkToc;
-            int silkPayload = _silk.Encode(pcm, packet[1..]);
+            int silkPayload = _silkPacket.Encode(pcm, packet[1..]);
             if (silkPayload == 0)
             {
                 // RFC 6716 Appendix A: an all-DTX packet carries the TOC byte and no payload.
@@ -296,6 +398,137 @@ public sealed class OpusEncoder : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>
+    /// Encodes one frame with automatic SILK/hybrid/CELT selection (RFC 6716 Appendix A,
+    /// <c>opus_encoder.c</c>). The SILK internal bandwidth is fixed at construction, so the mode
+    /// and CELT bandwidth follow the selector while a SILK-only frame keeps the configured
+    /// bandwidth.
+    /// </summary>
+    private int EncodeAuto(ReadOnlySpan<short> pcm, Span<byte> packet)
+    {
+        if (pcm.Length != _autoFrameSamples)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The frame must contain exactly {_autoFrameSamples} samples; got {pcm.Length}."),
+                nameof(pcm));
+        }
+
+        if (packet.Length < 4)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant($"The packet buffer must hold at least 4 bytes; got {packet.Length}."),
+                nameof(packet));
+        }
+
+        var request = new OpusModeRequest(Options.BitrateBps, Options.Application, channels: 1, Options.FrameDuration)
+        {
+            Complexity = Options.Complexity,
+            UseVbr = Options.UseVbr,
+            MaxBandwidth = _autoMaxBandwidth,
+            MaxDataBytes = packet.Length,
+            SilkAllowsBandwidthSwitch = true,
+            VoiceEstimate = UpdateVoiceEstimate(pcm),
+        };
+        OpusModeDecision decision = _selector!.Decide(request);
+
+        bool hybrid = decision.Mode == OpusMode.Hybrid && _autoSilkBandwidth == OpusBandwidth.Wideband;
+        if (hybrid)
+        {
+            OpusBandwidth bandwidth = (int)decision.Bandwidth > (int)OpusBandwidth.Wideband
+                ? decision.Bandwidth
+                : OpusBandwidth.SuperWideband;
+            int endBand = OpusTransitionEncoder.EndBandOf(bandwidth);
+            int bytes = OpusHybridEncoder.Encode(
+                _silkLayer!,
+                _autoCelt!,
+                _redundantCelt!,
+                pcm,
+                48000,
+                _autoFrameSamples,
+                Options.BitrateBps,
+                packet.Length - 1,
+                endBand,
+                decision.Redundancy,
+                decision.CeltToSilk,
+                packet[1..],
+                out _autoRange);
+            packet[0] = OpusTocBuilder.Build(OpusMode.Hybrid, bandwidth, Options.FrameDuration, stereo: false);
+            return bytes + 1;
+        }
+
+        if (decision.Mode == OpusMode.Celt)
+        {
+            int endBand = OpusTransitionEncoder.EndBandOf(decision.Bandwidth);
+            int minimum = Options.UseVbr ? 2 : _autoCelt!.FrameBytes + 1;
+            if (packet.Length < minimum)
+            {
+                throw new ArgumentException(
+                    FormattableString.Invariant($"The packet buffer must hold at least {minimum} bytes; got {packet.Length}."),
+                    nameof(packet));
+            }
+
+            packet[0] = OpusTocBuilder.Build(OpusMode.Celt, decision.Bandwidth, Options.FrameDuration, stereo: false);
+            int celtBytes = _autoCelt!.EncodeFrame(pcm, packet[1..], 0, endBand);
+            _autoRange = _autoCelt.FinalRange;
+            return celtBytes + 1;
+        }
+
+        // SILK-only, or a hybrid request that the configured SILK bandwidth cannot satisfy.
+        int frameBytes = OpusTransitionEncoder.EncodeSilkOnlyFrame(
+            _silkLayer!,
+            _redundantCelt!,
+            pcm,
+            _autoFrameSamples,
+            Options.BitrateBps,
+            packet.Length - 1,
+            _autoSilkBandwidth,
+            decision.Redundancy,
+            decision.CeltToSilk,
+            packet[1..],
+            out _autoRange);
+        packet[0] = OpusTocBuilder.Build(OpusMode.Silk, _autoSilkBandwidth, Options.FrameDuration, stereo: false);
+        return frameBytes + 1;
+    }
+
+    /// <summary>
+    /// Updates the running speech/music estimate from cheap time-domain features: short-term
+    /// energy gates silence, and the zero-crossing rate separates low-frequency voiced speech
+    /// from noisier music. The estimate is smoothed so mode changes follow the signal with
+    /// hysteresis rather than flipping every frame.
+    /// </summary>
+    /// <param name="pcm">One frame of mono input.</param>
+    /// <returns>The smoothed estimate, 0 (music) to 127 (voice).</returns>
+    private int UpdateVoiceEstimate(ReadOnlySpan<short> pcm)
+    {
+        long energy = 0;
+        int crossings = 0;
+        short previous = pcm.Length > 0 ? pcm[0] : (short)0;
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            int sample = pcm[i];
+            energy += (long)sample * sample;
+            if (i > 0 && (sample >= 0) != (previous >= 0))
+            {
+                crossings++;
+            }
+
+            previous = (short)sample;
+        }
+
+        double meanSquare = pcm.Length == 0 ? 0 : energy / (double)pcm.Length;
+        if (meanSquare < 256)
+        {
+            // Silence carries no classification evidence.
+            return _voiceEstimate;
+        }
+
+        bool voiceLike = crossings < pcm.Length / 8;
+        int instant = voiceLike ? 115 : 48;
+        _voiceEstimate = ((_voiceEstimate * 7) + instant + 4) / 8;
+        return _voiceEstimate;
+    }
+
     private byte BuildToc()
     {
         // CELT-only configurations 16..31 (RFC 6716 §3.1, Table 2): the bandwidth group depends on
@@ -309,5 +542,35 @@ public sealed class OpusEncoder : IDisposable
         }
 
         return (byte)toc;
+    }
+
+    /// <summary>
+    /// The SILK layer backed by the multi-channel packet encoder, so SILK and hybrid frames can
+    /// carry in-band FEC (LBRR). It writes the VAD bits, the LBRR flags, the redundant frames and
+    /// the SILK frame into the caller's range coder, exactly as the decoder reads them.
+    /// </summary>
+    private sealed class SilkFecLayerAdapter : ISilkLayerEncoder
+    {
+        private readonly SilkStereoPacketEncoder _packet;
+
+        internal SilkFecLayerAdapter(SilkStereoPacketEncoder packet) => _packet = packet;
+
+        /// <inheritdoc />
+        public void Encode(ref RangeEncoder encoder, ReadOnlySpan<short> pcm, int frameSamples, int maxFrameBytes) =>
+            _packet.EncodeInto(ref encoder, pcm[..frameSamples], maxFrameBytes + 1);
+    }
+
+    /// <summary>Adapts the SILK core to the transition encoder's layer interface.</summary>
+    private sealed class SilkLayerAdapter : ISilkLayerEncoder
+    {
+        private readonly SilkEncoderCore _core;
+
+        internal SilkLayerAdapter(SilkEncoderCore core) => _core = core;
+
+        /// <inheritdoc />
+        public void Encode(ref RangeEncoder encoder, ReadOnlySpan<short> pcm, int frameSamples, int maxFrameBytes)
+        {
+            _core.EncodeInto(ref encoder, pcm, maxFrameBytes + 1);
+        }
     }
 }

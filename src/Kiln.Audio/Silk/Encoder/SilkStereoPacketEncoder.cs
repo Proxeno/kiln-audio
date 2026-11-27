@@ -145,6 +145,46 @@ internal sealed class SilkStereoPacketEncoder
     /// <returns>The number of payload bytes, or zero when DTX suppresses the packet.</returns>
     internal int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
+        var rangeEncoder = new RangeEncoder(_rangeBuffer);
+        int payloadBits = EncodeInto(ref rangeEncoder, pcm, Math.Min(packet.Length + 1, 1276));
+        if (LastPacketSuppressed)
+        {
+            return 0;
+        }
+
+        int payloadBytes = (payloadBits + 7) >> 3;
+        if (payloadBytes > packet.Length || payloadBytes > _rangeBuffer.Length)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The packet buffer must hold at least {payloadBytes + 1} bytes; got {packet.Length + 1}."),
+                nameof(packet));
+        }
+
+        // SILK writes no raw bits, so the range-coded bytes already occupy the front of the
+        // buffer; the frame is simply the first `written` bytes after finalization.
+        FinalRange = rangeEncoder.Rng;
+        rangeEncoder.Done();
+        int written = rangeEncoder.RangeBytes;
+        if (written > packet.Length)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The packet buffer must hold at least {written + 1} bytes; got {packet.Length + 1}."),
+                nameof(packet));
+        }
+
+        _rangeBuffer.AsSpan(0, written).CopyTo(packet);
+        return written;
+    }
+
+    /// <summary>Encodes one Opus frame's SILK symbols into a caller-owned, unfinalized coder.</summary>
+    /// <param name="rangeEncoder">The shared range encoder (SILK-only or hybrid frame).</param>
+    /// <param name="pcm">Interleaved input at the API rate for exactly one Opus frame.</param>
+    /// <param name="maxDataBytes">The frame's byte capacity, including the TOC byte.</param>
+    /// <returns>The number of payload bits written; the final range is not updated.</returns>
+    internal int EncodeInto(ref RangeEncoder rangeEncoder, ReadOnlySpan<short> pcm, int maxDataBytes)
+    {
         LastPacketSuppressed = false;
         if (_channels == 2)
         {
@@ -174,7 +214,6 @@ internal sealed class SilkStereoPacketEncoder
             PrepareMonoFrames();
         }
 
-        var rangeEncoder = new RangeEncoder(_rangeBuffer);
         SilkLbrrEncoder.EncodeHeader(
             ref rangeEncoder,
             _channels,
@@ -192,7 +231,7 @@ internal sealed class SilkStereoPacketEncoder
         int channelRate = _channels == 2 ? _bitrateBps >> 1 : _bitrateBps;
         int bitrate = _channels == 2 ? channelRate << 1 : channelRate;
         int frameRate = 48000 / (48 * _durationMs);
-        int maxDataBytes = Math.Min(packet.Length + 1, 1276);
+        maxDataBytes = Math.Min(maxDataBytes, 1276);
         if (_useCbr)
         {
             int cbrBytes = Math.Min((bitrate + (4 * frameRate)) / (8 * frameRate), maxDataBytes);
@@ -286,27 +325,7 @@ internal sealed class SilkStereoPacketEncoder
         _previousSpeechActivityQ8 = _mid.State.SpeechActivityQ8;
 
         int payloadBits = rangeEncoder.Tell();
-        int payloadBytes = (payloadBits + 7) >> 3;
-        if (payloadBytes > packet.Length || payloadBytes > _rangeBuffer.Length)
-        {
-            throw new ArgumentException(
-                FormattableString.Invariant(
-                    $"The packet buffer must hold at least {payloadBytes + 1} bytes; got {packet.Length + 1}."),
-                nameof(packet));
-        }
-
-        FinalRange = rangeEncoder.Rng;
-        rangeEncoder.Done();
-        int written = rangeEncoder.RangeBytes;
-        if (written > packet.Length)
-        {
-            throw new ArgumentException(
-                FormattableString.Invariant(
-                    $"The packet buffer must hold at least {written + 1} bytes; got {packet.Length + 1}."),
-                nameof(packet));
-        }
-
-        _bitsExceeded = Math.Clamp(_bitsExceeded + (written * 8) - packetBits, 0, 10000);
+        _bitsExceeded = Math.Clamp(_bitsExceeded + (((payloadBits + 7) >> 3) * 8) - packetBits, 0, 10000);
 
         // RFC 6716 Appendix A, silk_Encode: when every channel is in DTX the payload is dropped
         // and the packet is the TOC byte alone.
@@ -316,8 +335,7 @@ internal sealed class SilkStereoPacketEncoder
             return 0;
         }
 
-        _rangeBuffer.AsSpan(0, written).CopyTo(packet);
-        return written;
+        return payloadBits;
     }
 
     private void PrepareMonoFrames()

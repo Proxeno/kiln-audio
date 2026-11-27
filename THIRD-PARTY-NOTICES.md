@@ -10,6 +10,7 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Celt/CeltPcm.cs`
 - `src/Kiln.Audio/Celt/CeltPlc.cs`
 - `src/Kiln.Audio/Celt/CeltSynthesizer.cs`
+- `src/Kiln.Audio/Celt/Mdct.cs`
 - `src/Kiln.Audio/Celt/Encoder/CeltEncoder.cs`
 - `src/Kiln.Audio/Celt/Encoder/CeltEncoderAllocation.cs`
 - `src/Kiln.Audio/Celt/Encoder/CeltEncoderAnalysis.cs`
@@ -23,6 +24,7 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Decoder/CeltOutput.cs`
 - `src/Kiln.Audio/Decoder/OpusDecoderCore.cs`
 - `src/Kiln.Audio/Decoder/SilkOutput.cs`
+- `src/Kiln.Audio/Encoder/OpusHybridEncoder.cs`
 - `src/Kiln.Audio/Encoder/OpusModeSelector.cs`
 - `src/Kiln.Audio/Encoder/OpusPacketWriter.cs`
 - `src/Kiln.Audio/Encoder/OpusRepacketizer.cs`

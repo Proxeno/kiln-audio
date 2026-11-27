@@ -15,16 +15,24 @@ public class EncoderOptionTests
     };
 
     [Fact]
-    public void The_default_options_select_the_silk_voip_encoder()
+    public void The_default_options_are_accepted()
     {
         using var encoder = new OpusEncoder(new OpusEncoderOptions());
         encoder.Options.Should().Be(new OpusEncoderOptions());
+    }
+
+    [Fact]
+    public void The_default_options_select_the_automatic_silk_path()
+    {
+        using var encoder = new OpusEncoder(new OpusEncoderOptions());
         var packet = new byte[1276];
         int written = encoder.Encode(new short[960], packet);
 
         written.Should().BeGreaterThan(1);
-        // RFC 6716 §3.1, Table 2: configs 0..11 are SILK-only.
-        (packet[0] >> 3).Should().BeLessThan(12);
+
+        // Automatic selection starts in SILK or hybrid for a 24 kbps VoIP stream; CELT-only
+        // configurations are 16 and above (RFC 6716 §3.1, Table 2).
+        OpusToc.Parse(packet[0]).Mode.Should().NotBe(OpusMode.Celt);
     }
 
     [Theory]
