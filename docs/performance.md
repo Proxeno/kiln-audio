@@ -318,24 +318,23 @@ including the bit-exact SILK LPC parity theory for orders 10 and 16), `CeltVecto
 
 ### MDCT kernel cost
 
-`Perf3Measure` (`dotnet run -c Release -p:RollForward=Major --project bench/Kiln.Audio.Benchmarks
--- micro mdct`) times the kernels with a Stopwatch best-of-25 batch after a 250 ms warm-up, which
-is the statistic the shared machine's load leaves intact. The PERF-2 column is BenchmarkDotNet's
-mean from the previous lane, on the same machine.
+`Perf3Measure` (`dotnet run -c Release --no-build --project bench/Kiln.Audio.Benchmarks -- micro
+mdct`, run under the machine-wide lock) times the kernels with a Stopwatch best-of-25 batch after a
+250 ms warm-up, which is the statistic the shared machine's load leaves intact. These numbers are
+from a clean lock run. The PERF-2 column is BenchmarkDotNet's mean from the previous lane, on the
+same machine.
 
 | Kernel | PERF-2 µs | PERF-3 µs | Change |
 | --- | --- | --- | --- |
-| Forward 960 | 6.05 | **2.28** | 2.7x |
-| Inverse 960 | 5.42 | **2.58** | 2.1x |
-| Forward 8 x 120 | 4.75 | **2.42** | 2.0x |
-| Inverse 8 x 120 | 4.53 | **3.02** | 1.5x |
-| Forward 120 | not measured | **0.25** | - |
-| Inverse 120 | not measured | **0.35** | - |
+| Forward 960 | 6.05 | **1.90** | 3.2x |
+| Inverse 960 | 5.42 | **2.11** | 2.6x |
+| Forward 8 x 120 | 4.75 | **1.77** | 2.7x |
+| Inverse 8 x 120 | 4.53 | **2.34** | 1.9x |
+| Forward 120 | not measured | **0.245** | - |
+| Inverse 120 | not measured | **0.294** | - |
 
-The 960 forward meets the ≤ 2.5 µs target; the 960 inverse is within ~3% of it after the inverse
-pre-rotation was collapsed to a single 2x2 twiddle multiply. The 120 targets (≤ 0.4 µs) are met.
-The size-480 complex FFT alone is 1.31/1.40 µs (forward/inverse), so the FFT is now roughly half
-of the 960-block cost.
+Both 960 targets (≤ 2.5 µs) and both 120 targets (≤ 0.4 µs) are met. The size-480 complex FFT
+alone is 1.11/1.12 µs (forward/inverse), so the FFT is now roughly half of the 960-block cost.
 
 ### SILK kernel cost
 
@@ -343,43 +342,40 @@ Same Stopwatch harness (`... -- micro silk`). The LPC synthesis figure is one 80
 
 | Kernel | PERF-3 µs | Notes |
 | --- | --- | --- |
-| NLSF → LPC, order 10 | 0.13 | unchanged (table gather, no SIMD win) |
-| NLSF → LPC, order 16 | 0.27 | unchanged |
+| NLSF → LPC, order 10 | 0.12 | unchanged (table gather, no SIMD win) |
+| NLSF → LPC, order 16 | 0.26 | unchanged |
 | LPC synthesis, order 10 | **0.21** | was 0.29; unrolled |
-| LPC synthesis, order 16 | 0.54 | was 0.55; unrolled, serial dependency dominates |
+| LPC synthesis, order 16 | 0.53 | was 0.55; unrolled, serial dependency dominates |
 
 ### Decode ratios
 
 libopus from `scripts/bench-libopus-inproc.sh`, Kiln from `... -- micro decode` (tier-1 warmed;
-decode + synthesis + int16). The shared machine's load moved by ~1.5x between the Kiln and libopus
-runs of the same session, so whole-vector ratios are not reliable: two non-interleaved runs gave
-1.15-1.45 for the six vectors. They are reported as indicative only, not as evidence of reaching
-the ≤ 1.0 target.
+decode + synthesis + int16), both run under the machine-wide lock. The two runs were consecutive;
+libopus reproduced its previous clean run to within 1%, so these ratios are stable to a few percent
+for CELT and noisier for SILK.
 
-| Vector | libopus µs/frame | Kiln µs/frame | Ratio (load-dependent) |
+| Vector | libopus µs/frame | Kiln µs/frame | Ratio |
 | --- | --- | --- | --- |
-| 01 | 10.49 | 12.01 | 1.15 |
-| 07 | 7.10 | 9.96 | 1.40 |
-| 11 | 27.42 | 32.37 | 1.18 |
-| 02 | 6.38 | 7.57 | 1.19 |
-| 03 | 7.98 | 9.38 | 1.18 |
-| 04 | 9.90 | 11.39 | 1.15 |
+| 01 | 6.70 | 9.29 | 1.39 |
+| 07 | 4.41 | 6.32 | 1.43 |
+| 11 | 19.26 | 25.45 | 1.32 |
+| 02 | 4.48 | 5.38 | 1.20 |
+| 03 | 5.81 | 6.88 | 1.18 |
+| 04 | 6.46 | 9.04 | 1.40 |
 
-The CELT 11 synthesis stage fell from PERF-2's 20.15 µs to 8.4-10.6 µs/frame across runs, which is
-the MDCT halving showing up; the whole-vector ratio is masked by machine load.
+CELT 11's synthesis stage fell from PERF-2's 20.15 µs to 8.26 µs/frame, which is the MDCT halving
+showing up. No vector reaches the ≤ 1.0 target.
 
 ### Remaining gaps
 
-1. **CELT decode is now bitstream/frequency-domain bound.** The per-frame split is 8.36/3.26/0.39 µs
-   for vector 01 and 20.65/10.61/1.11 µs for 11 (bitstream+frequency / synthesis / int16). The
+1. **CELT decode is now bitstream/frequency-domain bound.** The per-frame split is 6.46/2.53/0.30 µs
+   for vector 01 and 16.31/8.26/0.88 µs for 11 (bitstream+frequency / synthesis / int16). The
    synthesizer is no longer the largest stage; the range decoder, PVQ codeword read and band
-   bookkeeping are.
-2. **MDCT inverse is ~2.6 µs against the ≤ 2.5 µs target.** The next step is vectorising the
-   inverse pre-rotation and de-shuffle (both stride-two gathers), and a split-radix FFT.
-3. **SILK is still above 1.0.** Only the order-10 LPC synthesis moved (0.29 → 0.21 µs); the
+   bookkeeping are. That is the 1.32-1.43 remaining ratio.
+2. **SILK is still above 1.0.** Only the order-10 LPC synthesis moved (0.29 → 0.21 µs); the
    order-16 loop is latency-bound and the NLSF→LPC conversion is unchanged. WB synthesis
-   (vector 04) is still the dominant SILK stage. No SILK target (≤ 1.0) is met.
-4. **`Vector256` is emulated on the arm64 target**, so the existing `Vector128` radix butterflies
+   (vector 04) is still the dominant SILK stage (5.41 µs/frame). No SILK target (≤ 1.0) is met.
+3. **`Vector256` is emulated on the arm64 target**, so the existing `Vector128` radix butterflies
    stay; the measured FFT does not benefit from a 256-bit path here.
 
 ## Encoder (CELT-only, 48 kHz mono)
