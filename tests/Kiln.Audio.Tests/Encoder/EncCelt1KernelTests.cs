@@ -189,65 +189,109 @@ public class EncCelt1KernelTests
     [Fact]
     public void PulseIndex_inverts_the_decoder_walk()
     {
+        // Guard only: the largest K per N whose codeword count fits the decoder's 32-bit table.
         var random = new System.Random(11);
-        for (int trial = 0; trial < 3000; trial++)
+        int checkedCount = 0;
+        for (int trial = 0; trial < 6000; trial++)
         {
-            int n = 2 + random.Next(0, 40);
-            int k = 1 + random.Next(0, 24);
-            var y = new int[n];
-            for (int p = 0; p < k; p++)
+            int n = 2 + random.Next(0, 175);
+            int k = 1 + random.Next(0, Math.Min(128, 1 + 2000 / n * 4));
+            if (!FitsU32(n, k))
             {
-                int pos = random.Next(0, n);
-                int sign = y[pos] != 0 ? Math.Sign(y[pos]) : (random.Next(0, 2) == 0 ? 1 : -1);
-                y[pos] += sign;
-            }
-
-            uint index = CeltEncoderVq.PulseIndex(y, n, k, out uint nc);
-            index.Should().BeLessThan(nc);
-            var decoded = new int[n];
-            DecodeWalk(n, k, index, decoded);
-            decoded.Should().Equal(y, $"n={n} k={k}");
-        }
-    }
-
-    // The decoder's table-driven walk (RFC 6716 cwrsi), written against the same cells.
-    private static void DecodeWalk(int n, int k, uint index, int[] y)
-    {
-        var table = Kiln.Audio.Celt.CeltDecoder.PvqCwrs;
-        const int maxK = Kiln.Audio.Celt.CeltDecoder.PvqMaxK;
-        uint i = index;
-        for (int j = 0; j < n && k > 0; j++)
-        {
-            int remaining = n - j;
-            if (remaining == 1)
-            {
-                y[j] = i == 0 ? k : -k;
-                return;
-            }
-
-            var e = table[(remaining * maxK) + k];
-            uint d = i - e.Zero;
-            if (d < e.Below)
-            {
-                i = d;
                 continue;
             }
 
-            bool negative = i >= e.Zero + e.Below;
-            if (negative)
-            {
-                i -= e.Zero + e.Below;
-            }
-
-            int kk = k - 1;
-            while (table[(remaining * maxK) + kk].Zero > i)
-            {
-                kk--;
-            }
-
-            i -= table[(remaining * maxK) + kk].Zero;
-            y[j] = negative ? -(k - kk) : k - kk;
-            k = kk;
+            var y = RandomPulses(random, n, k);
+            uint index = CeltEncoderVq.PulseIndex(y, n, k, out uint nc);
+            nc.Should().Be(Kiln.Audio.Celt.CeltDecoder.PvqV(n, k));
+            index.Should().BeLessThan(nc);
+            var decoded = new int[n];
+            Kiln.Audio.Celt.CeltDecoder.Cwrsi(n, k, index, decoded);
+            decoded.Should().Equal(y, $"n={n} k={k}");
+            checkedCount++;
         }
+
+        checkedCount.Should().BeGreaterThan(300);
+    }
+
+    [Fact]
+    public void PulseIndex_is_a_bijection_for_small_n_and_k()
+    {
+        for (int n = 1; n <= 4; n++)
+        {
+            for (int k = 0; k <= 6; k++)
+            {
+                uint count = Kiln.Audio.Celt.CeltDecoder.PvqV(n, k);
+                var seen = new bool[count];
+                var y = new int[n];
+                int total = 0;
+                Enumerate(y, 0, k, n, k, vector =>
+                {
+                    uint index = CeltEncoderVq.PulseIndex(vector, n, k, out uint nc);
+                    nc.Should().Be(count);
+                    index.Should().BeLessThan(count, $"n={n} k={k}");
+                    seen[index].Should().BeFalse($"duplicate index n={n} k={k}");
+                    seen[index] = true;
+                    var decoded = new int[n];
+                    Kiln.Audio.Celt.CeltDecoder.Cwrsi(n, k, index, decoded);
+                    decoded.Should().Equal(vector, $"n={n} k={k}");
+                    total++;
+                });
+                total.Should().Be((int)count, $"n={n} k={k}");
+            }
+        }
+    }
+
+    private static void Enumerate(int[] y, int pos, int left, int n, int k, Action<int[]> visit)
+    {
+        if (pos == n - 1)
+        {
+            foreach (int v in left == 0 ? new[] { 0 } : new[] { left, -left })
+            {
+                y[pos] = v;
+                visit(y);
+            }
+
+            return;
+        }
+
+        for (int m = -left; m <= left; m++)
+        {
+            y[pos] = m;
+            Enumerate(y, pos + 1, left - Math.Abs(m), n, k, visit);
+        }
+    }
+
+    private static int[] RandomPulses(System.Random random, int n, int k)
+    {
+        var y = new int[n];
+        for (int p = 0; p < k; p++)
+        {
+            int pos = random.Next(0, n);
+            int sign = y[pos] != 0 ? Math.Sign(y[pos]) : (random.Next(0, 2) == 0 ? 1 : -1);
+            y[pos] += sign;
+        }
+
+        return y;
+    }
+
+    private static bool FitsU32(int n, int k)
+    {
+        // V(n,k) via the RFC recurrence in 64 bits; only a size guard for choosing test shapes.
+        var v = new ulong[n + 1, k + 1];
+        for (int a = 1; a <= n; a++)
+        {
+            v[a, 0] = 1;
+            for (int b = 1; b <= k; b++)
+            {
+                v[a, b] = (a == 1 ? 2UL : v[a - 1, b] + v[a, b - 1] + v[a - 1, b - 1]);
+                if (v[a, b] > uint.MaxValue)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 }

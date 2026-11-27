@@ -2114,7 +2114,7 @@ internal sealed class CeltDecoder
     /// Recovers the integer pulse vector from its codeword index using the five steps of
     /// RFC 6716 §4.3.4.2.
     /// </summary>
-    private static void Cwrsi(int n, int k, uint index, Span<int> y) =>
+    internal static void Cwrsi(int n, int k, uint index, Span<int> y) =>
         Cwrsi(n, k, index, y, out _);
 
     /// <summary>
