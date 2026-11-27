@@ -12,18 +12,19 @@ namespace Kiln.Audio;
 /// <remarks>
 /// <para>
 /// <see cref="OpusApplication.Voip"/> and <see cref="OpusApplication.Audio"/> select the
-/// automatic mode policy (mono, 48 kHz, 10 or 20 ms): each frame is coded as SILK-only, hybrid
-/// (SILK wideband plus CELT from band 17) or CELT-only from the bitrate, application,
-/// <see cref="OpusEncoderOptions.Bandwidth"/> cap and the reference's decision thresholds. The
-/// SILK internal bandwidth is fixed at construction (wideband unless the cap is narrower).
+/// automatic mode policy for mono 48 kHz 10 and 20 ms frames: each frame is coded as SILK-only,
+/// hybrid (SILK wideband plus CELT from band 17) or CELT-only from the bitrate, a per-frame
+/// voice/music estimate, the application, the <see cref="OpusEncoderOptions.Bandwidth"/> cap and
+/// the reference's decision thresholds. The SILK internal bandwidth is fixed at construction
+/// (wideband unless the cap is narrower).
 /// </para>
 /// <para>
-/// Other Voip/Audio configurations select one encoder directly: SILK-only for Voip at 40 or
-/// 60 ms or a non-48 kHz rate, and CELT-only (mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5
-/// to 60 ms, constant or variable bitrate, and the pitch pre-filter) for the rest.
-/// <see cref="OpusApplication.RestrictedLowDelay"/> always selects CELT-only. A 40 or 60 ms CELT
-/// frame is encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as the
-/// reference handles CELT durations above 20 ms.
+/// Other Voip configurations select one encoder directly: SILK-only for mono 10 to 60 ms at a
+/// SILK bandwidth, and CELT for the rest (stereo, 2.5 or 5 ms, super-wideband/fullband hints).
+/// The CELT encoder supports mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10, 20, 40 or
+/// 60 ms frames, constant or variable bitrate, and the pitch pre-filter; a 40 or 60 ms frame is
+/// two or three 20 ms frames in one code 1 or code 3 packet.
+/// <see cref="OpusApplication.RestrictedLowDelay"/> always selects CELT-only.
 /// </para>
 /// <para>
 /// In-band FEC and DTX are not implemented and are rejected with
@@ -31,19 +32,20 @@ namespace Kiln.Audio;
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
-/// byte followed by the frame or frames. It allocates nothing after construction.
+/// byte followed by one CELT frame (or the multi-frame layout for 40 and 60 ms). It allocates
+/// nothing after construction.
 /// </para>
 /// </remarks>
 public sealed class OpusEncoder : IDisposable
 {
     private readonly CeltEncoder? _encoder;
     private readonly SilkEncoderCore? _silk;
+    private readonly int _silkFrameSamples;
+    private readonly byte _silkToc;
     private readonly OpusFrameDuration _tocDuration;
     private readonly int _subFrameSamples;
     private readonly int _subFrameCount;
     private readonly int _inputFrameSamples;
-    private readonly int _silkFrameSamples;
-    private readonly byte _silkToc;
     private readonly short[] _conversionBuffer;
     private readonly byte[] _subFrameData;
 
@@ -129,28 +131,27 @@ public sealed class OpusEncoder : IDisposable
             return;
         }
 
-        if (options.Application == OpusApplication.Voip)
+        // SILK owns mono Voip at SILK frame durations and a SILK bandwidth. Anything else that
+        // asks for Voip keeps the pre-SILK behaviour and encodes with CELT, so existing callers
+        // (stereo, 2.5/5 ms) are not broken.
+        OpusBandwidth? requestedBandwidth = options.Bandwidth;
+        bool silkBandwidth = requestedBandwidth is null
+            or OpusBandwidth.Narrowband or OpusBandwidth.Mediumband or OpusBandwidth.Wideband;
+        bool useSilk = options.Application == OpusApplication.Voip
+            && options.Channels == 1
+            && silkBandwidth
+            && options.FrameDuration is OpusFrameDuration.Ms10 or OpusFrameDuration.Ms20
+                or OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60;
+
+        if (useSilk)
         {
-            if (options.Channels != 1)
-            {
-                throw new NotSupportedException(
-                    FormattableString.Invariant($"Only mono input is supported by the SILK encoder; got {options.Channels} channels."));
-            }
-
-            if (options.FrameDuration is OpusFrameDuration.Ms2_5 or OpusFrameDuration.Ms5)
-            {
-                throw new NotSupportedException(
-                    FormattableString.Invariant($"SILK supports 10, 20, 40 and 60 ms frames; got {options.FrameDuration}."));
-            }
-
-            OpusBandwidth bandwidth = options.Bandwidth ?? OpusBandwidth.Wideband;
+            OpusBandwidth bandwidth = requestedBandwidth ?? OpusBandwidth.Wideband;
             int internalRate = bandwidth switch
             {
                 OpusBandwidth.Narrowband => 8000,
                 OpusBandwidth.Mediumband => 12000,
                 OpusBandwidth.Wideband => 16000,
-                _ => throw new NotSupportedException(
-                    "SILK supports narrowband, mediumband and wideband; hybrid and super-wideband/fullband are not implemented."),
+                _ => 16000,
             };
 
             int frameDurationMs = options.FrameDuration switch
@@ -297,7 +298,8 @@ public sealed class OpusEncoder : IDisposable
         if (_subFrameCount == 1)
         {
             packet[0] = BuildToc();
-            return _encoder.EncodeFrame(pcm, packet[1..]) + 1;
+            int written = _encoder.EncodeFrame(pcm, packet.Slice(1));
+            return written + 1;
         }
 
         // 40 and 60 ms CELT are code 1/code 3 packets of 20 ms frames (RFC 6716 Appendix A,
@@ -328,7 +330,7 @@ public sealed class OpusEncoder : IDisposable
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {_conversionBuffer.Length} samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_conversionBuffer.Length} interleaved samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 
