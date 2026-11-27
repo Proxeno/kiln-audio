@@ -144,7 +144,7 @@ The forward and inverse MDCT now meet the PERF-1 target of 6 µs at 960 points.
 ## SIMD kernels
 
 Each kernel lives in `src/Kiln.Audio/Simd/` and has a scalar reference path and a portable
-`Vector128<T>` path (AdvSimd on arm64, SSE on x64). No `Vector256`/`Vector512` path is shipped
+`Vector128<T>` path (AdvSimd on arm64, SSE on x64); SIMD-1 (below) moved these onto per-ISA kernel sets. No `Vector256`/`Vector512` path is shipped
 because it was not measured to win on this machine.
 
 | Kernel | Path | Parity |
@@ -1144,3 +1144,74 @@ The CELT-only vectors (01, 07, 08, 09, 11) were already near parity and gain a f
 SILK and hybrid vectors (02-06, 10, 12) went from 5-16x libopus to 1.4-2.0x. The remaining gap on
 those is the SILK decode itself, not the output stage. Two `SilkEncoderQualityTests` rows (MB and
 WB, 60 ms, 20 kbps, complexity 0) fail on unmodified train-next as well and are unrelated.
+
+## SIMD-1: per-ISA kernel sets and the CELT decode/synthesis kernels
+
+Owner directive: scalar loops that should be vectorized, and 256-bit code that runs emulated on
+Apple silicon, are red flags; the video codec avoids both with an intrinsics abstraction. SIMD-1
+adds the audio equivalent and moves the CELT decode/synthesis kernels onto it. The design and the
+per-loop audit that motivated it are in the lane's perf review (section 3 and the audit table).
+
+### Kernel-set design
+
+- `ICeltKernels` (`src/Kiln.Audio/Simd/Kernels/ICeltKernels.cs`) is an interface of **static
+  abstract** members. Tiers are `struct`s, and the CELT decoder and synthesizer are generic over
+  the tier (`DecodeFrameCore<TK>`, `SynthesizeCore<TK>`, `Mdct.InverseUnscaled<TK>`,
+  `Fft.Transform<TK>`). The JIT compiles one body per tier, so `TK.Rotate(...)` is a direct,
+  inlinable call: there is **no dispatch inside a frame**, and the scheme is NativeAOT-safe.
+  Kiln's interface-per-call scheme (video) would cost an interface call per band here.
+- **Tiers.** `ScalarKernels` (reference), `Vector128Kernels` (portable, SSE2/WASM/any),
+  `AdvSimdArm64Kernels` (`AdvSimd`/`AdvSimd.Arm64` directly, fused multiply-add) and
+  `Avx2FmaKernels` (x64 AVX2+FMA3). The three vector tiers share one set of loop bodies,
+  `CeltVec<T>`, parameterised by an `IVecOps` struct that supplies the tier's native fused
+  multiply-add and shuffles (`ArmOps`: `FusedMultiplyAdd`, `UnzipEven/Odd`, `ZipLow/High`, `Ext`;
+  `X86Ops`: `Fma.MultiplyAdd`, `Sse.Shuffle/UnpackLow/High`; `PortableOps`: `Vector128.Shuffle`).
+- **Selection.** `AudioKernels.Select()` is called once, in the `CeltDecoder`/`CeltSynthesizer`
+  constructors, and mirrors `H264KernelSet.CreateBest()`: Avx2Fma, then AdvSimdArm64, then
+  Vector128, then Scalar. `KILN_AUDIO_DISABLE_SIMD` forces `Scalar` there. `OpusDecoder` needs no
+  change: its CELT synthesizer and decoder pick the tier at construction, and there is one
+  `switch` per frame (`DecodeFrame`, `Synthesize`) to enter the generic body. SILK and the encoder
+  can plug into the same `AudioKernels` selection (SIMD-2).
+- **Rules** (enforced by structure): no `Vector256`/`Vector512`/`Vector<T>` outside the Avx2Fma
+  tier; arm64 never touches a 256-bit type; the kernel is the loop (no per-sample call); parity
+  tests call the tiers directly (`KernelTierParityTests`), with `AudioKernels.Scope(tier)` as the
+  whole-codec override that only the constructors consult.
+- The pre-existing static kernel classes (`DecKernels`, `FftKernels`, `MdctKernels`,
+  `CeltPostFilterKernel`) remain as the scalar/portable building blocks and for the encoder; the
+  tiers forward to them where nothing changed, so `SimdParityTests` still guards them.
+
+### What moved, loop by loop
+
+| Loop | Before | Now |
+| --- | --- | --- |
+| FFT leaf level + decimation permutation | scalar, one non-inlined call per node, separate bounds-checked permutation pass | one fused kernel: four leaf nodes per step, contiguous vector loads, lane scatter stores (all radices) |
+| FFT levels with half 5/15/30 (tails) | vector + scalar tail per node | whole vectors; the tail block is re-run at `half-4` and blended with the already-final lanes (no scalar tail, no per-node call) |
+| FFT butterflies | separate mul and add | `FusedMultiplyAdd/Subtract` (arm64), `Fma` (x64) |
+| IMDCT pre-rotation, stride 1 | `Shuffle` + `Create(GetLower,GetLower)` | `UnzipEven/UnzipOdd` + `Reverse` per tier |
+| IMDCT post-rotation + de-shuffle + mirror + copy | four passes, two intermediate buffers | post-rotation fused with the de-shuffle (one pass, `Zip`), middle is one block copy, window ramps vectorized with a pre-reversed window; the output is written straight into the frame's history slot |
+| IMDCT overlap-add | scalar loop + 840-float copy | one vector `OverlapAddSave` (add the old overlap, save the new one) |
+| Short-block accumulate / stereo downmix | V128 / scalar | `AddInPlace` / `Average` kernels |
+| Comb post-filter | no-op loop over the frame when off; V128 mul+add | early return when both gain sets are zero, no steady tail when the new gain is zero; FMA taps |
+| De-emphasis | scalar, 4-unrolled, one channel at a time | prefix scan over 4 samples per step (`ShiftUp1/2`, `Broadcast3`), both channels per step, `Zip` for the interleave, one carried FMA per block |
+| Mono stream to stereo output | synthesis run twice on identical data | channel 1 is not synthesized while both channels are identical (since reset); PCM is duplicated in the de-emphasis kernel; channel 1 state is materialized on the first stereo frame or loss |
+| Spread rotation, stride 1 | scalar mul + add chain | carried chain is one fused multiply-add (`FusedMultiplyAddScalar`/`Fma.MultiplyAddScalar`) |
+| Spread rotation, stride >= 4 | V128 | V128 with FMA |
+| Renormalise energy, stereo-merge dots | scalar, bounds-checked | `SumSquares`, `StereoDots` kernels, two accumulators |
+| Haar, stride 1 | scalar | `Unzip`, add/sub, `Zip` |
+| Haar, stride >= 4 | scalar | vector across the interleaved lanes |
+| Denormalise / PVQ pulse scale / stereo merge | V128 | unchanged kernels, now selected through the tier |
+| Encoder prefilter dot (`Vector256` + `Create(a[i]...)`) | 256-bit on x64, element-wise `Create` on arm64 | retired: `Vector128Kernels.Dot` with real loads; the same 4-lane accumulation as the arm64 path it replaces, so arm64 encoder output is unchanged |
+| SILK input resampler dot (`Vector<float>` + `Slice`) | width-dependent, two bounds checks per step | the same `Vector128Kernels.Dot` |
+
+**Left for SIMD-2 (not touched here):** SILK decode helpers (LTP rewhitening FIR, sLTP scaling,
+stereo unmix, output deinterleave), the SILK encoder correlation kernels, CELT encoder analysis
+(forward MDCT fold and post write, pulse coder, transient/TF/spread analysis, prefilter comb and
+lag search), `SilkResampler` and `CeltOutput` (PUB-PERF-1). Strided (short-block) IMDCT
+pre-rotation is still scalar; it needs a block-deinterleave kernel. The Avx2Fma tier currently
+uses the 128-bit VEX forms with FMA: 256-bit widening of the elementwise kernels is possible but
+could not be validated on the arm64 build machine. The FFT factor order (4,4,2,3,5) is kept so the
+encoder's forward MDCT is not perturbed.
+
+### Measurements
+
+SIMD1_RESULTS
