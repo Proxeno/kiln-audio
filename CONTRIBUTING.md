@@ -1,12 +1,9 @@
 # Contributing to Kiln.Audio
 
-Kiln.Audio is a (future) pure-managed, SIMD-accelerated Opus (RFC 6716)
+Kiln.Audio is a pure-managed, SIMD-accelerated Opus (RFC 6716)
 encoder and decoder. It exists specifically so it can be embedded under
 Apache-2.0 in products where GPL/LGPL/native codec linkage is a problem.
 Contributions are held to that bar — see Originality and citations below.
-
-The repository is currently a skeleton: public API stubs and the TOC parser
-exist; the codec does not.
 
 ## Getting set up
 
@@ -44,18 +41,26 @@ missing oracle into a test failure instead; CI sets it on Linux and macOS.
 ## Repository layout
 
 - [`src/Kiln.Audio`](src/Kiln.Audio) — the library. `Kiln.Audio` is the public
-  namespace; internals are accessible to `Kiln.Audio.Tests` and
-  `Kiln.Audio.Benchmarks` via `InternalsVisibleTo`.
+  namespace; internals are accessible to `Kiln.Audio.Tests`,
+  `Kiln.Audio.Benchmarks` and `Kiln.Audio.Fuzz` via `InternalsVisibleTo`.
 - [`tests/Kiln.Audio.Tests`](tests/Kiln.Audio.Tests) — xunit test project.
 - [`bench/Kiln.Audio.Benchmarks`](bench/Kiln.Audio.Benchmarks) —
   BenchmarkDotNet benchmarks.
-- [`docs/architecture.md`](docs/architecture.md) — planned modules and status.
+- [`tests/Kiln.Audio.Fuzz`](tests/Kiln.Audio.Fuzz) — the coverage-blind mutation fuzzer
+  (see [`docs/robustness.md`](docs/robustness.md)).
+- [`tests/Kiln.Audio.AotSmoke`](tests/Kiln.Audio.AotSmoke) — Native AOT round-trip smoke test.
+- [`docs/architecture.md`](docs/architecture.md) — modules, mode selection and SIMD kernel sets.
+- [`docs/performance.md`](docs/performance.md) — measurements against libopus.
+- [`docs/releasing.md`](docs/releasing.md) — how a release is cut and the public API lock.
 
 ## Test layout
 
-- **SIMD/scalar parity tests** — once SIMD kernels exist, each needs a test
-  asserting bit-identical output to its scalar counterpart, self-skipping on
-  hosts lacking the target ISA.
+- **SIMD/scalar parity tests** — every SIMD kernel has a test asserting
+  bit-identical output to its scalar counterpart, self-skipping on hosts
+  lacking the target ISA. A new kernel needs one too.
+- **Quality gates** — encoder quality is gated against frozen baselines of the
+  RFC 6716 Appendix A reference encoder. A frozen value is never lowered; a new
+  corpus gets a new gate.
 - **Decode/encode-oracle tests** — compare against **`opus_demo` / libopus** as
   the independent correctness oracle, using the IETF/RFC 8251 test vectors
   (see [`tests/Kiln.Audio.Tests/Fixtures/README.md`](tests/Kiln.Audio.Tests/Fixtures/README.md)).
@@ -111,8 +116,8 @@ git commit -s
 
 ## Continuous integration
 
-CI (`.github/workflows/ci.yml`) builds and tests on `ubuntu-latest`,
-`windows-latest`, and `macos-latest` on every push and PR to `main`. The
+CI (`.github/workflows/ci.yml`) builds and tests on Linux, Windows and macOS
+runners on every push and PR to `main`. The
 matrix exercises both SIMD ISA families: Linux and Windows runners are x64
 (AVX2/SSSE3), macOS runners are arm64 (NEON). A change that only builds/tests
 clean on one architecture is not done.

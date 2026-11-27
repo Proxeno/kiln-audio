@@ -1,24 +1,83 @@
 # Architecture
 
-Kiln.Audio is a pure managed C# (.NET 10) Opus decoder and CELT-only encoder. The status of
-each module is below. Everything in `src/` is managed code, and the test-only conformance oracle
-is in place.
+Kiln.Audio is a pure managed C# (.NET 10) Opus codec: a decoder for every Opus mode, and an
+encoder with SILK, hybrid and CELT paths (automatic per-frame selection in the mono 48 kHz case).
+Everything in `src/` is managed code. The test-only conformance oracle (libopus built from source)
+lives under `.oracle` and `tests/Kiln.Audio.Tests/Oracle`; it is not part of the shipped package.
+The status of each module is below.
 
 | Module | Purpose | Status |
 |---|---|---|
 | Oracle (test-only) | Pinned libopus `opus_demo` / `opus_compare`, the RFC 8251 test vectors, and the managed RFC 6716 §6 quality metric | done |
-| Range coder | Entropy coder shared by SILK and CELT (RFC 6716 §4.1, §5.1) | done (decoder + encoder, round-trip tested) |
+| Range coder | Entropy coder shared by SILK and CELT (RFC 6716 §4.1, §5.1), `Entropy/RangeDecoder.cs` and `RangeEncoder.cs` | done (decoder + encoder, round-trip tested) |
 | Packet framing | TOC parsing, packet splitting, length/padding validation (RFC 6716 §3.2, §3.4) | done |
-| SILK | LPC-based speech layer, NB/MB/WB (§4.2) | done: bitstream decode and bit-exact synthesis at the internal rate, mono and stereo (§4.2.3–§4.2.9), plus packet loss concealment, comfort noise and in-band FEC (§4.2.4–§4.2.5, §4.4) |
+| SILK decoder | LPC-based speech layer, NB/MB/WB (§4.2) | done: bitstream decode and bit-exact synthesis at the internal rate, mono and stereo (§4.2.3–§4.2.9), plus packet loss concealment, comfort noise and in-band FEC (§4.2.4–§4.2.5, §4.4) |
 | SILK output resampler | Polyphase minimum-phase FIR, 8/12/16 kHz to 8–48 kHz, streaming and allocation-free | done |
-| CELT / MDCT | Transform layer, band energy and PVQ (§4.3) | done: bitstream decode through synthesis, mono/stereo, every duration and bandwidth, including the band limit before API-rate decimation (§4.3.1–§4.3.7) |
-| CELT / MDCT kernel | Low-overlap MDCT/IMDCT and the §4.3.7 window, scalar reference | done (scalar; SIMD pending) |
-| CELT encoder | CELT-only encode: mono/stereo, 8–48 kHz API rates, 2.5–20 ms, CBR/VBR, TF/spreading/allocation/PVQ and the §4.3.7.1 pitch pre-filter | done: G1 interop and G3 allocation/determinism tests over every mode; quality measured against libopus |
-| Hybrid | SILK + CELT combined mode (§3.1, Table 2) | done: SILK WB at 16 kHz plus CELT from band 17, with the §4.5 transition handling |
+| CELT decoder | Band energy, PVQ and synthesis (§4.3) | done: bitstream decode through synthesis, mono/stereo, every duration and bandwidth, including the band limit before API-rate decimation (§4.3.1–§4.3.7) |
+| CELT / MDCT | Real-input MDCT/IMDCT (one N/4-point complex FFT per direction) and the §4.3.7 window, `Celt/Mdct.cs`, `Celt/Fft.cs` | done; the CELT decode and synthesis path is generic over the SIMD kernel tier (see SIMD kernel sets) |
+| CELT encoder | CELT-only encode: mono/stereo, 8–48 kHz API rates, 2.5–20 ms, CBR/VBR, TF/spreading/allocation/PVQ and the §4.3.7.1 pitch pre-filter, `Celt/Encoder/` | done: G1 interop and G3 allocation/determinism tests over every mode; quality measured against libopus (see performance.md) |
+| SILK encoder | Mono and stereo SILK encode: VAD, pitch and LPC analysis, NLSF quantization, delayed-decision noise-shaping quantizer, rate control, `Silk/Encoder/` | done: 10–60 ms frames, NB/MB/WB, any API rate; segmental SNR gated against the frozen RFC 6716 Appendix A encoder (see performance.md) |
+| Hybrid encoder, mode selection, transitions | `Encoder/OpusHybridEncoder.cs` (SILK wideband at 16 kHz plus CELT from band 17 in one range coder), `OpusModeSelector.cs` (per-frame SILK/hybrid/CELT choice with hysteresis, from the reference's thresholds), `OpusTransitionEncoder.cs` (§4.5.1 5 ms redundant CELT frames) | done for the automatic path (mono, 48 kHz, 10/20 ms, see Encoder mode selection) |
+| In-band FEC (LBRR) encode | Low-bitrate redundancy frames in SILK-only and hybrid packets (§4.2.4–§4.2.5), `Silk/Encoder/SilkLbrrEncoder.cs`, `SilkStereoPacketEncoder.cs` | done for SILK-only and hybrid frames; not supported on the CELT-only path |
+| DTX | Discontinuous transmission, a one-byte TOC-only packet for suppressed frames, `Silk/Encoder/SilkDtxEncoder.cs` | done on the SILK-only path; rejected with `NotSupportedException` on the CELT-only path; turns automatic mode selection off |
+| Packet writer / repacketizer | `Encoder/OpusPacketWriter.cs` (TOC plus frames, code 0–3 layout, padding), `OpusRepacketizer.cs` (join/split at frame level, as the reference `repacketizer.c`), `OpusTocBuilder.cs` | done; internal types, not part of the public API |
 | Top-level decoder | Public `OpusDecoder`: packet decode, mode dispatch, transition redundancy, resets, `FinalRange` | done: all 12 RFC 8251 vectors pass `opus_compare` and the final range through the public API |
-| PLC / FEC | Packet loss concealment and in-band FEC (LBRR) | done: SILK pitch/LPC extrapolation with CNG and re-entry glue, CELT pitch/noise concealment, mode-aware hybrid PLC, and in-band LBRR FEC decode (§4.2.4–§4.2.5, §4.4) |
-| Resampler-free 48 kHz path | Native 48 kHz operation without a separate resampler stage | not started |
-| SIMD kernels | NEON / AVX2 / SSSE3 kernels with scalar parity tests | not started |
+| Top-level encoder | Public `OpusEncoder`: option validation, path selection, `Encode` for 16-bit and float PCM, `FinalRange` | done |
+| PLC / FEC decode | Packet loss concealment and in-band FEC (LBRR) | done: SILK pitch/LPC extrapolation with CNG and re-entry glue, CELT pitch/noise concealment, mode-aware hybrid PLC, and in-band LBRR FEC decode (§4.2.4–§4.2.5, §4.4) |
+| SIMD kernel sets | Scalar, portable `Vector128`, arm64 `AdvSimd` and x64 AVX2+FMA kernel sets for CELT and SILK decode and encode, with scalar parity tests | done (see SIMD kernel sets) |
+| Resampler-free 48 kHz path | Native 48 kHz operation without a separate resampler stage | not planned for 1.0 |
+
+## Source layout
+
+One line per folder under `src/Kiln.Audio`; the public types (`OpusDecoder`, `OpusEncoder`, their
+options, `OpusApplication`, `OpusBandwidth`, `OpusFrameDuration`, `OpusFecOutcome`) sit in the
+folder root.
+
+- `Celt/`: CELT decoder, synthesizer, MDCT/FFT, window, PLC; `Celt/Encoder/` is the CELT encoder.
+- `Decoder/`: `OpusDecoderCore` (packet and frame decoder behind `OpusDecoder`), `SilkOutput` and
+  `CeltOutput` (decode layers to API-rate PCM).
+- `Encoder/`: mode selector, hybrid encoder, transition encoder, packet writer, repacketizer, TOC
+  builder.
+- `Entropy/`: range decoder and range encoder.
+- `Silk/`: SILK decoder, synthesis, tables, PLC, output resampler; `Silk/Encoder/` is the SILK
+  encoder (analysis, NSQ, entropy coding, LBRR, DTX, stereo).
+- `Simd/`: scalar/portable kernels and, under `Simd/Kernels/`, the per-ISA kernel sets.
+
+## Encoder mode selection
+
+`OpusEncoder` picks one of three paths in its constructor from `OpusEncoderOptions`:
+
+- **Automatic per-frame SILK, hybrid or CELT selection** applies when `Application` is `Voip` or
+  `Audio`, the input is mono at 48 kHz, frames are 10 or 20 ms, and DTX is off. Each frame is coded
+  as SILK-only, hybrid or CELT-only by `OpusModeSelector`. In-band FEC is supported on this path.
+- **SILK-only** applies, when the automatic case does not, for `Voip` with a narrowband,
+  mediumband, wideband or unset bandwidth at 10, 20, 40 or 60 ms, at any sample rate, mono or
+  stereo. In-band FEC and DTX are supported.
+- **CELT-only** is everything else (40 and 60 ms are packed as two or three 20 ms frames).
+  Requesting in-band FEC or DTX on this path makes the constructor throw `NotSupportedException`.
+
+## SIMD kernel sets
+
+Kernels are grouped into sets, one per instruction-set tier, in `Simd/Kernels/`. A tier is a
+`struct` implementing the kernel interfaces (`ICeltKernels`, `ISilkKernels`, `ISilkEncoderKernels`,
+`IEncoderKernels`) with static abstract members, and the codec classes are generic over the tier,
+so the JIT compiles one body per tier and a kernel call inside a frame is a direct, inlinable call
+(no per-call dispatch; NativeAOT-safe).
+
+| Tier | Selected when |
+|---|---|
+| `Avx2FmaKernels` | x64 with AVX2 and FMA3 (128-bit VEX forms with FMA; no `Vector256`) |
+| `AdvSimdArm64Kernels` | arm64 (`AdvSimd` and `AdvSimd.Arm64` directly, with fused multiply-add) |
+| `Vector128Kernels` | any other host where `Vector128` is accelerated (for example SSE2-only x64, WASM) |
+| `ScalarKernels` | otherwise, and whenever `KILN_AUDIO_DISABLE_SIMD` is `1` or `true` |
+
+`AudioKernels.Select()` is called once in each decoder or encoder constructor and tests the tiers
+in the order above. The environment variable is read once per process (`SimdConfig`). Each vector
+tier is checked against the scalar tier by parity tests (`KernelTierParityTests`,
+`SilkDecodeKernelTierParityTests`, `SilkKernelTierParityTests`, `SilkNsqLaneParityTests`,
+`SimdParityTests`); integer SILK kernels are bit-identical to scalar, float CELT kernels are within
+a bound relative to the signal RMS. The x64 tier cannot run on the arm64 development machine and is
+covered by the same tests on x64 CI. See performance.md for the measured effect (arm64 only).
 
 ## SILK synthesis
 

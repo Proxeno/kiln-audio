@@ -55,6 +55,8 @@ implementation embedded in Appendix A of RFC 6716:
 - `src/Kiln.Audio/Silk/Encoder/SilkNsq.cs`
 - `src/Kiln.Audio/Silk/Encoder/SilkPitchAnalysis.cs`
 - `src/Kiln.Audio/Silk/Encoder/SilkVad.cs`
+- `src/Kiln.Audio/Simd/EncKernels.cs`
+- `src/Kiln.Audio/Simd/EncPvqKernel.cs`
 
 `src/Kiln.Audio/Silk/Encoder/SilkInputResampler.cs` is original work, not derived
 from the reference implementation.
@@ -99,3 +101,20 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## Test-only material (not part of the NuGet package)
+
+The following is used only by the test suite. None of it is compiled into
+`Kiln.Audio.dll` or shipped in the `Proxeno.Kiln.Audio` package.
+
+- `tests/Kiln.Audio.Tests/SilkEncoder/SilkNsqDelayedDecisionReference.cs` is derived from
+  the RFC 6716 Appendix A reference implementation, under the notice above.
+- `tests/Kiln.Audio.Tests/Oracle/OpusCompare.cs` is a C# port of `opus_compare.c`, the
+  quality metric of RFC 6716 Section 6 / RFC 8251. Copyright (c) 2011-2012 Xiph.Org
+  Foundation, Mozilla Corporation; written by Jean-Marc Valin and Timothy B. Terriberry.
+  It is under the two-clause BSD license reproduced in full at the top of that file.
+- `tests/Kiln.Audio.Tests/Fixtures/opus_testvectors/*.bit` are the RFC 8251 conformance
+  test vectors, unmodified, from the URL recorded in `SOURCE.md` in that directory.
+- libopus 1.5.2 is downloaded and built by `scripts/build-libopus-oracle.sh` into the
+  git-ignored `.oracle/` directory and run as an external process by oracle tests. No
+  libopus source or binary is committed to this repository.

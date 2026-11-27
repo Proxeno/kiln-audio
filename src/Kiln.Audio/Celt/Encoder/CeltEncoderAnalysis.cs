@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -19,7 +20,7 @@ internal static class CeltEncoderAnalysis
     /// Chooses the per-band time/frequency resolution and writes nothing
     /// (RFC 6716 Appendix A, celt/celt.c: <c>tf_analysis</c>).
     /// </summary>
-    internal static int TfAnalysis(
+    internal static int TfAnalysis<TK>(
         ReadOnlySpan<short> eBands,
         int len,
         int channels,
@@ -34,6 +35,7 @@ internal static class CeltEncoderAnalysis
         Span<int> path0,
         Span<int> path1,
         Span<float> tmp)
+        where TK : struct, IEncoderKernels
     {
         if (nbCompressedBytes < 15 * channels)
         {
@@ -65,10 +67,8 @@ internal static class CeltEncoderAnalysis
             }
             else
             {
-                for (int j = 0; j < samples; j++)
-                {
-                    tmp[j] = spectrum[bandStart + j] + spectrum[channelStride + bandStart + j];
-                }
+                spectrum.Slice(bandStart, samples).CopyTo(tmp);
+                TK.AddInPlace(tmp.Slice(0, samples), spectrum.Slice(channelStride + bandStart, samples));
             }
 
             float best = L1Metric(tmp, samples, isTransient ? lm : 0, samples >> lm);
@@ -78,11 +78,11 @@ internal static class CeltEncoderAnalysis
                 int blocks = isTransient ? lm - k - 1 : k + 1;
                 if (isTransient)
                 {
-                    Haar1(tmp, samples >> (lm - k), 1 << (lm - k));
+                    TK.Haar(tmp, samples >> (lm - k), 1 << (lm - k));
                 }
                 else
                 {
-                    Haar1(tmp, samples >> k, 1 << k);
+                    TK.Haar(tmp, samples >> k, 1 << k);
                 }
 
                 float l1 = L1Metric(tmp, samples, blocks, samples >> lm);
@@ -233,7 +233,7 @@ internal static class CeltEncoderAnalysis
     }
 
     /// <summary>Decides whether to spread the pulses (RFC 6716 Appendix A, celt/celt.c: spreading_decision).</summary>
-    internal static int SpreadingDecision(
+    internal static int SpreadingDecision<TK>(
         ReadOnlySpan<short> eBands,
         ReadOnlySpan<float> spectrum,
         int channels,
@@ -245,6 +245,7 @@ internal static class CeltEncoderAnalysis
         bool updateHf,
         int end,
         int m)
+        where TK : struct, IEncoderKernels
     {
         if (m * (eBands[end] - eBands[end - 1]) <= 8)
         {
@@ -265,29 +266,8 @@ internal static class CeltEncoderAnalysis
                     continue;
                 }
 
-                int t0 = 0;
-                int t1 = 0;
-                int t2 = 0;
                 int offset = channelOffset + (m * eBands[i]);
-                for (int j = 0; j < bandSamples; j++)
-                {
-                    float value = spectrum[offset + j];
-                    float x2N = value * value * bandSamples;
-                    if (x2N < 0.25f)
-                    {
-                        t0++;
-                    }
-
-                    if (x2N < 0.0625f)
-                    {
-                        t1++;
-                    }
-
-                    if (x2N < 0.015625f)
-                    {
-                        t2++;
-                    }
-                }
+                TK.SpreadCounts(spectrum.Slice(offset, bandSamples), bandSamples, out int t0, out int t1, out int t2);
 
                 if (i > BandCount - 4)
                 {
@@ -434,28 +414,6 @@ internal static class CeltEncoderAnalysis
         {
             int bandSamples = (eBands[i + 1] - eBands[i]) << lm;
             cap[i] = (CeltTables.CacheCaps[(BandCount * ((2 * lm) + channels - 1)) + i] + 64) * channels * bandSamples >> 2;
-        }
-    }
-
-    /// <summary>The Haar transform used by the time/frequency analysis (RFC 6716 Appendix A, celt/bands.c: haar1).</summary>
-    internal static void Haar1(Span<float> x, int n0, int stride)
-    {
-        n0 >>= 1;
-        ref float values = ref MemoryMarshal.GetReference(x);
-        for (int i = 0; i < stride; i++)
-        {
-            int even = i;
-            int odd = stride + i;
-            int advance = 2 * stride;
-            for (int j = 0; j < n0; j++)
-            {
-                float first = 0.70710678f * Unsafe.Add(ref values, even);
-                float second = 0.70710678f * Unsafe.Add(ref values, odd);
-                Unsafe.Add(ref values, even) = first + second;
-                Unsafe.Add(ref values, odd) = first - second;
-                even += advance;
-                odd += advance;
-            }
         }
     }
 }

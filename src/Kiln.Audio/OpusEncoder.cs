@@ -11,30 +11,37 @@ namespace Kiln.Audio;
 /// <summary>Opus (RFC 6716) encoder.</summary>
 /// <remarks>
 /// <para>
-/// <see cref="OpusApplication.Voip"/> and <see cref="OpusApplication.Audio"/> select the
-/// automatic mode policy for mono 48 kHz 10 and 20 ms frames: each frame is coded as SILK-only,
-/// hybrid (SILK wideband plus CELT from band 17) or CELT-only from the bitrate, a per-frame
-/// voice/music estimate, the application, the <see cref="OpusEncoderOptions.Bandwidth"/> cap and
-/// the reference's decision thresholds. The SILK internal bandwidth is fixed at construction
-/// (wideband unless the cap is narrower). With <see cref="OpusEncoderOptions.UseInbandFec"/> the
-/// SILK layer is the multi-channel packet encoder, so SILK and hybrid frames carry LBRR.
+/// The options select one of three encoder paths at construction:
 /// </para>
-/// <para>
-/// Other Voip configurations select one encoder directly: SILK-only for mono or stereo 10 to
-/// 60 ms at a SILK bandwidth, and CELT for the rest (2.5 or 5 ms, super-wideband/fullband
-/// hints). The CELT encoder supports mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10,
-/// 20, 40 or 60 ms frames, constant or variable bitrate, and the pitch pre-filter; a 40 or 60 ms
-/// frame is two or three 20 ms frames in one code 1 or code 3 packet.
-/// <see cref="OpusApplication.RestrictedLowDelay"/> always selects CELT-only.
-/// </para>
-/// <para>
-/// The SILK-only path supports stereo, in-band FEC and DTX. The CELT-only path rejects in-band
-/// FEC and DTX.
-/// </para>
+/// <list type="bullet">
+/// <item><description><b>Automatic per-frame SILK, hybrid or CELT selection:</b>
+/// <see cref="OpusEncoderOptions.Application"/> is <see cref="OpusApplication.Voip"/> or
+/// <see cref="OpusApplication.Audio"/>, mono, 48 kHz, 10 or 20 ms frames, and
+/// <see cref="OpusEncoderOptions.UseDtx"/> is false. Each frame is coded as SILK-only, hybrid
+/// (SILK wideband plus CELT from band 17) or CELT-only from the bitrate, a per-frame voice/music
+/// estimate, the application and the reference's decision thresholds.
+/// <see cref="OpusEncoderOptions.Bandwidth"/>, when set, caps the audio bandwidth. In-band FEC is
+/// supported, so SILK and hybrid frames can carry LBRR.</description></item>
+/// <item><description><b>SILK-only:</b> <see cref="OpusApplication.Voip"/> with a bandwidth that is
+/// null, narrowband, mediumband or wideband, 10, 20, 40 or 60 ms frames, any sample rate, mono or
+/// stereo, when the automatic case does not apply. In-band FEC and DTX are supported.</description></item>
+/// <item><description><b>CELT-only:</b> everything else. That is
+/// <see cref="OpusApplication.RestrictedLowDelay"/> always; <see cref="OpusApplication.Audio"/> in
+/// stereo, at a rate other than 48 kHz or at a frame size other than 10 or 20 ms; and
+/// <see cref="OpusApplication.Voip"/> with 2.5 or 5 ms frames or a super-wideband or fullband
+/// bandwidth outside the automatic case. Frames of 40 and 60 ms are packed as two or three 20 ms
+/// frames in one packet. Requesting <see cref="OpusEncoderOptions.UseInbandFec"/> or
+/// <see cref="OpusEncoderOptions.UseDtx"/> on this path makes the constructor throw
+/// <see cref="NotSupportedException"/>.</description></item>
+/// </list>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
-/// byte followed by one CELT frame (or the multi-frame layout for 40 and 60 ms). It allocates
-/// nothing after construction.
+/// byte followed by the frame data for the selected path. It allocates nothing after construction.
+/// </para>
+/// <para>
+/// An encoder instance is not thread-safe: it carries the codec state of one stream, so calls on
+/// one instance must not overlap. Separate instances are independent and can be used concurrently
+/// on different threads.
 /// </para>
 /// </remarks>
 public sealed class OpusEncoder : IDisposable
@@ -70,7 +77,10 @@ public sealed class OpusEncoder : IDisposable
     /// <param name="options">Encoder configuration.</param>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An option value is illegal.</exception>
-    /// <exception cref="NotSupportedException">A legal but unsupported option was requested.</exception>
+    /// <exception cref="NotSupportedException">
+    /// <see cref="OpusEncoderOptions.UseInbandFec"/> or <see cref="OpusEncoderOptions.UseDtx"/> was
+    /// requested with options that select the CELT-only path, which supports neither.
+    /// </exception>
     public OpusEncoder(OpusEncoderOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -223,12 +233,12 @@ public sealed class OpusEncoder : IDisposable
         // Audio and RestrictedLowDelay both select the CELT path, as before the SILK encoder.
         if (options.UseInbandFec)
         {
-            throw new NotSupportedException("In-band forward error correction (LBRR) is not implemented.");
+            throw new NotSupportedException("In-band forward error correction (LBRR) is a SILK feature and is not available on the CELT-only path selected by these options.");
         }
 
         if (options.UseDtx)
         {
-            throw new NotSupportedException("Discontinuous transmission is not implemented.");
+            throw new NotSupportedException("Discontinuous transmission is only available on the SILK-only path (Voip, narrowband to wideband, 10 to 60 ms frames).");
         }
 
         Options = options;
@@ -280,9 +290,11 @@ public sealed class OpusEncoder : IDisposable
     /// <param name="packet">
     /// Destination for the packet; must hold the TOC byte and the frame. Constant bitrate needs
     /// the configured frame size plus the framing bytes; variable bitrate may use as much of the
-    /// buffer as is available (up to 1275 bytes per 20 ms frame).
+    /// buffer as is available (up to 1275 bytes per 20 ms frame). A buffer of 1276 bytes (the
+    /// 1275-byte maximum frame plus the TOC byte) always suffices for frames up to 20 ms.
     /// </param>
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
+    /// <exception cref="ObjectDisposedException">The encoder has been disposed.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="pcm"/> is not exactly one frame, or <paramref name="packet"/> is too small.
     /// </exception>
@@ -371,10 +383,19 @@ public sealed class OpusEncoder : IDisposable
     /// <param name="pcm">
     /// Exactly one frame of interleaved normalized samples at <see cref="OpusEncoderOptions.SampleRate"/>.
     /// </param>
-    /// <param name="packet">Destination for the packet.</param>
+    /// <param name="packet">
+    /// Destination for the packet. See <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> for
+    /// how to size it; a 1276-byte buffer always suffices for frames up to 20 ms.
+    /// </param>
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
+    /// <exception cref="ObjectDisposedException">The encoder has been disposed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="pcm"/> is not exactly one frame, or <paramref name="packet"/> is too small.
+    /// </exception>
     public int Encode(ReadOnlySpan<float> pcm, Span<byte> packet)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         if (pcm.Length != _conversionBuffer.Length)
         {
             throw new ArgumentException(

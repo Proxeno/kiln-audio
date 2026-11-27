@@ -3,6 +3,8 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -33,7 +35,6 @@ internal sealed class CeltEncoderBands
     private readonly int[] _iy = new int[CeltTables.MaxFrameSamples];
     private readonly float[] _signs = new float[CeltTables.MaxFrameSamples];
     private readonly float[] _y = new float[CeltTables.MaxFrameSamples];
-    private readonly uint[] _u = new uint[256];
     private readonly float[] _hadamardScratch = new float[512];
 
     private readonly int[] _pulses = new int[BandCount];
@@ -46,7 +47,7 @@ internal sealed class CeltEncoderBands
     /// Quantizes every coded band and writes the PVQ symbols (RFC 6716 Appendix A,
     /// celt/bands.c: <c>quant_all_bands</c>).
     /// </summary>
-    internal void QuantAllBands(
+    internal void QuantAllBands<TK>(
         ref RangeEncoder enc,
         ReadOnlySpan<short> eBands,
         int start,
@@ -65,6 +66,7 @@ internal sealed class CeltEncoderBands
         int intensity,
         int dualStereo,
         ReadOnlySpan<float> bandEnergy)
+        where TK : struct, IEncoderKernels
     {
         int m = 1 << lm;
         int blocks = shortBlocks ? m : 1;
@@ -101,24 +103,24 @@ internal sealed class CeltEncoderBands
             if (dualStereo != 0)
             {
                 Span<float> y = spectrum.Slice(channelStride + bandStart, bandSamples);
-                QuantBand(ref enc, x, default, bandSamples, b / 2, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
-                QuantBand(ref enc, y, default, bandSamples, b / 2, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+                QuantBand<TK>(ref enc, x, default, bandSamples, b / 2, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+                QuantBand<TK>(ref enc, y, default, bandSamples, b / 2, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
             }
             else if (channels == 2)
             {
                 Span<float> y = spectrum.Slice(channelStride + bandStart, bandSamples);
-                QuantBand(ref enc, x, y, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+                QuantBand<TK>(ref enc, x, y, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
             }
             else
             {
-                QuantBand(ref enc, x, default, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
+                QuantBand<TK>(ref enc, x, default, bandSamples, b, blocks, tfResolution[i], lm, ref remainingBits, 0, bandEnergy);
             }
 
             balance += pulses[i] + tell;
         }
     }
 
-    private void QuantBand(
+    private void QuantBand<TK>(
         ref RangeEncoder enc,
         Span<float> x,
         Span<float> y,
@@ -130,6 +132,7 @@ internal sealed class CeltEncoderBands
         ref int remainingBits,
         int level,
         ReadOnlySpan<float> bandEnergy)
+        where TK : struct, IEncoderKernels
     {
         bool stereo = !y.IsEmpty;
         bool longBlocks = blocks == 1;
@@ -163,7 +166,7 @@ internal sealed class CeltEncoderBands
 
             for (int k = 0; k < recombine; k++)
             {
-                Haar1(x, n >> k, 1 << k);
+                TK.Haar(x, n >> k, 1 << k);
             }
 
             blocks >>= recombine;
@@ -171,7 +174,7 @@ internal sealed class CeltEncoderBands
 
             while ((nB & 1) == 0 && tfChange < 0)
             {
-                Haar1(x, nB, blocks);
+                TK.Haar(x, nB, blocks);
                 blocks <<= 1;
                 nB >>= 1;
                 timeDivide++;
@@ -186,6 +189,7 @@ internal sealed class CeltEncoderBands
             }
         }
 
+        EncProf.Mark(34, "  qb: tf haar/hadamard");
         bool split = stereo;
         if (!stereo)
         {
@@ -286,6 +290,7 @@ internal sealed class CeltEncoderBands
                 itheta = 0;
             }
 
+            EncProf.Mark(35, "  qb: theta (itheta, intensity/split)");
             int qalloc = (int)enc.TellFrac() - tell;
             b -= qalloc;
 
@@ -329,7 +334,7 @@ internal sealed class CeltEncoderBands
                 }
 
                 sign = 1 - (2 * sign);
-                QuantBand(ref enc, x2, default, n, mbits, blocks, tfChange, lm, ref remainingBits, level, bandEnergy);
+                QuantBand<TK>(ref enc, x2, default, n, mbits, blocks, tfChange, lm, ref remainingBits, level, bandEnergy);
                 y2[0] = -sign * x2[1];
                 y2[1] = sign * x2[0];
             }
@@ -355,25 +360,25 @@ internal sealed class CeltEncoderBands
                 int rebalance = remainingBits;
                 if (mbits >= sbits)
                 {
-                    QuantBand(ref enc, lower, default, n, mbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                    QuantBand<TK>(ref enc, lower, default, n, mbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
                     rebalance = mbits - (rebalance - remainingBits);
                     if (rebalance > 3 << BitRes && itheta != 0)
                     {
                         sbits += rebalance - (3 << BitRes);
                     }
 
-                    QuantBand(ref enc, upper, default, n, sbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                    QuantBand<TK>(ref enc, upper, default, n, sbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
                 }
                 else
                 {
-                    QuantBand(ref enc, upper, default, n, sbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                    QuantBand<TK>(ref enc, upper, default, n, sbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
                     rebalance = sbits - (rebalance - remainingBits);
                     if (rebalance > 3 << BitRes && itheta != 16384)
                     {
                         mbits += rebalance - (3 << BitRes);
                     }
 
-                    QuantBand(ref enc, lower, default, n, mbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
+                    QuantBand<TK>(ref enc, lower, default, n, mbits, blocks, tfChange, lm, ref remainingBits, nextLevel, bandEnergy);
                 }
             }
 
@@ -395,8 +400,8 @@ internal sealed class CeltEncoderBands
         if (pulses != 0)
         {
             int k = CeltTables.GetPulses(pulses);
-            CeltEncoderVq.AlgQuant(
-                x, _iy.AsSpan(0, n), _signs.AsSpan(0, n), _y.AsSpan(0, n), _u, n, k, blocks, _spread, ref enc);
+            CeltEncoderVq.AlgQuant<TK>(
+                x, _iy.AsSpan(0, n), _signs.AsSpan(0, n), _y.AsSpan(0, n), n, k, blocks, _spread, ref enc);
         }
 
         _ = timeDivide;
@@ -518,28 +523,6 @@ internal sealed class CeltEncoderBands
 
         int row = CeltTables.CacheIndex[((lm + 1) * BandCount) + _band];
         return CeltTables.CacheBits[row + pulses] + 1;
-    }
-
-    /// <summary>The Haar transform used by the time/frequency reshaping (RFC 6716 Appendix A, celt/bands.c: haar1).</summary>
-    private static void Haar1(Span<float> x, int n0, int stride)
-    {
-        n0 >>= 1;
-        ref float values = ref MemoryMarshal.GetReference(x);
-        for (int i = 0; i < stride; i++)
-        {
-            int even = i;
-            int odd = stride + i;
-            int advance = 2 * stride;
-            for (int j = 0; j < n0; j++)
-            {
-                float first = 0.70710678f * Unsafe.Add(ref values, even);
-                float second = 0.70710678f * Unsafe.Add(ref values, odd);
-                Unsafe.Add(ref values, even) = first + second;
-                Unsafe.Add(ref values, odd) = first - second;
-                even += advance;
-                odd += advance;
-            }
-        }
     }
 
     private void DeinterleaveHadamard(Span<float> x, int n0, int stride, bool hadamard)
