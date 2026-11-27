@@ -718,12 +718,12 @@ internal sealed class SilkDecoder
         // special rate levels 9 and (after ten escapes) 10, and means "extra LSBs follow".
         for (int block = 0; block < blocks; block++)
         {
-            int pulses = dec.DecodePdf(SilkTables.PulseCountPdf[rateLevel]);
+            int pulses = dec.DecodeIcdf8(SilkTables.PulseCountIcdf[rateLevel]);
             int lsbCount = 0;
             while (pulses == 17)
             {
                 lsbCount++;
-                pulses = dec.DecodePdf(SilkTables.PulseCountPdf[lsbCount >= 10 ? 10 : 9]);
+                pulses = dec.DecodeIcdf8(SilkTables.PulseCountIcdf[lsbCount >= 10 ? 10 : 9]);
             }
 
             target.ShellBlockPulseCount[block] = pulses;
@@ -750,7 +750,7 @@ internal sealed class SilkDecoder
                 int magnitude = blockPulses[sample];
                 for (int bit = 0; bit < lsbCount; bit++)
                 {
-                    magnitude = (magnitude << 1) | dec.DecodePdf(SilkTables.LsbPdf);
+                    magnitude = (magnitude << 1) | dec.DecodeIcdf8(SilkTables.LsbIcdf);
                 }
 
                 blockPulses[sample] = (short)magnitude;
@@ -758,7 +758,7 @@ internal sealed class SilkDecoder
         }
 
         // RFC 6716 §4.2.7.8.5: signs last, for every non-zero magnitude. A zero symbol negates.
-        byte[][] signPdfs = SilkTables.SignPdf[(int)target.SignalType][target.QuantizationOffsetType];
+        byte[][] signPdfs = SilkTables.SignIcdf[(int)target.SignalType][target.QuantizationOffsetType];
         for (int block = 0; block < blocks; block++)
         {
             byte[] signPdf = signPdfs[Math.Min(target.ShellBlockPulseCount[block], 6)];
@@ -766,7 +766,7 @@ internal sealed class SilkDecoder
                 block * SilkChannelFrame.ShellBlockSize, SilkChannelFrame.ShellBlockSize);
             for (int sample = 0; sample < SilkChannelFrame.ShellBlockSize; sample++)
             {
-                if (blockPulses[sample] != 0 && dec.DecodePdf(signPdf) == 0)
+                if (blockPulses[sample] != 0 && dec.DecodeIcdf8(signPdf) == 0)
                 {
                     blockPulses[sample] = (short)-blockPulses[sample];
                 }
@@ -784,13 +784,13 @@ internal sealed class SilkDecoder
 
         if (size == 2)
         {
-            int split = dec.DecodePdf(SilkTables.PulseSplitPdf(2, count));
+            int split = dec.DecodeIcdf8(SilkTables.PulseSplitIcdf(2, count));
             pulses[offset] = (short)split;
             pulses[offset + 1] = (short)(count - split);
             return;
         }
 
-        int left = dec.DecodePdf(SilkTables.PulseSplitPdf(size, count));
+        int left = dec.DecodeIcdf8(SilkTables.PulseSplitIcdf(size, count));
         SplitPulses(ref dec, pulses, offset, size / 2, left);
         SplitPulses(ref dec, pulses, offset + (size / 2), size / 2, count - left);
     }
