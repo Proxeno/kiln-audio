@@ -3,6 +3,7 @@
 using System.Runtime.Intrinsics;
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -83,7 +84,7 @@ internal sealed class CeltPrefilter
     /// </param>
     /// <param name="window">The rising CELT window, <see cref="Overlap"/> samples.</param>
     /// <returns>True when the pre-filter was enabled.</returns>
-    internal bool Process(
+    internal bool Process<TK>(
         ref RangeEncoder enc,
         Span<float> input,
         int channels,
@@ -94,6 +95,7 @@ internal sealed class CeltPrefilter
         int tapsetDecision,
         bool allowPitch,
         ReadOnlySpan<float> window)
+        where TK : struct, IEncoderKernels
     {
         int stride = frameSamples + Overlap;
         BuildPreAndHistory(input, channels, frameSamples, stride);
@@ -105,7 +107,7 @@ internal sealed class CeltPrefilter
         if (allowPitch && availableBytes > 12 * channels && complexity >= 5)
         {
             PitchDownsample(channels, MaxPeriod + frameSamples, stride);
-            PitchSearch(
+            PitchSearch<TK>(
                 _pitchBuffer.AsSpan(MaxPeriod >> 1),
                 _pitchBuffer,
                 frameSamples,
@@ -455,8 +457,9 @@ internal sealed class CeltPrefilter
     }
 
     /// <summary>The decimated correlation pitch search (RFC 6716 Appendix A, celt/pitch.c: pitch_search).</summary>
-    private void PitchSearch(
+    private void PitchSearch<TK>(
         ReadOnlySpan<float> xLow, ReadOnlySpan<float> y, int len, int maxPitch, out int pitch)
+        where TK : struct, IEncoderKernels
     {
         int lag = len + maxPitch;
         Span<float> xLow4 = _xLp4.AsSpan(0, Math.Max(1, len >> 2));
@@ -474,10 +477,10 @@ internal sealed class CeltPrefilter
         }
 
         int coarseLength = len >> 2;
+        TK.XcorrLags(xLow4[..coarseLength], yLow4, coarseCount, coarseLength, _xcorr);
         for (int i = 0; i < coarseCount; i++)
         {
-            float sum = DotProduct(xLow4[..coarseLength], yLow4.Slice(i, coarseLength), SimdConfig.UseSimd);
-            _xcorr[i] = Math.Max(-1f, sum);
+            _xcorr[i] = Math.Max(-1f, _xcorr[i]);
         }
 
         _bestPitch[0] = 0;

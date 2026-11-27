@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Kiln.Audio.Simd.Kernels;
 
 /// <summary>The scalar tier: the reference path and the target of <c>KILN_AUDIO_DISABLE_SIMD</c>.</summary>
-internal readonly partial struct ScalarKernels : ICeltKernels
+internal readonly partial struct ScalarKernels : ICeltKernels, ISilkEncoderKernels, IEncoderKernels
 {
     private const MethodImplOptions Inline = MethodImplOptions.AggressiveInlining;
 

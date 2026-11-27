@@ -26,10 +26,15 @@ internal static class CorpusData
         return [.. mono];
     }
 
+    /// <summary>Reads one vector's interleaved stereo 48 kHz PCM.</summary>
+    internal static short[] ReadStereo(int vector) => ReadPcm(Locate(vector));
+
     private static string Locate(int vector)
     {
         string fileName = FormattableString.Invariant($"testvector{vector:D2}.dec");
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        foreach (string start in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
+        {
+        var directory = new DirectoryInfo(start);
         while (directory is not null)
         {
             string candidate = Path.Combine(
@@ -40,6 +45,7 @@ internal static class CorpusData
             }
 
             directory = directory.Parent;
+        }
         }
 
         throw new FileNotFoundException(

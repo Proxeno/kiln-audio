@@ -1,6 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using System;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Silk.Encoder;
 
@@ -75,12 +76,13 @@ internal sealed class SilkPitchAnalysis
     /// <param name="residual">Receives the LPC residual; must hold <c>la_pitch + frame_length + ltp_mem_length</c>.</param>
     /// <param name="xBuffer">The encoder's x buffer; the frame starts at <paramref name="frameOffset"/>.</param>
     /// <param name="frameOffset">Offset of the frame in <paramref name="xBuffer"/> (the LTP memory length).</param>
-    internal void FindPitchLags(
+    internal void FindPitchLags<TK>(
         SilkEncoderState encoder,
         SilkEncoderControl control,
         Span<short> residual,
         ReadOnlySpan<short> xBuffer,
         int frameOffset)
+        where TK : struct, ISilkEncoderKernels
     {
         int bufferLength = encoder.LaPitch + encoder.FrameLength + encoder.LtpMemLength;
         int windowLength = encoder.PitchLpcWinLength;
@@ -102,7 +104,7 @@ internal sealed class SilkPitchAnalysis
         Span<int> coefficientsQ24 = stackalloc int[SilkEncoderMath.MaxLpcOrder];
         Span<short> coefficientsQ12 = stackalloc short[SilkEncoderMath.MaxLpcOrder];
 
-        SilkEncoderMath.Autocorr(out _, autocorrelation, windowed[..windowLength], windowLength, encoder.PitchEstimationLpcOrder + 1);
+        SilkEncoderMath.Autocorr<TK>(out _, autocorrelation, windowed[..windowLength], windowLength, encoder.PitchEstimationLpcOrder + 1);
 
         autocorrelation[0] = SilkFixedPoint.Smlawb(autocorrelation[0], autocorrelation[0], 66) + 1;
 
@@ -119,7 +121,7 @@ internal sealed class SilkPitchAnalysis
         }
 
         SilkEncoderMath.Bwexpander(coefficientsQ12, encoder.PitchEstimationLpcOrder, 64881);
-        SilkEncoderMath.LpcAnalysisFilter(
+        TK.LpcAnalysisFilter(
             residual, xBufferView, coefficientsQ12, bufferLength, encoder.PitchEstimationLpcOrder);
 
         if (encoder.Indices.SignalType != 0 && encoder.FirstFrameAfterReset == 0)
@@ -131,7 +133,7 @@ internal sealed class SilkPitchAnalysis
             thresholdQ15 = SilkFixedPoint.Smlawb(thresholdQ15, -6553, encoder.InputTiltQ15);
             thresholdQ15 = SilkEncoderMath.Sat16(thresholdQ15);
 
-            int voiced = PitchAnalysisCore(
+            int voiced = PitchAnalysisCore<TK>(
                 residual[.._frameLength],
                 control.PitchL,
                 out int lagIndex,
@@ -164,7 +166,7 @@ internal sealed class SilkPitchAnalysis
         }
     }
 
-    private int PitchAnalysisCore(
+    private int PitchAnalysisCore<TK>(
         ReadOnlySpan<short> frame,
         Span<int> pitchOut,
         out int lagIndex,
@@ -175,6 +177,7 @@ internal sealed class SilkPitchAnalysis
         int searchThreshold2Q15,
         int complexity,
         int subframeCount)
+        where TK : struct, ISilkEncoderKernels
     {
         int frameLength = _frameLength;
         int frameLength8Khz = _frameLength8Khz;
@@ -232,13 +235,16 @@ internal sealed class SilkPitchAnalysis
         // First stage: 4 kHz lag search.
         int targetIndex = subframeLength4Khz << 2;
         int halfSubframes = subframeCount >> 1;
+        Span<int> stage1Correlation = stackalloc int[maxLag4Khz - minLag4Khz + 1];
         for (int k = 0; k < halfSubframes; k++)
         {
             int basisIndex = targetIndex - minLag4Khz;
-            int crossCorrelation = SilkEncoderMath.InnerProd(
-                frame4Khz[targetIndex..], frame4Khz[basisIndex..], subframeLength8Khz);
+            TK.CorrLags(
+                frame4Khz[targetIndex..], frame4Khz, basisIndex, maxLag4Khz - minLag4Khz + 1, subframeLength8Khz,
+                stage1Correlation);
+            int crossCorrelation = stage1Correlation[0];
             int normalizer = SilkEncoderMath.AddSat32(
-                SilkEncoderMath.InnerProd(frame4Khz[basisIndex..], frame4Khz[basisIndex..], subframeLength8Khz),
+                TK.InnerProd(frame4Khz[basisIndex..], frame4Khz[basisIndex..], subframeLength8Khz),
                 subframeLength8Khz * 4000);
 
             int value = crossCorrelation / (SilkFixedPoint.SqrtApprox(normalizer) + 1);
@@ -247,8 +253,7 @@ internal sealed class SilkPitchAnalysis
             for (int d = minLag4Khz + 1; d <= maxLag4Khz; d++)
             {
                 basisIndex--;
-                crossCorrelation = SilkEncoderMath.InnerProd(
-                    frame4Khz[targetIndex..], frame4Khz[basisIndex..], subframeLength8Khz);
+                crossCorrelation = stage1Correlation[d - minLag4Khz];
                 normalizer += (frame4Khz[basisIndex] * frame4Khz[basisIndex])
                     - (frame4Khz[basisIndex + subframeLength8Khz] * frame4Khz[basisIndex + subframeLength8Khz]);
                 value = crossCorrelation / (SilkFixedPoint.SqrtApprox(normalizer) + 1);
@@ -281,7 +286,7 @@ internal sealed class SilkPitchAnalysis
         InsertionSortDecreasing(c[(0 * 160)..], minLag4Khz, maxLag4Khz - minLag4Khz + 1, lengthDSearch, searchLags);
 
         int escapeTarget = subframeLength4Khz * subframeCount;
-        int energy = SilkEncoderMath.InnerProd(
+        int energy = TK.InnerProd(
             frame4Khz[escapeTarget..], frame4Khz[escapeTarget..], subframeLength4Khz << 2);
         energy = SilkEncoderMath.AddSat32(energy, 1000);
         int cmax = c[minLag4Khz];
@@ -361,15 +366,15 @@ internal sealed class SilkPitchAnalysis
         int target8 = 160;
         for (int k = 0; k < subframeCount; k++)
         {
-            int energyTarget = SilkEncoderMath.InnerProd(
+            int energyTarget = TK.InnerProd(
                 frame8Khz[target8..], frame8Khz[target8..], subframeLength8Khz);
             for (int j = 0; j < lengthDComp; j++)
             {
                 int d = compressed[j];
                 int basis8 = target8 - d;
-                int crossCorrelation = SilkEncoderMath.InnerProd(
+                int crossCorrelation = TK.InnerProd(
                     frame8Khz[target8..], frame8Khz[basis8..], subframeLength8Khz);
-                int energyBasis = SilkEncoderMath.InnerProd(
+                int energyBasis = TK.InnerProd(
                     frame8Khz[basis8..], frame8Khz[basis8..], subframeLength8Khz);
                 if (crossCorrelation > 0)
                 {
@@ -622,15 +627,10 @@ internal sealed class SilkPitchAnalysis
             int target = sfLength << 2;
             for (int k = 0; k < nbSubframes; k++)
             {
-                int lagCounter = 0;
                 int lagLow = lagRange[k][0];
                 int lagHigh = lagRange[k][1];
-                for (int j = lagLow; j <= lagHigh; j++)
-                {
-                    int basis = target - (startLag + j);
-                    scratch[lagCounter++] = SilkEncoderMath.InnerProd(
-                        frameIn[target..], frameIn[basis..], sfLength);
-                }
+                TK.CorrLags(
+                    frameIn[target..], frameIn, target - (startLag + lagLow), lagHigh - lagLow + 1, sfLength, scratch);
 
                 int delta = lagRange[k][0];
                 for (int i = 0; i < nbSearch; i++)
@@ -670,7 +670,7 @@ internal sealed class SilkPitchAnalysis
             {
                 int lagCounter = 0;
                 int basis = target - (startLag + lagRange[k][0]);
-                int energy = SilkEncoderMath.InnerProd(frameIn[basis..], frameIn[basis..], sfLength);
+                int energy = TK.InnerProd(frameIn[basis..], frameIn[basis..], sfLength);
                 scratch[lagCounter++] = energy;
 
                 int lagDifference = lagRange[k][1] - lagRange[k][0] + 1;

@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Kiln.Audio.Simd.Kernels;
 
 /// <summary>The arm64 tier: <c>AdvSimd</c>/<c>AdvSimd.Arm64</c> directly (zip, unzip, ext, fused multiply-add). Never uses a 256-bit type.</summary>
-internal readonly partial struct AdvSimdArm64Kernels : ICeltKernels
+internal readonly partial struct AdvSimdArm64Kernels : ICeltKernels, ISilkEncoderKernels, IEncoderKernels
 {
     private const MethodImplOptions Inline = MethodImplOptions.AggressiveInlining;
 

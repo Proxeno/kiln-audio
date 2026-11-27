@@ -1,6 +1,8 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using System;
+using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 using Kiln.Audio.Encoder;
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Silk;
@@ -91,6 +93,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private int _hpPrevActivityQ8;
     private int _hpPrevBand0Q15;
     private short[] _hpBuffer = [];
+    private readonly AudioKernelTier _tier = AudioKernels.Select();
 
     /// <summary>Creates and configures the encoder for one fixed mode.</summary>
     internal SilkEncoderCore(
@@ -290,6 +293,21 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         _bitsExceeded = Math.Clamp(_bitsExceeded + (((payloadBits + 7) >> 3) * 8) - packetBits, 0, 10000);
         return payloadBits;
     }
+
+    /// <summary>
+    /// Whether the voice-activity-weighted per-frame allocation applies. The packet layer drives
+    /// the frames directly and must use this to reproduce the same rate control as
+    /// <see cref="EncodeInto"/>; the high-rate regime and multi-frame packets are its only scope.
+    /// </summary>
+    internal bool UsesWeightedFrameAllocation => _state.HighRate != 0 && _silkFrames > 1;
+
+    /// <summary>Prepares the weighted per-frame target rates for one packet.</summary>
+    /// <param name="silkBitrate">The packet's SILK rate, from the byte budget.</param>
+    internal void PrepareWeightedFrameAllocation(int silkBitrate) => ComputeFrameTargetRates(silkBitrate);
+
+    /// <summary>Gets the weighted target rate for one frame, before the bit-reservoir damping.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal int WeightedFrameTargetRate(int frameIndex) => _frameTargetRate[frameIndex];
 
     /// <summary>
     /// Distributes the packet bit budget across the SILK frames of a packet by voice activity, so
@@ -824,12 +842,34 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
 
     private void EncodeFrame(ref RangeEncoder rangeEncoder, int frameIndex, int conditionalCoding, int maxBits, int useCbr)
     {
+        // One switch per frame; everything below it is a direct call specialised to the tier.
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                EncodeFrameCore<Avx2FmaKernels>(ref rangeEncoder, frameIndex, conditionalCoding, maxBits, useCbr);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                EncodeFrameCore<AdvSimdArm64Kernels>(ref rangeEncoder, frameIndex, conditionalCoding, maxBits, useCbr);
+                break;
+            case AudioKernelTier.Vector128:
+                EncodeFrameCore<Vector128Kernels>(ref rangeEncoder, frameIndex, conditionalCoding, maxBits, useCbr);
+                break;
+            default:
+                EncodeFrameCore<ScalarKernels>(ref rangeEncoder, frameIndex, conditionalCoding, maxBits, useCbr);
+                break;
+        }
+    }
+
+    private void EncodeFrameCore<TK>(ref RangeEncoder rangeEncoder, int frameIndex, int conditionalCoding, int maxBits, int useCbr)
+        where TK : struct, ISilkEncoderKernels
+    {
         SilkEncoderState state = _state;
         SilkEncoderControl control = _control;
         int frameLength = state.FrameLength;
         int subframeLength = state.SubframeLength;
         int subframeCount = state.SubframeCount;
 
+        EncProf.Mark(0, "silk other (resample/vad/wrap)");
         state.Indices.Seed = state.FrameCounter++ & 3;
 
         // Copy the new frame next to the shape look-ahead, then run the analysis. The frame input
@@ -839,13 +879,18 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         state.InputBuf.AsSpan(1, frameLength)
             .CopyTo(state.XBuf.AsSpan(frameOffset + (5 * state.FsKhz)));
 
-        _pitchAnalysis.FindPitchLags(state, control, _residual, state.XBuf, frameOffset);
-        SilkEncoderAnalysis.NoiseShapeAnalysis(
+        _pitchAnalysis.FindPitchLags<TK>(state, control, _residual, state.XBuf, frameOffset);
+        EncProf.Mark(1, "silk pitch analysis");
+        SilkEncoderAnalysis.NoiseShapeAnalysis<TK>(
             state, control, _residual.AsSpan(state.LtpMemLength), state.XBuf, frameOffset);
-        SilkEncoderAnalysis.FindPredictionCoefficients(
+        EncProf.Mark(2, "silk noise shape analysis");
+        SilkEncoderAnalysis.FindPredictionCoefficients<TK>(
             state, control, _residual, state.XBuf, frameOffset, conditionalCoding);
+        EncProf.Mark(3, "silk find pred coefs (burg/ltp/nlsf)");
         SilkEncoderAnalysis.ProcessGains(state, control, conditionalCoding);
+        EncProf.Mark(4, "silk process gains");
         SilkEncoderAnalysis.Prefilter(state, control, _xfwQ3, state.XBuf, frameOffset);
+        EncProf.Mark(5, "silk noise-shape prefilter");
 
         // Low-bitrate redundancy reuses this frame's parameters at a higher gain
         // (RFC 6716 Appendix A, silk_LBRR_encode_FIX).
@@ -854,6 +899,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             EncodeLbrrFrame(frameIndex, conditionalCoding);
         }
 
+        EncProf.Mark(6, "silk lbrr");
         int gainMultiplierQ8 = 256;
         bool foundLower = false;
         bool foundUpper = false;
@@ -896,6 +942,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 }
 
                 Quantize(state, control, state.Indices, _xfwQ3, state.Pulses, _delayedDecision);
+                EncProf.Mark(7, "silk NSQ");
 
                 SilkEntropyEncoder.EncodeIndices(ref rangeEncoder, state, frameIndex, conditionalCoding);
                 _lastEncodedIndices.CopyFrom(state.Indices);
@@ -903,6 +950,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 SilkEntropyEncoder.EncodePulses(
                     ref rangeEncoder, state.Indices.SignalType, state.Indices.QuantOffsetType,
                     state.Pulses, frameLength);
+                EncProf.Mark(8, "silk entropy");
 
                 nBits = rangeEncoder.Tell();
                 if (useCbr == 0 && iter == 0 && nBits <= maxBits)

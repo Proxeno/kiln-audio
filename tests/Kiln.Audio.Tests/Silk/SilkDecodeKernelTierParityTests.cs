@@ -10,7 +10,7 @@ namespace Kiln.Audio.Tests.Silk;
 /// tiers directly (no environment variable). The integer kernels must be bit-exact; the float
 /// kernels agree exactly where conversion is exact and to one 16-bit step in the resampler.
 /// </summary>
-public class SilkKernelTierParityTests
+public class SilkDecodeKernelTierParityTests
 {
     /// <summary>The tiers under test (Scalar is the reference).</summary>
     public static TheoryData<int> Tiers => new()
