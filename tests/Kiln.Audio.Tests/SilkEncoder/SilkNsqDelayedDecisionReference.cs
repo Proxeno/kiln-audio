@@ -25,7 +25,7 @@ namespace Kiln.Audio.Tests;
 /// no allocations.
 /// </para>
 /// </remarks>
-internal sealed class SilkNsqDelayedDecision
+internal sealed class SilkNsqDelayedDecisionReference
 {
     /// <summary>The decision delay in samples (Appendix A <c>DECISION_DELAY</c>).</summary>
     internal const int DecisionDelay = 32;
@@ -105,7 +105,7 @@ internal sealed class SilkNsqDelayedDecision
     private int _rewhiteFlag;
 
     /// <summary>Creates a quantizer in its initial state.</summary>
-    public SilkNsqDelayedDecision()
+    public SilkNsqDelayedDecisionReference()
     {
         for (int k = 0; k < MaxStates; k++)
         {
@@ -148,7 +148,7 @@ internal sealed class SilkNsqDelayedDecision
     /// uses this to rewind to the start of a frame before trying a new gain.
     /// </summary>
     /// <param name="other">The quantizer to snapshot from or restore.</param>
-    internal void CopyFrom(SilkNsqDelayedDecision other)
+    internal void CopyFrom(SilkNsqDelayedDecisionReference other)
     {
         ArgumentNullException.ThrowIfNull(other);
         other._xq.AsSpan().CopyTo(_xq);
@@ -169,7 +169,7 @@ internal sealed class SilkNsqDelayedDecision
     /// quantizer (the LBRR path) starts exactly where this one stands.
     /// </summary>
     /// <param name="other">The state to copy from; it must have the same geometry.</param>
-    internal void CopyFullFrom(SilkNsqDelayedDecision other)
+    internal void CopyFullFrom(SilkNsqDelayedDecisionReference other)
     {
         other._xq.AsSpan().CopyTo(_xq);
         other._sLtpShpQ14.AsSpan().CopyTo(_sLtpShpQ14);
