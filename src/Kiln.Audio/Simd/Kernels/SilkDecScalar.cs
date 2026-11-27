@@ -143,7 +143,7 @@ internal static class SilkDecScalar
 
         if (count > 0)
         {
-            long lastNewest = newest + ((long)count * stepSamples) + (((long)phase + ((long)count * stepPhase)) / up);
+            long lastNewest = newest + ((long)(count - 1) * stepSamples) + (((long)phase + ((long)(count - 1) * stepPhase)) / up);
             if (newest - longest + 1 < 0 || lastNewest >= history.Length)
             {
                 throw new ArgumentException("The resampler history is too short for the block.");
