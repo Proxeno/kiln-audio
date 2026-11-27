@@ -20,23 +20,25 @@ namespace Kiln.Audio;
 /// </para>
 /// <para>
 /// Hybrid mode and automatic mode switching are not implemented and are rejected with
-/// <see cref="NotSupportedException"/>.
+/// <see cref="NotSupportedException"/>. A Voip request outside the SILK modes (2.5 or 5 ms, or a
+/// super-wideband/fullband bandwidth hint) keeps the pre-SILK behaviour and encodes with CELT.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
-/// byte followed by the frame or frames. It allocates nothing after construction.
+/// byte followed by one CELT frame (or the multi-frame layout for 40 and 60 ms). It allocates
+/// nothing after construction.
 /// </para>
 /// </remarks>
 public sealed class OpusEncoder : IDisposable
 {
     private readonly CeltEncoder? _encoder;
     private readonly SilkStereoPacketEncoder? _silk;
+    private readonly int _silkFrameSamples;
+    private readonly byte _silkToc;
     private readonly OpusFrameDuration _tocDuration;
     private readonly int _subFrameSamples;
     private readonly int _subFrameCount;
     private readonly int _inputFrameSamples;
-    private readonly int _silkFrameSamples;
-    private readonly byte _silkToc;
     private readonly short[] _conversionBuffer;
     private readonly byte[] _subFrameData;
     private bool _disposed;
@@ -54,22 +56,26 @@ public sealed class OpusEncoder : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
 
-        if (options.Application == OpusApplication.Voip)
-        {
-            if (options.FrameDuration is OpusFrameDuration.Ms2_5 or OpusFrameDuration.Ms5)
-            {
-                throw new NotSupportedException(
-                    FormattableString.Invariant($"SILK supports 10, 20, 40 and 60 ms frames; got {options.FrameDuration}."));
-            }
+        // SILK owns Voip at SILK frame durations and a SILK bandwidth, mono or stereo. Anything
+        // else that asks for Voip keeps the pre-SILK behaviour and encodes with CELT, so existing
+        // callers (2.5/5 ms, super-wideband hints) are not broken.
+        OpusBandwidth? requestedBandwidth = options.Bandwidth;
+        bool silkBandwidth = requestedBandwidth is null
+            or OpusBandwidth.Narrowband or OpusBandwidth.Mediumband or OpusBandwidth.Wideband;
+        bool useSilk = options.Application == OpusApplication.Voip
+            && silkBandwidth
+            && options.FrameDuration is OpusFrameDuration.Ms10 or OpusFrameDuration.Ms20
+                or OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60;
 
-            OpusBandwidth bandwidth = options.Bandwidth ?? OpusBandwidth.Wideband;
+        if (useSilk)
+        {
+            OpusBandwidth bandwidth = requestedBandwidth ?? OpusBandwidth.Wideband;
             int internalRate = bandwidth switch
             {
                 OpusBandwidth.Narrowband => 8000,
                 OpusBandwidth.Mediumband => 12000,
                 OpusBandwidth.Wideband => 16000,
-                _ => throw new NotSupportedException(
-                    "SILK supports narrowband, mediumband and wideband; hybrid and super-wideband/fullband are not implemented."),
+                _ => 16000,
             };
 
             int frameDurationMs = options.FrameDuration switch
@@ -187,7 +193,6 @@ public sealed class OpusEncoder : IDisposable
     public int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-
         if (_silk is not null)
         {
             if (pcm.Length != _silkFrameSamples)

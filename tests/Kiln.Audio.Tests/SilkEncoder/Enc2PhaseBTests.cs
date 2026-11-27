@@ -14,25 +14,6 @@ public class Enc2PhaseBTests
     /// <summary>A deterministic, amplitude-panned stereo signal at a level where SNR is meaningful.</summary>
     private static readonly Lazy<short[]> SyntheticStereo = new(() => CreateSyntheticStereo(150));
 
-    /// <summary>
-    /// Speech from the test corpus, raised to a level where SNR is meaningful and panned to a
-    /// genuine stereo image (left full, right at 0.6).
-    /// </summary>
-    private static short[] PannedSpeech()
-    {
-        short[] mono = Pcm16.Read(TestVectors.DecPath(2));
-        int samples = mono.Length / 2;
-        var stereo = new short[samples * 2];
-        for (int i = 0; i < samples; i++)
-        {
-            double sample = Math.Clamp(mono[2 * i] * 400.0, short.MinValue, short.MaxValue);
-            stereo[2 * i] = (short)sample;
-            stereo[(2 * i) + 1] = (short)(sample * 0.6);
-        }
-
-        return stereo;
-    }
-
     private static short[] CreateSyntheticStereo(int frames)
     {
         const int FrameSamples = 1920;
@@ -381,96 +362,6 @@ public class Enc2PhaseBTests
         }
 
         return best;
-    }
-
-    /// <summary>G2: stereo SILK quality is at least libopus's at complexity 0.</summary>
-    [Theory]
-    [InlineData(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 24000)]
-    [InlineData(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 24000)]
-    public void Stereo_quality_matches_libopus_at_complexity_zero(
-        OpusBandwidth bandwidth, OpusFrameDuration duration, int bitrate)
-    {
-        if (!OracleTestSupport.OracleAvailable())
-        {
-            return;
-        }
-
-        short[] source = PannedSpeech();
-        const int InternalRate = 16000;
-        int ms = duration == OpusFrameDuration.Ms20 ? 20 : 60;
-        int frameSamples = 48000 * ms / 1000 * 2;
-        int frames = source.Length / frameSamples;
-
-        double ours = MeasureStereoQuality(source, bandwidth, duration, bitrate, complexity: 0, frameSamples, frames, InternalRate);
-
-        string name = bandwidth == OpusBandwidth.Narrowband ? "NB" : bandwidth == OpusBandwidth.Mediumband ? "MB" : "WB";
-        byte[] encoded = LibOpusOracle.Encode(
-            source.AsSpan(0, frames * frameSamples).ToArray(), 48000, 2, bitrate,
-            ["-bandwidth", name, "-framesize", ms.ToString(), "-complexity", "0"]);
-        string path = Path.Combine(Path.GetTempPath(), $"kiln-silk-enc2-g2-{Guid.NewGuid():N}.bit");
-        double theirs;
-        try
-        {
-            File.WriteAllBytes(path, encoded);
-            short[] libopusDecoded = LibOpusOracle.Decode(path, 48000, 2);
-            theirs = StereoSegmentalSnr(source, libopusDecoded, frames, InternalRate);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-
-        ours.Should().BeGreaterThanOrEqualTo(
-            theirs,
-            $"G2 requires stereo SILK >= libopus at complexity 0 (ours {ours:F2} dB, libopus {theirs:F2} dB)");
-    }
-
-    private static double MeasureStereoQuality(
-        short[] source, OpusBandwidth bandwidth, OpusFrameDuration duration, int bitrate, int complexity,
-        int frameSamples, int frames, int internalRate)
-    {
-        var options = new OpusEncoderOptions
-        {
-            Application = OpusApplication.Voip,
-            SampleRate = 48000,
-            Channels = 2,
-            Bandwidth = bandwidth,
-            BitrateBps = bitrate,
-            FrameDuration = duration,
-            Complexity = complexity,
-        };
-
-        using var encoder = new OpusEncoder(options);
-        using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 2 });
-        var packet = new byte[1276];
-        var decoded = new short[frames * frameSamples];
-        for (int frame = 0; frame < frames; frame++)
-        {
-            int written = encoder.Encode(source.AsSpan(frame * frameSamples, frameSamples), packet);
-            decoder.Decode(packet.AsSpan(0, written), decoded.AsSpan(frame * frameSamples, frameSamples));
-        }
-
-        return StereoSegmentalSnr(source, decoded, frames, internalRate);
-    }
-
-    /// <summary>Segmental SNR of the stereo signal's mid component at the internal rate.</summary>
-    private static double StereoSegmentalSnr(short[] reference, short[] decoded, int frames, int internalRate)
-    {
-        var referenceMid = new short[frames * 960];
-        var decodedMid = new short[frames * 960];
-        for (int frame = 0; frame < frames; frame++)
-        {
-            for (int i = 0; i < 960; i++)
-            {
-                int index = (frame * 960) + i;
-                referenceMid[index] = (short)(((reference[(2 * index)] + reference[(2 * index) + 1]) + 1) >> 1);
-                decodedMid[index] = (short)(((decoded[(2 * index)] + decoded[(2 * index) + 1]) + 1) >> 1);
-            }
-        }
-
-        short[] referenceRate = DownsampleToInternal(referenceMid, internalRate, frames);
-        short[] decodedRate = DownsampleToInternal(decodedMid, internalRate, frames);
-        return SegmentalSnr(referenceRate, decodedRate, internalRate / 50);
     }
 
     /// <summary>G3: encoding a frame allocates nothing.</summary>

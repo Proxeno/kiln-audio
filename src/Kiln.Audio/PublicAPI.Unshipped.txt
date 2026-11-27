@@ -5,6 +5,7 @@ Kiln.Audio.OpusBandwidth.Mediumband = 1 -> Kiln.Audio.OpusBandwidth
 Kiln.Audio.OpusBandwidth.Narrowband = 0 -> Kiln.Audio.OpusBandwidth
 Kiln.Audio.OpusBandwidth.SuperWideband = 3 -> Kiln.Audio.OpusBandwidth
 Kiln.Audio.OpusBandwidth.Wideband = 2 -> Kiln.Audio.OpusBandwidth
+Kiln.Audio.OpusDecoder.LastFecOutcome.get -> Kiln.Audio.OpusFecOutcome
 Kiln.Audio.OpusEncoderOptions.Bandwidth.get -> Kiln.Audio.OpusBandwidth?
 Kiln.Audio.OpusEncoderOptions.Bandwidth.init -> void
 Kiln.Audio.OpusEncoderOptions.ConstrainedVbr.get -> bool
@@ -15,3 +16,9 @@ Kiln.Audio.OpusEncoderOptions.UseCbr.get -> bool
 Kiln.Audio.OpusEncoderOptions.UseCbr.init -> void
 Kiln.Audio.OpusEncoderOptions.UseVbr.get -> bool
 Kiln.Audio.OpusEncoderOptions.UseVbr.init -> void
+Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusFecOutcome.Concealed = 2 -> Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusFecOutcome.NotRequested = 0 -> Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusFecOutcome.Recovered = 1 -> Kiln.Audio.OpusFecOutcome
+Kiln.Audio.OpusPacket
+static Kiln.Audio.OpusPacket.HasLbrr(System.ReadOnlySpan<byte> packet) -> bool
