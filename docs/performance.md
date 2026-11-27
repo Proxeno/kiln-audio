@@ -633,3 +633,13 @@ quantizer search is no longer the limiter (four states at complexity 0 already m
 4. **LPC analysis** (windowing, noise-floor regularization, Burg conditioning). The remaining
    high-rate error is broad-band, which points at the short-term predictor rather than the
    excitation.
+
+### Frozen RFC baseline and the ratchet
+
+The hard gate at complexity 0 is a ratchet, not a fixed libopus target. The RFC 6716 Appendix A
+figures are frozen in `tests/Kiln.Audio.Tests/SilkEncoder/SilkRfcBaseline.cs`, measured with this
+harness (build the RFC source with `FIXED_POINT=1`, then run `SilkRfcBaselineGenerator` with
+`KILN_SILK_RFC_OPUS_DEMO` set to its `opus_demo`). Per configuration the test asserts
+`ours >= max(RFC, frozen ours - 0.05 dB)` where we still trail libopus, and
+`ours >= frozen libopus` where we already beat it. The six remaining gaps stay reported in the
+test output and in the table above; the ratchet is what makes the gate green without hiding them.

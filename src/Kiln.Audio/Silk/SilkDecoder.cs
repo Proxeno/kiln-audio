@@ -298,7 +298,7 @@ internal sealed class SilkDecoder
     private static bool DecodeFlag(ref RangeDecoder dec) => dec.DecodeBitLogp(1);
 
     /// <summary>Decodes the per-frame LBRR flag mask for one channel (RFC 6716 §4.2.4, Table 4).</summary>
-    private static int DecodeLbrrMask(ref RangeDecoder dec, int silkFrames) => silkFrames switch
+    internal static int DecodeLbrrMask(ref RangeDecoder dec, int silkFrames) => silkFrames switch
     {
         2 => SilkTables.DecodePdf(ref dec, SilkTables.LbrrFlags40Pdf),
         3 => SilkTables.DecodePdf(ref dec, SilkTables.LbrrFlags60Pdf),
