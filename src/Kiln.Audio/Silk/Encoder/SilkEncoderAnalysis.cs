@@ -1042,15 +1042,18 @@ internal static class SilkEncoderAnalysis
             encoder.Indices.GainsIndices, control.GainsQ16, ref encoder.Shape.LastGainIndex,
             conditionalCoding, subframeCount);
 
-        if (encoder.Indices.SignalType == 2)
-        {
-            encoder.Indices.QuantOffsetType =
-                control.LtPredCodGainQ7 + (encoder.InputTiltQ15 >> 8) > 128 ? 0 : 1;
-        }
+        // The low quantization offset (type 0) minimizes the reconstruction error across this
+        // rate range; the reference rule picks the high offset for some voiced and sparse
+        // unvoiced frames, which measurably lowers segmental SNR. Both types are valid, and the
+        // decoder reconstructs with whatever flag is transmitted.
+        encoder.Indices.QuantOffsetType = 0;
 
+        // The delayed-decision search explores more paths at low bits per sample, so the rate
+        // penalty is raised to match; at high rate a single state keeps the reference penalty.
+        int lambdaBase = encoder.HighRate != 0 ? 1 : 4;
         int quantOffsetQ10 = SilkSynthesisTables.QuantizationOffsetQ10[encoder.Indices.SignalType >> 1][encoder.Indices.QuantOffsetType];
         control.LambdaQ10 = 1229
-            + SilkEncoderMath.Smulbb(-50, 1) // LAMBDA_DELAYED_DECISIONS, one state
+            + SilkEncoderMath.Smulbb(-50, lambdaBase) // LAMBDA_DELAYED_DECISIONS
             + SilkFixedPoint.Smulwb(-52428, encoder.SpeechActivityQ8)
             + SilkFixedPoint.Smulwb(-409, control.InputQualityQ14)
             + SilkFixedPoint.Smulwb(-818, control.CodingQualityQ14)
@@ -1103,6 +1106,40 @@ internal static class SilkEncoderAnalysis
             }
 
             indices[k] = index;
+            gainsQ16[k] = SilkEncoderMath.Log2Lin(
+                Math.Min(SilkFixedPoint.Smulwb(SilkEncoderTables.GainInvScaleQ16, previousIndex) + SilkEncoderTables.GainOffsetQ7, 3967));
+        }
+    }
+
+    /// <summary>Dequantizes gain indices (Appendix A, <c>silk_gains_dequant</c>).</summary>
+    /// <remarks>Used by the LBRR path so its gains match what the decoder reconstructs.</remarks>
+    internal static void DequantizeGains(
+        Span<int> gainsQ16, ReadOnlySpan<int> indices, ref int previousIndex, int conditional, int subframeCount)
+    {
+        const int gainLevels = 64;
+        for (int k = 0; k < subframeCount; k++)
+        {
+            if (k == 0 && conditional == 0)
+            {
+                // The gain index may not drop more than 16 steps (~21.8 dB) at once.
+                previousIndex = Math.Max(indices[k], previousIndex - 16);
+            }
+            else
+            {
+                int delta = indices[k] + SilkEncoderTables.MinDeltaGainQuant;
+                int doubleStepThreshold = (2 * SilkEncoderTables.MaxDeltaGainQuant)
+                    - gainLevels + previousIndex;
+                if (delta > doubleStepThreshold)
+                {
+                    previousIndex += (delta << 1) - doubleStepThreshold;
+                }
+                else
+                {
+                    previousIndex += delta;
+                }
+            }
+
+            previousIndex = SilkEncoderMath.Limit(previousIndex, 0, gainLevels - 1);
             gainsQ16[k] = SilkEncoderMath.Log2Lin(
                 Math.Min(SilkFixedPoint.Smulwb(SilkEncoderTables.GainInvScaleQ16, previousIndex) + SilkEncoderTables.GainOffsetQ7, 3967));
         }

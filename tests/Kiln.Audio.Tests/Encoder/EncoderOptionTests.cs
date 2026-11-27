@@ -22,16 +22,17 @@ public class EncoderOptionTests
     }
 
     [Fact]
-    public void The_default_options_select_the_silk_voip_encoder()
+    public void The_default_options_select_the_automatic_silk_path()
     {
         using var encoder = new OpusEncoder(new OpusEncoderOptions());
-        encoder.Options.Should().Be(new OpusEncoderOptions());
         var packet = new byte[1276];
         int written = encoder.Encode(new short[960], packet);
 
         written.Should().BeGreaterThan(1);
-        // RFC 6716 §3.1, Table 2: configs 0..11 are SILK-only.
-        (packet[0] >> 3).Should().BeLessThan(12);
+
+        // Automatic selection starts in SILK or hybrid for a 24 kbps VoIP stream; CELT-only
+        // configurations are 16 and above (RFC 6716 §3.1, Table 2).
+        OpusToc.Parse(packet[0]).Mode.Should().NotBe(OpusMode.Celt);
     }
 
     [Theory]
@@ -89,7 +90,7 @@ public class EncoderOptionTests
     }
 
     [Fact]
-    public void Stereo_voip_falls_back_to_celt_and_decodes()
+    public void Stereo_voip_uses_the_silk_encoder_and_decodes()
     {
         var options = Supported() with
         {
@@ -109,8 +110,9 @@ public class EncoderOptionTests
 
         int written = encoder.Encode(pcm, packet);
         written.Should().BeGreaterThan(1);
-        // RFC 6716 §3.1, Table 2: configs 16..31 are CELT-only, so this is the pre-SILK path.
-        (packet[0] >> 3).Should().BeGreaterThanOrEqualTo(16);
+        // RFC 6716 §3.1, Table 2: configs 0..11 are SILK-only, and bit 2 is the stereo flag.
+        (packet[0] >> 3).Should().BeLessThan(12);
+        (packet[0] & 0x04).Should().NotBe(0);
 
         var decoded = new short[960 * 2];
         decoder.Decode(packet.AsSpan(0, written), decoded).Should().Be(960);

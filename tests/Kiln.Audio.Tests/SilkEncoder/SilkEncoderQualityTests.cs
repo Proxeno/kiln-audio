@@ -16,39 +16,74 @@ namespace Kiln.Audio.Tests.SilkEncoder;
 /// <see cref="SilkRfcBaseline.ToleranceDb"/>). The remaining gaps are reported, never hidden.
 /// </para>
 /// <para>
-/// The frozen values were measured with this harness after SILK-QUAL-1 (delayed-decision NSQ,
-/// warped shaping, a four-state trellis and a stronger c0 search); see the "SILK encoder quality"
-/// section of <c>docs/performance.md</c>.
+/// The frozen values were measured with this harness after SILK-QUAL-2 (a low quantization
+/// offset, a bitrate-gated trellis width and warped shaping, and a stronger low-rate rate model);
+/// see the "SILK encoder quality" section of <c>docs/performance.md</c>.
 /// </para>
 /// </remarks>
 public class SilkEncoderQualityTests
 {
-    /// <summary>Frozen (libopus, ours) at complexity 0, from the verified SILK-QUAL-1 run.</summary>
+    /// <summary>Frozen (libopus, ours) at complexity 0, from the verified SILK-QUAL-2 run.</summary>
+    /// <remarks>
+    /// Where <c>ours</c> is at least libopus the floor is the libopus figure. Otherwise the floor
+    /// is <c>ours - 0.05</c>, which still locks in the SILK-QUAL-2 gain. The Wideband 20 ms 20 kbps
+    /// entry is a measured tie (gap -0.00 dB), so it keeps the trailing branch deliberately.
+    /// </remarks>
     private static readonly Dictionary<(OpusBandwidth, OpusFrameDuration, int), (double Libopus, double Ours)>
         Ratchet = new()
         {
-            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 8000)] = (3.60, 3.64),
-            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 8000)] = (3.64, 3.72),
-            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 12000)] = (5.51, 5.03),
-            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 12000)] = (5.49, 5.08),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 8000)] = (2.77, 3.52),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 8000)] = (2.81, 3.64),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 12000)] = (5.01, 5.07),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 12000)] = (4.84, 5.10),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 20000)] = (6.73, 6.16),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 20000)] = (6.72, 6.11),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 8000)] = (1.71, 3.17),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 8000)] = (1.77, 3.35),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 12000)] = (4.50, 4.57),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 12000)] = (4.37, 4.60),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 20000)] = (6.44, 6.14),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 20000)] = (6.43, 6.08),
+            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 8000)] = (3.60, 4.01),
+            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 8000)] = (3.64, 4.10),
+            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 12000)] = (5.51, 5.36),
+            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 12000)] = (5.49, 5.44),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 8000)] = (2.77, 4.06),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 8000)] = (2.81, 4.12),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 12000)] = (5.01, 5.33),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 12000)] = (4.84, 5.41),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 20000)] = (6.73, 6.52),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 20000)] = (6.72, 6.41),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 8000)] = (1.71, 3.92),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 8000)] = (1.77, 4.04),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 12000)] = (4.50, 5.03),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 12000)] = (4.37, 5.06),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 20000)] = (6.44, 6.43),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 20000)] = (6.43, 6.35),
         };
 
     private static readonly Lazy<IReadOnlyList<(int Vector, short[] Mono)>> Corpus = new(LoadCorpus);
 
     public static TheoryData<OpusBandwidth, OpusFrameDuration, int, int> Cases()
     {
+        // Diagnostic aid for investigating particular configurations (for example
+        // KILN_SILK_QUAL_CASE="Mediumband:60:20000:0,Narrowband:20:12000,c0"). Entries accept an
+        // exact "Band:ms:bitrate:complexity", a "Band:ms:bitrate" (any complexity), or "cN" (that
+        // complexity, every band and rate). Unset or empty runs every case, so the default gate is
+        // unchanged.
+        var only = new List<Func<OpusBandwidth, int, int, int, bool>>();
+        foreach (string entry in (Environment.GetEnvironmentVariable("KILN_SILK_QUAL_CASE") ?? string.Empty)
+                     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] parts = entry.Split(':');
+            if (parts.Length == 1
+                && parts[0].Length > 1 && (parts[0][0] is 'c' or 'C')
+                && int.TryParse(parts[0][1..], out int entryComplexity))
+            {
+                only.Add((_, _, _, complexity) => complexity == entryComplexity);
+            }
+            else if (parts.Length >= 3
+                && Enum.TryParse(parts[0], ignoreCase: true, out OpusBandwidth entryBandwidth)
+                && int.TryParse(parts[1], out int entryMs)
+                && int.TryParse(parts[2], out int entryBitrate))
+            {
+                int? complexityFilter = parts.Length >= 4 && int.TryParse(parts[3], out int exact)
+                    ? exact
+                    : null;
+                only.Add((bandwidth, ms, bitrate, complexity) =>
+                    bandwidth == entryBandwidth && ms == entryMs && bitrate == entryBitrate
+                    && (complexityFilter is null || complexity == complexityFilter.Value));
+            }
+        }
+
         var data = new TheoryData<OpusBandwidth, OpusFrameDuration, int, int>();
         foreach (OpusBandwidth bandwidth in new[]
                  {
@@ -66,6 +101,13 @@ public class SilkEncoderQualityTests
 
                     foreach (int complexity in new[] { 0, 5, 10 })
                     {
+                        int ms = duration == OpusFrameDuration.Ms20 ? 20 : 60;
+                        if (only.Count > 0
+                            && !only.Exists(p => p(bandwidth, ms, bitrate, complexity)))
+                        {
+                            continue;
+                        }
+
                         data.Add(bandwidth, duration, bitrate, complexity);
                     }
                 }
@@ -95,25 +137,31 @@ public class SilkEncoderQualityTests
         double oursTotal = 0;
         double libopusTotal = 0;
         long segments = 0;
+        long ourBytes = 0;
+        long theirBytes = 0;
         var lines = new List<string>();
 
         foreach ((int vector, short[] mono) in Corpus.Value)
         {
             short[] reference = ReferenceFor(vector, mono, internalRate);
-            double ours = MeasureOurs(mono, bandwidth, duration, bitrate, complexity, internalRate, reference, out double ourQuality);
-            double theirs = MeasureLibopus(mono, bandwidth, ms, bitrate, complexity, internalRate, reference, out double theirQuality);
+            double ours = MeasureOurs(mono, bandwidth, duration, bitrate, complexity, internalRate, reference, out double ourQuality, out int ourPacketBytes);
+            double theirs = MeasureLibopus(mono, bandwidth, ms, bitrate, complexity, internalRate, reference, out double theirQuality, out int theirPacketBytes, out int theirConfig);
 
             long count = reference.Length / (internalRate / 50);
             oursTotal += ours * count;
             libopusTotal += theirs * count;
+            ourBytes += ourPacketBytes;
+            theirBytes += theirPacketBytes;
             segments += count;
-            lines.Add($"v{vector}: ours {ours:F2} libopus {theirs:F2} (q {FormatQuality(ourQuality)} / {FormatQuality(theirQuality)})");
+            lines.Add($"v{vector}: ours {ours:F2} libopus {theirs:F2} (q {FormatQuality(ourQuality)} / {FormatQuality(theirQuality)}, {ourPacketBytes} / {theirPacketBytes} B, libopus cfg {theirConfig})");
         }
 
         double oursMean = oursTotal / segments;
         double libopusMean = libopusTotal / segments;
         double? floor = complexity == 0 ? RatchetFloor(bandwidth, duration, bitrate) : null;
-        Report(bandwidth, ms, bitrate, complexity, oursMean, libopusMean, floor, string.Join("; ", lines));
+        Report(
+            bandwidth, ms, bitrate, complexity, oursMean, libopusMean, floor,
+            $"bytes {ourBytes} / {theirBytes}; " + string.Join("; ", lines));
 
         if (floor is double required)
         {
@@ -143,7 +191,7 @@ public class SilkEncoderQualityTests
 
     private static double MeasureOurs(
         short[] mono, OpusBandwidth bandwidth, OpusFrameDuration duration, int bitrate, int complexity,
-        int internalRate, short[] reference, out double quality)
+        int internalRate, short[] reference, out double quality, out int payloadBytes)
     {
         var options = new OpusEncoderOptions
         {
@@ -161,9 +209,11 @@ public class SilkEncoderQualityTests
         var packet = new byte[1276];
         var bit = new MemoryStream();
         Span<byte> header = stackalloc byte[8];
+        payloadBytes = 0;
         for (int offset = 0; offset + frameSamples <= mono.Length; offset += frameSamples)
         {
             int written = encoder.Encode(mono.AsSpan(offset, frameSamples), packet);
+            payloadBytes += written;
             System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(header[..4], written);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(header[4..], encoder.FinalRange);
             bit.Write(header);
@@ -176,7 +226,7 @@ public class SilkEncoderQualityTests
 
     private static double MeasureLibopus(
         short[] mono, OpusBandwidth bandwidth, int ms, int bitrate, int complexity,
-        int internalRate, short[] reference, out double quality)
+        int internalRate, short[] reference, out double quality, out int payloadBytes, out int config)
     {
         string name = bandwidth switch
         {
@@ -189,6 +239,27 @@ public class SilkEncoderQualityTests
             mono, 48000, 1, bitrate,
             ["-bandwidth", name, "-framesize", ms.ToString(CultureInfo.InvariantCulture),
              "-complexity", complexity.ToString(CultureInfo.InvariantCulture)]);
+
+        payloadBytes = 0;
+        config = -1;
+        int record = 0;
+        while (record + OpusBitFile.HeaderSize <= encoded.Length)
+        {
+            int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(encoded.AsSpan(record, 4));
+            int start = record + OpusBitFile.HeaderSize;
+            if (length < 0 || start + length > encoded.Length)
+            {
+                break;
+            }
+
+            if (config < 0 && length > 0)
+            {
+                config = encoded[start] >> 3;
+            }
+
+            payloadBytes += length;
+            record = start + length;
+        }
 
         short[] decoded = DecodeBitstream(encoded, internalRate);
         return Score(reference, decoded, internalRate, out quality);
@@ -405,8 +476,20 @@ public class SilkEncoderQualityTests
 
     private static IReadOnlyList<(int Vector, short[] Mono)> LoadCorpus()
     {
+        // Diagnostic aid: restrict the corpus (for example KILN_SILK_QUAL_VECTORS="2,3"). Unset
+        // runs the full gate corpus.
+        int[] vectors = (Environment.GetEnvironmentVariable("KILN_SILK_QUAL_VECTORS") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static part => int.TryParse(part, out int value) ? value : 0)
+            .Where(static value => value is 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9 or 10 or 11 or 12)
+            .ToArray();
+        if (vectors.Length == 0)
+        {
+            vectors = [2, 3, 4, 6];
+        }
+
         var corpus = new List<(int, short[])>();
-        foreach (int vector in new[] { 2, 3, 4, 6 })
+        foreach (int vector in vectors)
         {
             short[] stereo = Pcm16.Read(TestVectors.DecPath(vector));
             var mono = new short[stereo.Length / 2];

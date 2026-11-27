@@ -181,6 +181,394 @@ internal static class MdctKernels
         }
     }
 
+    /// <summary>
+    /// Applies the forward pre-rotation <c>z = (re + i*im) * (-cos(theta) + i*sin(theta))</c>.
+    /// </summary>
+    /// <param name="real">The fold real parts, updated in place.</param>
+    /// <param name="imaginary">The fold imaginary parts, updated in place.</param>
+    /// <param name="rotCos">The combined cosine twiddles.</param>
+    /// <param name="rotSin">The combined sine twiddles.</param>
+    /// <param name="count">The number of complex values.</param>
+    /// <param name="useVector">Whether the vector path may be used.</param>
+    public static void RotateForwardPre(
+        Span<float> real,
+        Span<float> imaginary,
+        ReadOnlySpan<float> rotCos,
+        ReadOnlySpan<float> rotSin,
+        int count,
+        bool useVector)
+    {
+        if (useVector && Vector128.IsHardwareAccelerated)
+        {
+            int i = 0;
+            for (; i + 4 <= count; i += 4)
+            {
+                Vector128<float> re = Load(real, i);
+                Vector128<float> im = Load(imaginary, i);
+                Vector128<float> cos = Load(rotCos, i);
+                Vector128<float> sin = Load(rotSin, i);
+                Store(real, i, -(re * cos) - (im * sin));
+                Store(imaginary, i, (re * sin) - (im * cos));
+            }
+
+            for (; i < count; i++)
+            {
+                float re = real[i];
+                float im = imaginary[i];
+                float cos = rotCos[i];
+                float sin = rotSin[i];
+                real[i] = (-re * cos) - (im * sin);
+                imaginary[i] = (re * sin) - (im * cos);
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            float re = real[i];
+            float im = imaginary[i];
+            float cos = rotCos[i];
+            float sin = rotSin[i];
+            real[i] = (-re * cos) - (im * sin);
+            imaginary[i] = (re * sin) - (im * cos);
+        }
+    }
+
+    /// <summary>
+    /// Post-rotates the forward spectrum and writes coefficient <c>2p</c> from the real part and
+    /// coefficient <c>count-1-2p</c> from the imaginary part, at the requested stride.
+    /// </summary>
+    /// <param name="coefficients">Receives the coefficients.</param>
+    /// <param name="real">The FFT output real parts.</param>
+    /// <param name="imaginary">The FFT output imaginary parts.</param>
+    /// <param name="rotCos">The combined cosine twiddles.</param>
+    /// <param name="rotSin">The combined sine twiddles.</param>
+    /// <param name="count">The number of coefficients.</param>
+    /// <param name="stride">The distance between consecutive coefficients.</param>
+    /// <param name="useVector">Whether the vector path may be used.</param>
+    public static void WriteForwardPost(
+        Span<float> coefficients,
+        ReadOnlySpan<float> real,
+        ReadOnlySpan<float> imaginary,
+        ReadOnlySpan<float> rotCos,
+        ReadOnlySpan<float> rotSin,
+        int count,
+        int stride,
+        bool useVector)
+    {
+        int half = count / 2;
+        int last = count - 1;
+        if (useVector && Vector128.IsHardwareAccelerated && stride == 1)
+        {
+            int i = 0;
+            for (; i + 4 <= half; i += 4)
+            {
+                Vector128<float> re = Load(real, i);
+                Vector128<float> im = Load(imaginary, i);
+                Vector128<float> cos = Load(rotCos, i);
+                Vector128<float> sin = Load(rotSin, i);
+                Vector128<float> even = (re * cos) + (im * sin);
+                Vector128<float> odd = (re * sin) - (im * cos);
+                for (int lane = 0; lane < 4; lane++)
+                {
+                    coefficients[2 * (i + lane)] = even.GetElement(lane);
+                    coefficients[last - (2 * (i + lane))] = odd.GetElement(lane);
+                }
+            }
+
+            for (; i < half; i++)
+            {
+                float re = real[i];
+                float im = imaginary[i];
+                float cos = rotCos[i];
+                float sin = rotSin[i];
+                coefficients[2 * i] = (re * cos) + (im * sin);
+                coefficients[last - (2 * i)] = (re * sin) - (im * cos);
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < half; i++)
+        {
+            float re = real[i];
+            float im = imaginary[i];
+            float cos = rotCos[i];
+            float sin = rotSin[i];
+            coefficients[(2 * i) * stride] = (re * cos) + (im * sin);
+            coefficients[(last - (2 * i)) * stride] = (re * sin) - (im * cos);
+        }
+    }
+
+    /// <summary>Applies the inverse post-rotation <c>z = z * exp(+i*theta)</c> in place.</summary>
+    /// <param name="real">The FFT output real parts, updated in place.</param>
+    /// <param name="imaginary">The FFT output imaginary parts, updated in place.</param>
+    /// <param name="rotCos">The combined cosine twiddles.</param>
+    /// <param name="rotSin">The combined sine twiddles.</param>
+    /// <param name="count">The number of complex values.</param>
+    /// <param name="useVector">Whether the vector path may be used.</param>
+    public static void RotateInversePost(
+        Span<float> real,
+        Span<float> imaginary,
+        ReadOnlySpan<float> rotCos,
+        ReadOnlySpan<float> rotSin,
+        int count,
+        bool useVector)
+    {
+        if (useVector && Vector128.IsHardwareAccelerated)
+        {
+            int i = 0;
+            for (; i + 4 <= count; i += 4)
+            {
+                Vector128<float> re = Load(real, i);
+                Vector128<float> im = Load(imaginary, i);
+                Vector128<float> cos = Load(rotCos, i);
+                Vector128<float> sin = Load(rotSin, i);
+                Store(real, i, (re * cos) - (im * sin));
+                Store(imaginary, i, (re * sin) + (im * cos));
+            }
+
+            for (; i < count; i++)
+            {
+                float re = real[i];
+                float im = imaginary[i];
+                float cos = rotCos[i];
+                float sin = rotSin[i];
+                real[i] = (re * cos) - (im * sin);
+                imaginary[i] = (re * sin) + (im * cos);
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            float re = real[i];
+            float im = imaginary[i];
+            float cos = rotCos[i];
+            float sin = rotSin[i];
+            real[i] = (re * cos) - (im * sin);
+            imaginary[i] = (re * sin) + (im * cos);
+        }
+    }
+
+    /// <summary>
+    /// Inverse pre-rotation: pairs coefficient <c>2p</c> with <c>N-1-2p</c> and rotates by the
+    /// combined twiddle. The stride-1 vector path deinterleaves four pairs per step.
+    /// </summary>
+    public static void RotateInversePre(
+        ReadOnlySpan<float> coefficients,
+        int stride,
+        Span<float> real,
+        Span<float> imaginary,
+        ReadOnlySpan<float> rotCos,
+        ReadOnlySpan<float> rotSin,
+        int count,
+        int half,
+        bool useVector)
+    {
+        int p = 0;
+        if (stride == 1 && useVector && Vector128.IsHardwareAccelerated)
+        {
+            ref float c = ref MemoryMarshal.GetReference(coefficients);
+            ref float re = ref MemoryMarshal.GetReference(real);
+            ref float im = ref MemoryMarshal.GetReference(imaginary);
+            ref float rc = ref MemoryMarshal.GetReference(rotCos);
+            ref float rs = ref MemoryMarshal.GetReference(rotSin);
+            if (coefficients.Length < count || real.Length < half || imaginary.Length < half
+                || rotCos.Length < half || rotSin.Length < half)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            Vector128<int> evenIdx = Vector128.Create(0, 2, 0, 2);
+            Vector128<int> oddIdx = Vector128.Create(3, 1, 3, 1);
+            for (; p + 4 <= half; p += 4)
+            {
+                Vector128<float> v0 = Vector128.LoadUnsafe(ref c, (nuint)(2 * p));
+                Vector128<float> v1 = Vector128.LoadUnsafe(ref c, (nuint)((2 * p) + 4));
+                Vector128<float> a = Vector128.Create(
+                    Vector128.Shuffle(v0, evenIdx).GetLower(), Vector128.Shuffle(v1, evenIdx).GetLower());
+
+                // The odd partners sit at count-1-2p-2q: window [count-8-2p, count-2p).
+                Vector128<float> w0 = Vector128.LoadUnsafe(ref c, (nuint)(count - 8 - (2 * p)));
+                Vector128<float> w1 = Vector128.LoadUnsafe(ref c, (nuint)(count - 4 - (2 * p)));
+                Vector128<float> b = Vector128.Create(
+                    Vector128.Shuffle(w1, oddIdx).GetLower(), Vector128.Shuffle(w0, oddIdx).GetLower());
+
+                Vector128<float> cos = Vector128.LoadUnsafe(ref rc, (nuint)p);
+                Vector128<float> sin = Vector128.LoadUnsafe(ref rs, (nuint)p);
+                ((a * sin) - (b * cos)).StoreUnsafe(ref re, (nuint)p);
+                (-((a * cos) + (b * sin))).StoreUnsafe(ref im, (nuint)p);
+            }
+        }
+
+        int even = 2 * p;
+        int odd = count - 1 - (2 * p);
+        for (; p < half; p++)
+        {
+            float a = coefficients[even * stride];
+            float b = coefficients[odd * stride];
+            float cos = rotCos[p];
+            float sin = rotSin[p];
+            real[p] = (a * sin) - (b * cos);
+            imaginary[p] = -((a * cos) + (b * sin));
+            even += 2;
+            odd -= 2;
+        }
+    }
+
+    /// <summary>
+    /// De-shuffle: <c>d[2p] = -re[p]</c>, <c>d[2p+1] = im[half-1-p]</c>.
+    /// </summary>
+    public static void Deshuffle(
+        ReadOnlySpan<float> real, ReadOnlySpan<float> imaginary, Span<float> deshuffle, int half, bool useVector)
+    {
+        int p = 0;
+        if (useVector && Vector128.IsHardwareAccelerated)
+        {
+            if (real.Length < half || imaginary.Length < half || deshuffle.Length < 2 * half)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            ref float re = ref MemoryMarshal.GetReference(real);
+            ref float im = ref MemoryMarshal.GetReference(imaginary);
+            ref float d = ref MemoryMarshal.GetReference(deshuffle);
+            Vector128<int> rev = Vector128.Create(3, 2, 1, 0);
+            Vector128<int> lowIdx = Vector128.Create(0, 0, 1, 1);
+            Vector128<int> highIdx = Vector128.Create(2, 2, 3, 3);
+            Vector128<float> oddMask = Vector128.Create(0, -1, 0, -1).AsSingle();
+            for (; p + 4 <= half; p += 4)
+            {
+                Vector128<float> r = -Vector128.LoadUnsafe(ref re, (nuint)p);
+                Vector128<float> i = Vector128.Shuffle(Vector128.LoadUnsafe(ref im, (nuint)(half - 4 - p)), rev);
+                Vector128.ConditionalSelect(oddMask, Vector128.Shuffle(i, lowIdx), Vector128.Shuffle(r, lowIdx))
+                    .StoreUnsafe(ref d, (nuint)(2 * p));
+                Vector128.ConditionalSelect(oddMask, Vector128.Shuffle(i, highIdx), Vector128.Shuffle(r, highIdx))
+                    .StoreUnsafe(ref d, (nuint)((2 * p) + 4));
+            }
+        }
+
+        for (; p < half; p++)
+        {
+            deshuffle[2 * p] = -real[p];
+            deshuffle[(2 * p) + 1] = imaginary[half - 1 - p];
+        }
+    }
+
+    /// <summary>
+    /// Mirrors the de-shuffled inverse spectrum into the <c>count + overlap</c> windowed output,
+    /// applying the window and the <c>2/count</c> normalisation.
+    /// </summary>
+    /// <param name="output">Receives <c>count + overlap</c> samples.</param>
+    /// <param name="deshuffle">The de-shuffled direct/reversed spectrum.</param>
+    /// <param name="window">The rising overlap window.</param>
+    /// <param name="scale">The <c>2/count</c> inverse factor.</param>
+    /// <param name="count">The coefficient count.</param>
+    /// <param name="overlap">The overlap length.</param>
+    /// <param name="useVector">Whether the vector path may be used (currently the scalar path).</param>
+    public static void MirrorInverse(
+        Span<float> output,
+        ReadOnlySpan<float> deshuffle,
+        ReadOnlySpan<float> window,
+        float scale,
+        int count,
+        int overlap,
+        bool useVector)
+    {
+        int half = count / 2;
+        int halfOverlap = overlap / 2;
+        int total = half - halfOverlap;
+
+        // Lower mirror: the middle block is copied straight, the overlap/2 pairs apply the window.
+        int source = half - 1;
+        int destination = (count + overlap) / 2 - 1;
+        int lower = 0;
+        int n1 = 0;
+        if (useVector && Vector128.IsHardwareAccelerated && total >= 4)
+        {
+            // Both indices descend together, so this is a plain scaled copy.
+            if (destination - total + 1 < 0 || source - total + 1 < 0 || output.Length <= destination || deshuffle.Length <= source)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            ref float o = ref MemoryMarshal.GetReference(output);
+            ref float d = ref MemoryMarshal.GetReference(deshuffle);
+            Vector128<float> sv = Vector128.Create(scale);
+            for (; n1 + 4 <= total; n1 += 4)
+            {
+                Vector128<float> v = Vector128.LoadUnsafe(ref d, (nuint)(source - 3 - n1));
+                (v * sv).StoreUnsafe(ref o, (nuint)(destination - 3 - n1));
+            }
+
+            destination -= n1;
+            source -= n1;
+        }
+
+        for (int i = n1; i < total; i++)
+        {
+            output[destination] = deshuffle[source] * scale;
+            destination--;
+            source--;
+        }
+
+        for (int i = total; i < half; i++)
+        {
+            float value = deshuffle[source];
+            source--;
+            output[lower] = -window[lower] * value * scale;
+            lower++;
+            output[destination] = window[overlap - lower] * value * scale;
+            destination--;
+        }
+
+        // Upper mirror.
+        source = half;
+        destination = (count + overlap) / 2;
+        int tail = count - 1 + overlap;
+        lower = 0;
+        n1 = 0;
+        if (useVector && Vector128.IsHardwareAccelerated && total >= 4)
+        {
+            if (destination + total > output.Length || source + total > deshuffle.Length)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            ref float o = ref MemoryMarshal.GetReference(output);
+            ref float d = ref MemoryMarshal.GetReference(deshuffle);
+            Vector128<float> sv = Vector128.Create(scale);
+            for (; n1 + 4 <= total; n1 += 4)
+            {
+                (Vector128.LoadUnsafe(ref d, (nuint)(source + n1)) * sv).StoreUnsafe(ref o, (nuint)(destination + n1));
+            }
+
+            destination += n1;
+            source += n1;
+        }
+
+        for (int i = n1; i < total; i++)
+        {
+            output[destination] = deshuffle[source] * scale;
+            destination++;
+            source++;
+        }
+
+        for (int i = total; i < half; i++)
+        {
+            float value = deshuffle[source];
+            source++;
+            output[tail] = window[lower] * value * scale;
+            tail--;
+            output[destination] = window[overlap - 1 - lower] * value * scale;
+            destination++;
+            lower++;
+        }
+    }
+
     private static Vector128<float> Load(ReadOnlySpan<float> values, int index) =>
         Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(values), (nuint)index);
 

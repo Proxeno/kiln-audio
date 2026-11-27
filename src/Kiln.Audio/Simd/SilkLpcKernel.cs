@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Kiln.Audio.Silk;
@@ -103,6 +104,20 @@ internal static class SilkLpcKernel
         int subframeLength,
         Span<short> output)
     {
+        // PERF-3: the 10- and 16-tap orders get a fully unrolled path that keeps the four
+        // reversed-coefficient vectors in registers across the whole subframe.
+        if (order == 16)
+        {
+            SynthesizeOrder16(lpcQ14, coefficientsQ12, residualQ14, gainQ10, subframeLength, output);
+            return;
+        }
+
+        if (order == 10)
+        {
+            SynthesizeOrder10(lpcQ14, coefficientsQ12, residualQ14, gainQ10, subframeLength, output);
+            return;
+        }
+
         // The scalar loop walks the history backwards while the coefficients walk forwards.
         // Reversing the coefficients once turns the dot product into two ascending walks, so the
         // vector path needs no lane shuffle at all.
@@ -118,30 +133,17 @@ internal static class SilkLpcKernel
         for (int i = 0; i < subframeLength; i++)
         {
             int start = MaxLpcOrder + i - order;
-            int predictionQ10 = order >> 1;
+
+            // Sum the vector lanes first and reduce once per sample: the per-lane terms are
+            // independent, so this is bit-identical to the scalar chain but avoids a horizontal
+            // reduction per tap group.
+            Vector128<int> terms = Vector128<int>.Zero;
             for (int t = 0; t < vectorised; t += Width)
             {
-                Vector128<int> state = Load(lpcQ14, start + t);
-                Vector128<int> coefficient = Load(reversedCoefficients, t);
-
-                // Smulwb(a, c) = ((long)a * (short)c) >> 16. Split a into a = high*65536 + low with
-                // high = a >> 16 (arithmetic) and low the zero-extended low half, so
-                // Smulwb = high*c + ((low*c) >> 16). Both products fit in 32 bits because c is a
-                // short and low is at most 65535.
-                Vector128<int> high = Vector128.ShiftRightArithmetic(state, 16);
-                Vector128<int> low = Vector128.ShiftRightLogical(Vector128.ShiftLeft(state, 16), 16);
-                Vector128<int> term =
-                    (high * coefficient)
-                    + Vector128.ShiftRightArithmetic(low * coefficient, 16);
-
-                int sum = unchecked(
-                    term.GetElement(0)
-                    + term.GetElement(1)
-                    + term.GetElement(2)
-                    + term.GetElement(3));
-                predictionQ10 = unchecked(predictionQ10 + sum);
+                terms += DotTerms(Load(lpcQ14, start + t), Load(reversedCoefficients, t));
             }
 
+            int predictionQ10 = unchecked((order >> 1) + Vector128.Sum(terms));
             for (int t = vectorised; t < order; t++)
             {
                 predictionQ10 = unchecked(
@@ -150,6 +152,89 @@ internal static class SilkLpcKernel
 
             output[i] = Store(lpcQ14, residualQ14, gainQ10, i, predictionQ10);
         }
+    }
+
+    private static void SynthesizeOrder16(
+        Span<int> lpcQ14,
+        ReadOnlySpan<short> coefficientsQ12,
+        ReadOnlySpan<int> residualQ14,
+        int gainQ10,
+        int subframeLength,
+        Span<short> output)
+    {
+        Vector128<int> c0 = Vector128.Create(
+            (int)coefficientsQ12[15], (int)coefficientsQ12[14],
+            (int)coefficientsQ12[13], (int)coefficientsQ12[12]);
+        Vector128<int> c1 = Vector128.Create(
+            (int)coefficientsQ12[11], (int)coefficientsQ12[10],
+            (int)coefficientsQ12[9], (int)coefficientsQ12[8]);
+        Vector128<int> c2 = Vector128.Create(
+            (int)coefficientsQ12[7], (int)coefficientsQ12[6],
+            (int)coefficientsQ12[5], (int)coefficientsQ12[4]);
+
+        for (int i = 0; i < subframeLength; i++)
+        {
+            int start = MaxLpcOrder + i - 16;
+
+            // PERF-4: keep the taps that feed back out of the vector sum. The synthesis is
+            // latency-bound because sample i needs sample i-1; only the c[0] term depends on the
+            // newest output. The other fifteen taps read history that is at least two samples
+            // old, so an out-of-order core can overlap their dot product with the dependency
+            // chain. Integer addition is associative modulo 2^32, so the sum is bit-exact.
+            Vector128<int> older = DotTerms(Load(lpcQ14, start), c0);
+            older += DotTerms(Load(lpcQ14, start + 4), c1);
+            older += DotTerms(Load(lpcQ14, start + 8), c2);
+            int predictionQ10 = unchecked(8 + Vector128.Sum(older));
+            predictionQ10 = unchecked(predictionQ10 + SilkFixedPoint.Smulwb(lpcQ14[start + 12], coefficientsQ12[3]));
+            predictionQ10 = unchecked(predictionQ10 + SilkFixedPoint.Smulwb(lpcQ14[start + 13], coefficientsQ12[2]));
+            predictionQ10 = unchecked(predictionQ10 + SilkFixedPoint.Smulwb(lpcQ14[start + 14], coefficientsQ12[1]));
+            predictionQ10 = unchecked(predictionQ10 + SilkFixedPoint.Smulwb(lpcQ14[start + 15], coefficientsQ12[0]));
+            output[i] = Store(lpcQ14, residualQ14, gainQ10, i, predictionQ10);
+        }
+    }
+
+    private static void SynthesizeOrder10(
+        Span<int> lpcQ14,
+        ReadOnlySpan<short> coefficientsQ12,
+        ReadOnlySpan<int> residualQ14,
+        int gainQ10,
+        int subframeLength,
+        Span<short> output)
+    {
+        Vector128<int> c0 = Vector128.Create(
+            (int)coefficientsQ12[9], (int)coefficientsQ12[8],
+            (int)coefficientsQ12[7], (int)coefficientsQ12[6]);
+        Vector128<int> c1 = Vector128.Create(
+            (int)coefficientsQ12[5], (int)coefficientsQ12[4],
+            (int)coefficientsQ12[3], (int)coefficientsQ12[2]);
+
+        for (int i = 0; i < subframeLength; i++)
+        {
+            int start = MaxLpcOrder + i - 10;
+            Vector128<int> terms = DotTerms(Load(lpcQ14, start), c0);
+            terms += DotTerms(Load(lpcQ14, start + 4), c1);
+            int predictionQ10 = unchecked(5 + Vector128.Sum(terms));
+            predictionQ10 = unchecked(
+                predictionQ10 + SilkFixedPoint.Smulwb(lpcQ14[start + 8], coefficientsQ12[1]));
+            predictionQ10 = unchecked(
+                predictionQ10 + SilkFixedPoint.Smulwb(lpcQ14[start + 9], coefficientsQ12[0]));
+            output[i] = Store(lpcQ14, residualQ14, gainQ10, i, predictionQ10);
+        }
+    }
+
+    /// <summary>
+    /// Computes one four-tap group of <c>Smulwb</c> contributions, one per lane.
+    /// <c>Smulwb(a, c) = ((long)a * (short)c) >> 16</c>: splitting <c>a</c> into
+    /// <c>high*65536 + low</c> gives <c>high*c + ((low*c) >> 16)</c>, and both products fit in
+    /// 32 bits because <c>c</c> is a short and <c>low</c> is at most 65535.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<int> DotTerms(Vector128<int> state, Vector128<int> coefficient)
+    {
+        Vector128<int> high = Vector128.ShiftRightArithmetic(state, 16);
+        Vector128<int> low = Vector128.ShiftRightLogical(Vector128.ShiftLeft(state, 16), 16);
+        return (high * coefficient)
+            + Vector128.ShiftRightArithmetic(low * coefficient, 16);
     }
 
     private static Vector128<int> Load(ReadOnlySpan<int> values, int index) =>

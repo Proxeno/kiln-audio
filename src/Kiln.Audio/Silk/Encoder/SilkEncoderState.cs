@@ -261,6 +261,11 @@ internal sealed class SilkEncoderState
     internal int PacketSizeMs;
     internal int FrameCounter;
     internal int Complexity;
+    /// <summary>Non-zero when the configured bitrate exceeds 1.2 bits per internal-rate sample.</summary>
+    internal int HighRate;
+
+    /// <summary>Delayed-decision trellis width (diagnostics; the core uses its own copy).</summary>
+    internal int NStatesDelayedDecision;
     internal int UseInterpolatedNlsfs;
     internal int ShapingLpcOrder;
     internal int PredictLpcOrder;
@@ -282,8 +287,20 @@ internal sealed class SilkEncoderState
     internal int LbrrFlag;
     internal readonly int[] LbrrFlags = new int[MaxFramesPerPacket];
 
-    internal readonly SilkSideInfo Indices = new();
+    internal SilkSideInfo Indices = new();
     internal readonly short[] Pulses = new short[SilkEncoderMath.MaxFrameLength];
+
+    // Low-bitrate redundancy (LBRR) frames for the next packet (RFC 6716 §5.2.3, silk_LBRR_encode_FIX).
+    internal readonly SilkSideInfo[] LbrrIndices = [new(), new(), new()];
+    internal readonly short[][] LbrrPulses =
+    [
+        new short[SilkEncoderMath.MaxFrameLength],
+        new short[SilkEncoderMath.MaxFrameLength],
+        new short[SilkEncoderMath.MaxFrameLength],
+    ];
+    internal int LbrrEnabled;
+    internal int LbrrGainIncreases;
+    internal int LbrrPrevLastGainIndex;
 
     internal readonly short[] InputBuf = new short[SilkEncoderMath.MaxFrameLength + 2];
     internal int InputBufIx;

@@ -98,6 +98,9 @@ internal sealed class SilkStereoEncoder
     /// <param name="mid">Receives the mid signal; the SILK core encodes it as channel 0.</param>
     /// <param name="side">Receives the residual side signal; channel 1.</param>
     /// <param name="predictionIndices">Receives the six quantization indices, in <c>[channel][0..2]</c> order.</param>
+    /// <param name="frameLength">
+    /// Samples in one SILK frame (10 or 20 ms at <paramref name="fsKHz"/>), or 0 for 20 ms.
+    /// </param>
     /// <param name="midOnly">Receives the mid-only flag (RFC 6716 §4.2.7.2).</param>
     /// <param name="midRateBps">Receives the mid channel bitrate.</param>
     /// <param name="sideRateBps">Receives the side channel bitrate; zero when coding mid only.</param>
@@ -114,22 +117,33 @@ internal sealed class SilkStereoEncoder
         Span<byte> predictionIndices,
         out bool midOnly,
         out int midRateBps,
-        out int sideRateBps)
+        out int sideRateBps,
+        int frameLength = 0)
     {
         if (fsKHz is not (8 or 12 or 16))
         {
             throw new ArgumentOutOfRangeException(nameof(fsKHz), fsKHz, "The internal rate must be 8, 12 or 16 kHz.");
         }
 
-        int frameLength = fsKHz * 20;
+        if (frameLength == 0)
+        {
+            frameLength = fsKHz * 20;
+        }
+
+        if (frameLength != fsKHz * 10 && frameLength != fsKHz * 20)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(frameLength), frameLength, "A SILK frame is 10 or 20 ms at the internal rate.");
+        }
+
         if (left.Length < frameLength || right.Length < frameLength)
         {
-            throw new ArgumentException("The input frames are shorter than 20 ms.", nameof(left));
+            throw new ArgumentException("The input frames are shorter than one SILK frame.", nameof(left));
         }
 
         if (mid.Length < frameLength || side.Length < frameLength)
         {
-            throw new ArgumentException("The output frames are shorter than 20 ms.", nameof(mid));
+            throw new ArgumentException("The output frames are shorter than one SILK frame.", nameof(mid));
         }
 
         if (predictionIndices.Length < 6)
@@ -302,8 +316,9 @@ internal sealed class SilkStereoEncoder
             SilkFixedPoint.Smulwb(widthQ14 - _widthPrevQ14, denomQ16), 10);
         int interpLength = InterpolationLengthMs * fsKHz;
 
-        // The reference writes x2[n-1], so the first prediction (n = 0) is dropped.
-        side[frameLength - 1] = right[frameLength - 1];
+        // The reference writes x2[n-1], so the first prediction (n = 0) is dropped and the last
+        // slot keeps the raw side sample.
+        side[frameLength - 1] = sideSig[frameLength + 1];
         for (int n = 0; n < frameLength; n++)
         {
             if (n < interpLength)

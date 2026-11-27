@@ -1,5 +1,8 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
@@ -20,7 +23,7 @@ namespace Kiln.Audio.Celt;
 /// synthesis chain owns a large amount of cross-frame state (MDCT overlap, post-filter history,
 /// de-emphasis memory, and a rolling 2048-sample per-channel history), and keeping it separate
 /// lets the bitstream decoder stay allocation-free and independently testable. The
-/// synthesized PCM is interleaved and normalized to [-1, 1]; use <see cref="CeltPcm.ToInt16"/>
+/// synthesized PCM is interleaved and normalized to [-1, 1]; use <see cref="CeltPcm.ToInt16(float)"/>
 /// for the saturating float-to-int16 step.
 /// </para>
 /// <para>
@@ -170,16 +173,30 @@ internal sealed partial class CeltSynthesizer
                 $"The PCM destination must hold {samples * channels} samples.", nameof(pcmOut));
         }
 
+        long profileStart = Perf4Profile.Start();
+        long stageStart = Perf4Profile.Start();
         Denormalise(frame, samples, streamChannels, channels);
+        Perf4Profile.Stop(17, stageStart);
 
         for (int channel = 0; channel < channels; channel++)
         {
+            stageStart = Perf4Profile.Start();
             BuildTimeSignal(frame, samples, channel);
+            Perf4Profile.Stop(18, stageStart);
+
+            stageStart = Perf4Profile.Start();
             ApplyPostFilter(frame, samples, channel);
+            Perf4Profile.Stop(19, stageStart);
+
+            stageStart = Perf4Profile.Start();
             Deemphasise(samples, channel, pcmOut, channels);
+            Perf4Profile.Stop(20, stageStart);
         }
 
+        stageStart = Perf4Profile.Start();
         CapturePlcState(frame);
+        Perf4Profile.Stop(22, stageStart);
+        Perf4Profile.Stop(21, profileStart);
     }
 
     /// <summary>Denormalizes the normalized bands and maps the stream channels to the output channels.</summary>
@@ -260,9 +277,15 @@ internal sealed partial class CeltSynthesizer
     private void BuildTimeSignal(CeltFrameResult frame, int samples, int channel)
     {
         ReadOnlySpan<float> spectrum = _freq.AsSpan(channel * samples, samples);
-        Span<float> raw = _rawOutput.AsSpan(0, samples);
         float[] overlap = _rawOverlap[channel];
 
+        // Shift the rolling history first; the frame is then written straight into its tail.
+        float[] history = _history[channel];
+        Array.Copy(history, samples, history, 0, HistorySize - samples);
+        Span<float> raw = history.AsSpan(HistorySize - samples, samples);
+
+        // PERF-6: the inverse transforms are left unscaled (the 2/N factor and the N/2 the
+        // reference multiplies by straight afterwards cancel).
         if (frame.ShortBlocks != 0)
         {
             if (samples + Overlap > _block.Length)
@@ -276,15 +299,11 @@ internal sealed partial class CeltSynthesizer
             Span<float> block = _block.AsSpan(0, samples + Overlap);
             block.Clear();
             int blocks = frame.ShortBlocks;
-            float scale = _shortMdct.CoefficientCount * 0.5f;
             for (int b = 0; b < blocks; b++)
             {
-                _shortMdct.Inverse(spectrum[b..], _imdct, stride: blocks);
+                _shortMdct.InverseUnscaled(spectrum[b..], _imdct, stride: blocks);
                 int offset = b * CeltTables.ShortBlockSamples;
-                for (int k = 0; k < _shortMdct.Length; k++)
-                {
-                    block[offset + k] += scale * _imdct[k];
-                }
+                AddInPlace(block.Slice(offset, _shortMdct.Length), _imdct);
             }
 
             for (int j = 0; j < Overlap; j++)
@@ -293,33 +312,42 @@ internal sealed partial class CeltSynthesizer
                 overlap[j] = block[samples + j];
             }
 
-            for (int j = Overlap; j < samples; j++)
-            {
-                raw[j] = block[j];
-            }
+            block.Slice(Overlap, samples - Overlap).CopyTo(raw[Overlap..]);
         }
         else
         {
             // The long-block inverse covers the whole frame exactly once, so the windowed output
-            // is written straight into the overlap-add instead of through an intermediate buffer.
-            Mdct mdct = _mdct[frame.Lm];
-            mdct.Inverse(spectrum, _imdct);
-            float scale = mdct.CoefficientCount * 0.5f;
+            // is written straight into the overlap-add.
+            _mdct[frame.Lm].InverseUnscaled(spectrum, _imdct);
             for (int j = 0; j < Overlap; j++)
             {
-                raw[j] = (scale * _imdct[j]) + overlap[j];
-                overlap[j] = scale * _imdct[samples + j];
+                raw[j] = _imdct[j] + overlap[j];
+                overlap[j] = _imdct[samples + j];
             }
 
-            for (int j = Overlap; j < samples; j++)
+            _imdct.AsSpan(Overlap, samples - Overlap).CopyTo(raw[Overlap..]);
+        }
+    }
+
+    private static void AddInPlace(Span<float> destination, ReadOnlySpan<float> source)
+    {
+        int count = destination.Length;
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && SimdConfig.UseSimd && source.Length >= count)
+        {
+            ref float d = ref MemoryMarshal.GetReference(destination);
+            ref float s = ref MemoryMarshal.GetReference(source);
+            for (; i + 4 <= count; i += 4)
             {
-                raw[j] = scale * _imdct[j];
+                (Vector128.LoadUnsafe(ref d, (nuint)i) + Vector128.LoadUnsafe(ref s, (nuint)i))
+                    .StoreUnsafe(ref d, (nuint)i);
             }
         }
 
-        float[] history = _history[channel];
-        Array.Copy(history, samples, history, 0, HistorySize - samples);
-        raw.CopyTo(history.AsSpan(HistorySize - samples, samples));
+        for (; i < count; i++)
+        {
+            destination[i] += source[i];
+        }
     }
 
     /// <summary>Applies the §4.3.7.1 post-filter, cross-fading the parameter sets in place.</summary>
@@ -387,15 +415,55 @@ internal sealed partial class CeltSynthesizer
             Overlap);
 
     /// <summary>Applies the §4.3.7.2 de-emphasis filter and writes the interleaved output.</summary>
+    /// <remarks>
+    /// PERF-5: the filter is <c>y[j] = x[j] + m</c>, <c>m = a * y[j]</c>. The serial chain is one
+    /// multiply and one add per sample. Four samples are handled per step instead: the
+    /// state-independent partial sums <c>P</c> (the response to the four inputs alone) are off the
+    /// critical path, and the state only enters as <c>a^i * m</c>, so the loop-carried chain is a
+    /// single multiply-add per four samples. The result differs from the sample-by-sample loop only
+    /// by float reassociation.
+    /// </remarks>
     private void Deemphasise(int samples, int channel, Span<float> pcmOut, int channels)
     {
         float[] history = _history[channel];
         int baseIndex = HistorySize - samples;
         float memory = _deemphasis[channel];
-        for (int j = 0; j < samples; j++)
+        const float a = CeltTables.DeemphasisCoefficient;
+        const float a2 = a * a;
+        const float a3 = a2 * a;
+        const float a4 = a2 * a2;
+        const float inv = 1f / CeltTables.SignalScale;
+        if (pcmOut.Length < ((samples - 1) * channels) + channel + 1)
         {
-            float value = DeemphasiseSample(history[baseIndex + j], ref memory);
-            pcmOut[(j * channels) + channel] = value * (1f / CeltTables.SignalScale);
+            throw new ArgumentException("The PCM destination is too short.", nameof(pcmOut));
+        }
+
+        ref float src = ref history[baseIndex];
+        ref float dst = ref MemoryMarshal.GetReference(pcmOut);
+        int j = 0;
+        int outIndex = channel;
+        for (; j + 4 <= samples; j += 4)
+        {
+            float x0 = Unsafe.Add(ref src, j);
+            float x1 = Unsafe.Add(ref src, j + 1);
+            float x2 = Unsafe.Add(ref src, j + 2);
+            float x3 = Unsafe.Add(ref src, j + 3);
+            float p1 = x1 + (a * x0);
+            float p2 = x2 + (a * p1);
+            float p3 = x3 + (a * p2);
+            Unsafe.Add(ref dst, outIndex) = (x0 + memory) * inv;
+            Unsafe.Add(ref dst, outIndex + channels) = (p1 + (a * memory)) * inv;
+            Unsafe.Add(ref dst, outIndex + (2 * channels)) = (p2 + (a2 * memory)) * inv;
+            Unsafe.Add(ref dst, outIndex + (3 * channels)) = (p3 + (a3 * memory)) * inv;
+            memory = (a * p3) + (a4 * memory);
+            outIndex += 4 * channels;
+        }
+
+        for (; j < samples; j++)
+        {
+            float value = DeemphasiseSample(Unsafe.Add(ref src, j), ref memory);
+            Unsafe.Add(ref dst, outIndex) = value * inv;
+            outIndex += channels;
         }
 
         _deemphasis[channel] = memory;

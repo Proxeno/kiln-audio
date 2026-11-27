@@ -112,6 +112,35 @@ internal ref struct RangeDecoder
     /// <returns><c>nbits_total*8 - lg</c>, where <c>lg</c> has three fractional bits.</returns>
     public readonly uint TellFrac()
     {
+        // PERF-7: the three fractional bits are a monotone function of the 16-bit normalized
+        // range, so they are the number of precomputed thresholds the range has reached. This
+        // replaces the three dependent multiply/shift rounds of the reference loop (identical
+        // result; see TellFracReference and the exhaustive test against it).
+        uint rng = _rng;
+        if (rng > 0xFFFF && TellTable.Monotone)
+        {
+            int lg = Ilog(rng);
+            uint rQ15 = rng >> (lg - 16);
+            ref uint t = ref MemoryMarshal.GetArrayDataReference(TellTable.Thresholds);
+            int frac = (rQ15 >= t ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 1) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 2) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 3) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 4) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 5) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 6) ? 1 : 0);
+            return (uint)((_nbitsTotal * 8) - ((lg << BitRes) + frac));
+        }
+
+        return TellFracReference();
+    }
+
+    /// <summary>Overrides the range, for exhaustive tests of the tell computation.</summary>
+    internal void SetRngForTest(uint rng) => _rng = rng;
+
+    /// <summary>The reference fractional-bit loop of RFC 6716 §4.1.6.2.</summary>
+    internal readonly uint TellFracReference()
+    {
         int lg = Ilog(_rng);
         // r_Q15 is a Q15 representation of the fractional part of rng, in [32768, 65536).
         uint rQ15 = _rng >> (lg - 16);
@@ -127,6 +156,55 @@ internal ref struct RangeDecoder
         }
 
         return (uint)((_nbitsTotal * 8) - lg);
+    }
+
+    /// <summary>Returns the fractional bits the reference loop yields for a Q15 range.</summary>
+    internal static int TellFraction(uint rQ15)
+    {
+        int lg = 0;
+        for (int i = 0; i < BitRes; i++)
+        {
+            rQ15 = (rQ15 * rQ15) >> 15;
+            uint bit = rQ15 >> 16;
+            lg = (lg << 1) + (int)bit;
+            if (bit != 0)
+            {
+                rQ15 >>= 1;
+            }
+        }
+
+        return lg;
+    }
+
+    private static class TellTable
+    {
+        internal static readonly uint[] Thresholds = new uint[7];
+
+        internal static readonly bool Monotone = Build();
+
+        private static bool Build()
+        {
+            int previous = 0;
+            int next = 1;
+            for (uint r = 32768; r < 65536; r++)
+            {
+                int f = TellFraction(r);
+                if (f < previous || f > 7)
+                {
+                    return false;
+                }
+
+                while (next <= f)
+                {
+                    Thresholds[next - 1] = r;
+                    next++;
+                }
+
+                previous = f;
+            }
+
+            return next == 8;
+        }
     }
 
     /// <summary>
@@ -282,6 +360,67 @@ internal ref struct RangeDecoder
         _rng = previous - s;
         Normalize();
         return ret;
+    }
+
+    /// <summary>
+    /// Decodes a symbol from a forward probability table whose total frequency is 256
+    /// (RFC 6716 §4.1.3.3), without the integer divide the generic path needs.
+    /// </summary>
+    /// <param name="pdf">
+    /// The probability table: the entries sum to 256 and the symbol <c>k</c> occupies
+    /// <c>[fl[k], fl[k]+pdf[k])</c>.
+    /// </param>
+    /// <returns>The decoded symbol, or the last index for a malformed table.</returns>
+    /// <remarks>
+    /// The generic <see cref="Decode"/> path computes <c>fs</c> with <c>val / (rng/256)</c>.
+    /// Inverting the search condition lets the loop compare <c>val</c> against
+    /// <c>(256 - fh[k]) * (rng/256)</c> instead, which trades one hardware divide for one
+    /// multiply per candidate symbol. The arithmetic is identical, so the symbol and the
+    /// state update are bit-for-bit those of the divide-based path.
+    /// </remarks>
+    public int DecodePdf(ReadOnlySpan<byte> pdf)
+    {
+        uint ext = _rng >> 8;
+        if (ext == 0)
+        {
+            _error = true;
+            _ext = 0;
+            return pdf.Length - 1;
+        }
+
+        _ext = ext;
+        uint d = _val;
+        uint fl = 0;
+        uint fh = 0;
+        int symbol = -1;
+        for (int k = 0; k < pdf.Length; k++)
+        {
+            fl = fh;
+            fh += pdf[k];
+            if (fh == 0)
+            {
+                // A zero-probability symbol can never be selected; the comparison below would
+                // otherwise mis-handle the one code value that saturates the range.
+                continue;
+            }
+
+            if (d >= (256u - fh) * ext)
+            {
+                symbol = k;
+                break;
+            }
+        }
+
+        if (symbol < 0)
+        {
+            // The table sums to less than 256: take the last symbol rather than stall, exactly
+            // as the generic path does.
+            Update(fh, 256, 256);
+            return pdf.Length - 1;
+        }
+
+        Update(fl, fh, 256);
+        return symbol;
     }
 
     /// <summary>
