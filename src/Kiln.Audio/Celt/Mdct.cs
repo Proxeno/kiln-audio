@@ -258,6 +258,11 @@ internal sealed class Mdct
     public void Inverse(ReadOnlySpan<float> coefficients, Span<float> output, int stride = 1) =>
         InverseCore(coefficients, output, stride, SimdConfig.UseSimd);
 
+    /// <summary>Inverse transform with the output left unscaled (the <c>2/N</c> factor omitted).</summary>
+    /// <remarks>The CELT synthesizer multiplies by <c>N/2</c> straight after the inverse, so the two cancel.</remarks>
+    internal void InverseUnscaled(ReadOnlySpan<float> coefficients, Span<float> output, int stride = 1) =>
+        InverseCore(coefficients, output, stride, SimdConfig.UseSimd, scale: 1f);
+
     /// <summary>Inverse transform on the scalar path, used by the parity tests.</summary>
     /// <param name="coefficients">The coefficients of one block.</param>
     /// <param name="output">Receives the windowed samples.</param>
@@ -265,7 +270,7 @@ internal sealed class Mdct
     internal void InverseScalar(ReadOnlySpan<float> coefficients, Span<float> output, int stride = 1) =>
         InverseCore(coefficients, output, stride, useVector: false);
 
-    private void InverseCore(ReadOnlySpan<float> coefficients, Span<float> output, int stride, bool useVector)
+    private void InverseCore(ReadOnlySpan<float> coefficients, Span<float> output, int stride, bool useVector, float scale = float.NaN)
     {
         ValidateStride(stride);
         long required = (((long)_coefficientCount - 1) * stride) + 1;
@@ -285,23 +290,15 @@ internal sealed class Mdct
         int half = _half;
         float[] foldReal = _foldReal;
         float[] foldImaginary = _foldImaginary;
+        if (float.IsNaN(scale))
+        {
+            scale = 2f / count;
+        }
 
         // Pre-rotation: pair coefficient 2p with coefficient N-1-2p. The two exact rotations of the
         // reference (phi and the half-sample correction) collapse into one linear map with the
         // same combined twiddles as the forward post-rotation.
-        int even = 0;
-        int odd = count - 1;
-        for (int p = 0; p < half; p++)
-        {
-            float a = coefficients[even * stride];
-            float b = coefficients[odd * stride];
-            float cos = _rotCos[p];
-            float sin = _rotSin[p];
-            foldReal[p] = (a * sin) - (b * cos);
-            foldImaginary[p] = -((a * cos) + (b * sin));
-            even += 2;
-            odd -= 2;
-        }
+        MdctKernels.RotateInversePre(coefficients, stride, foldReal, foldImaginary, _rotCos, _rotSin, count, half, useVector);
 
         _fft.Transform(
             foldReal, foldImaginary, _spectrumReal, _spectrumImaginary, inverse: true, useVector);
@@ -311,13 +308,8 @@ internal sealed class Mdct
         MdctKernels.RotateInversePost(_spectrumReal, _spectrumImaginary, _rotCos, _rotSin, half, useVector);
 
         float[] deshuffle = _deshuffle;
-        for (int p = 0; p < half; p++)
-        {
-            deshuffle[2 * p] = -_spectrumReal[p];
-            deshuffle[(2 * p) + 1] = _spectrumImaginary[half - 1 - p];
-        }
+        MdctKernels.Deshuffle(_spectrumReal, _spectrumImaginary, deshuffle, half, useVector);
 
-        float scale = 2f / count;
         MdctKernels.MirrorInverse(output, deshuffle, _window, scale, count, _overlap, useVector);
     }
 

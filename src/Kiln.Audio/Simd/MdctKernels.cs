@@ -354,6 +354,111 @@ internal static class MdctKernels
     }
 
     /// <summary>
+    /// Inverse pre-rotation: pairs coefficient <c>2p</c> with <c>N-1-2p</c> and rotates by the
+    /// combined twiddle. The stride-1 vector path deinterleaves four pairs per step.
+    /// </summary>
+    public static void RotateInversePre(
+        ReadOnlySpan<float> coefficients,
+        int stride,
+        Span<float> real,
+        Span<float> imaginary,
+        ReadOnlySpan<float> rotCos,
+        ReadOnlySpan<float> rotSin,
+        int count,
+        int half,
+        bool useVector)
+    {
+        int p = 0;
+        if (stride == 1 && useVector && Vector128.IsHardwareAccelerated)
+        {
+            ref float c = ref MemoryMarshal.GetReference(coefficients);
+            ref float re = ref MemoryMarshal.GetReference(real);
+            ref float im = ref MemoryMarshal.GetReference(imaginary);
+            ref float rc = ref MemoryMarshal.GetReference(rotCos);
+            ref float rs = ref MemoryMarshal.GetReference(rotSin);
+            if (coefficients.Length < count || real.Length < half || imaginary.Length < half
+                || rotCos.Length < half || rotSin.Length < half)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            Vector128<int> evenIdx = Vector128.Create(0, 2, 0, 2);
+            Vector128<int> oddIdx = Vector128.Create(3, 1, 3, 1);
+            for (; p + 4 <= half; p += 4)
+            {
+                Vector128<float> v0 = Vector128.LoadUnsafe(ref c, (nuint)(2 * p));
+                Vector128<float> v1 = Vector128.LoadUnsafe(ref c, (nuint)((2 * p) + 4));
+                Vector128<float> a = Vector128.Create(
+                    Vector128.Shuffle(v0, evenIdx).GetLower(), Vector128.Shuffle(v1, evenIdx).GetLower());
+
+                // The odd partners sit at count-1-2p-2q: window [count-8-2p, count-2p).
+                Vector128<float> w0 = Vector128.LoadUnsafe(ref c, (nuint)(count - 8 - (2 * p)));
+                Vector128<float> w1 = Vector128.LoadUnsafe(ref c, (nuint)(count - 4 - (2 * p)));
+                Vector128<float> b = Vector128.Create(
+                    Vector128.Shuffle(w1, oddIdx).GetLower(), Vector128.Shuffle(w0, oddIdx).GetLower());
+
+                Vector128<float> cos = Vector128.LoadUnsafe(ref rc, (nuint)p);
+                Vector128<float> sin = Vector128.LoadUnsafe(ref rs, (nuint)p);
+                ((a * sin) - (b * cos)).StoreUnsafe(ref re, (nuint)p);
+                (-((a * cos) + (b * sin))).StoreUnsafe(ref im, (nuint)p);
+            }
+        }
+
+        int even = 2 * p;
+        int odd = count - 1 - (2 * p);
+        for (; p < half; p++)
+        {
+            float a = coefficients[even * stride];
+            float b = coefficients[odd * stride];
+            float cos = rotCos[p];
+            float sin = rotSin[p];
+            real[p] = (a * sin) - (b * cos);
+            imaginary[p] = -((a * cos) + (b * sin));
+            even += 2;
+            odd -= 2;
+        }
+    }
+
+    /// <summary>
+    /// De-shuffle: <c>d[2p] = -re[p]</c>, <c>d[2p+1] = im[half-1-p]</c>.
+    /// </summary>
+    public static void Deshuffle(
+        ReadOnlySpan<float> real, ReadOnlySpan<float> imaginary, Span<float> deshuffle, int half, bool useVector)
+    {
+        int p = 0;
+        if (useVector && Vector128.IsHardwareAccelerated)
+        {
+            if (real.Length < half || imaginary.Length < half || deshuffle.Length < 2 * half)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            ref float re = ref MemoryMarshal.GetReference(real);
+            ref float im = ref MemoryMarshal.GetReference(imaginary);
+            ref float d = ref MemoryMarshal.GetReference(deshuffle);
+            Vector128<int> rev = Vector128.Create(3, 2, 1, 0);
+            Vector128<int> lowIdx = Vector128.Create(0, 0, 1, 1);
+            Vector128<int> highIdx = Vector128.Create(2, 2, 3, 3);
+            Vector128<float> oddMask = Vector128.Create(0, -1, 0, -1).AsSingle();
+            for (; p + 4 <= half; p += 4)
+            {
+                Vector128<float> r = -Vector128.LoadUnsafe(ref re, (nuint)p);
+                Vector128<float> i = Vector128.Shuffle(Vector128.LoadUnsafe(ref im, (nuint)(half - 4 - p)), rev);
+                Vector128.ConditionalSelect(oddMask, Vector128.Shuffle(i, lowIdx), Vector128.Shuffle(r, lowIdx))
+                    .StoreUnsafe(ref d, (nuint)(2 * p));
+                Vector128.ConditionalSelect(oddMask, Vector128.Shuffle(i, highIdx), Vector128.Shuffle(r, highIdx))
+                    .StoreUnsafe(ref d, (nuint)((2 * p) + 4));
+            }
+        }
+
+        for (; p < half; p++)
+        {
+            deshuffle[2 * p] = -real[p];
+            deshuffle[(2 * p) + 1] = imaginary[half - 1 - p];
+        }
+    }
+
+    /// <summary>
     /// Mirrors the de-shuffled inverse spectrum into the <c>count + overlap</c> windowed output,
     /// applying the window and the <c>2/count</c> normalisation.
     /// </summary>
@@ -373,7 +478,6 @@ internal static class MdctKernels
         int overlap,
         bool useVector)
     {
-        _ = useVector;
         int half = count / 2;
         int halfOverlap = overlap / 2;
         int total = half - halfOverlap;
@@ -382,7 +486,29 @@ internal static class MdctKernels
         int source = half - 1;
         int destination = (count + overlap) / 2 - 1;
         int lower = 0;
-        for (int i = 0; i < total; i++)
+        int n1 = 0;
+        if (useVector && Vector128.IsHardwareAccelerated && total >= 4)
+        {
+            // Both indices descend together, so this is a plain scaled copy.
+            if (destination - total + 1 < 0 || source - total + 1 < 0 || output.Length <= destination || deshuffle.Length <= source)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            ref float o = ref MemoryMarshal.GetReference(output);
+            ref float d = ref MemoryMarshal.GetReference(deshuffle);
+            Vector128<float> sv = Vector128.Create(scale);
+            for (; n1 + 4 <= total; n1 += 4)
+            {
+                Vector128<float> v = Vector128.LoadUnsafe(ref d, (nuint)(source - 3 - n1));
+                (v * sv).StoreUnsafe(ref o, (nuint)(destination - 3 - n1));
+            }
+
+            destination -= n1;
+            source -= n1;
+        }
+
+        for (int i = n1; i < total; i++)
         {
             output[destination] = deshuffle[source] * scale;
             destination--;
@@ -404,7 +530,27 @@ internal static class MdctKernels
         destination = (count + overlap) / 2;
         int tail = count - 1 + overlap;
         lower = 0;
-        for (int i = 0; i < total; i++)
+        n1 = 0;
+        if (useVector && Vector128.IsHardwareAccelerated && total >= 4)
+        {
+            if (destination + total > output.Length || source + total > deshuffle.Length)
+            {
+                throw new ArgumentException("Buffer too short.");
+            }
+
+            ref float o = ref MemoryMarshal.GetReference(output);
+            ref float d = ref MemoryMarshal.GetReference(deshuffle);
+            Vector128<float> sv = Vector128.Create(scale);
+            for (; n1 + 4 <= total; n1 += 4)
+            {
+                (Vector128.LoadUnsafe(ref d, (nuint)(source + n1)) * sv).StoreUnsafe(ref o, (nuint)(destination + n1));
+            }
+
+            destination += n1;
+            source += n1;
+        }
+
+        for (int i = n1; i < total; i++)
         {
             output[destination] = deshuffle[source] * scale;
             destination++;
