@@ -112,6 +112,35 @@ internal ref struct RangeDecoder
     /// <returns><c>nbits_total*8 - lg</c>, where <c>lg</c> has three fractional bits.</returns>
     public readonly uint TellFrac()
     {
+        // PERF-7: the three fractional bits are a monotone function of the 16-bit normalized
+        // range, so they are the number of precomputed thresholds the range has reached. This
+        // replaces the three dependent multiply/shift rounds of the reference loop (identical
+        // result; see TellFracReference and the exhaustive test against it).
+        uint rng = _rng;
+        if (rng > 0xFFFF && TellTable.Monotone)
+        {
+            int lg = Ilog(rng);
+            uint rQ15 = rng >> (lg - 16);
+            ref uint t = ref MemoryMarshal.GetArrayDataReference(TellTable.Thresholds);
+            int frac = (rQ15 >= t ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 1) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 2) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 3) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 4) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 5) ? 1 : 0)
+                + (rQ15 >= Unsafe.Add(ref t, 6) ? 1 : 0);
+            return (uint)((_nbitsTotal * 8) - ((lg << BitRes) + frac));
+        }
+
+        return TellFracReference();
+    }
+
+    /// <summary>Overrides the range, for exhaustive tests of the tell computation.</summary>
+    internal void SetRngForTest(uint rng) => _rng = rng;
+
+    /// <summary>The reference fractional-bit loop of RFC 6716 §4.1.6.2.</summary>
+    internal readonly uint TellFracReference()
+    {
         int lg = Ilog(_rng);
         // r_Q15 is a Q15 representation of the fractional part of rng, in [32768, 65536).
         uint rQ15 = _rng >> (lg - 16);
@@ -129,6 +158,54 @@ internal ref struct RangeDecoder
         return (uint)((_nbitsTotal * 8) - lg);
     }
 
+    /// <summary>Returns the fractional bits the reference loop yields for a Q15 range.</summary>
+    internal static int TellFraction(uint rQ15)
+    {
+        int lg = 0;
+        for (int i = 0; i < BitRes; i++)
+        {
+            rQ15 = (rQ15 * rQ15) >> 15;
+            uint bit = rQ15 >> 16;
+            lg = (lg << 1) + (int)bit;
+            if (bit != 0)
+            {
+                rQ15 >>= 1;
+            }
+        }
+
+        return lg;
+    }
+
+    private static class TellTable
+    {
+        internal static readonly uint[] Thresholds = new uint[7];
+
+        internal static readonly bool Monotone = Build();
+
+        private static bool Build()
+        {
+            int previous = 0;
+            int next = 1;
+            for (uint r = 32768; r < 65536; r++)
+            {
+                int f = TellFraction(r);
+                if (f < previous || f > 7)
+                {
+                    return false;
+                }
+
+                while (next <= f)
+                {
+                    Thresholds[next - 1] = r;
+                    next++;
+                }
+
+                previous = f;
+            }
+
+            return next == 8;
+        }
+    }
 
     /// <summary>
     /// Computes the first step of symbol decoding: the value <c>fs</c> in [0, ft) (RFC 6716 §4.1.2).

@@ -254,11 +254,11 @@ public class Enc2PhaseBTests
     private static double MeasureCoreSnr(short[] pcm, int complexity, bool forceGreedy)
     {
         const int FrameSamples = 960;
-        const int InternalRate = 16000;
-        var core = new Kiln.Audio.Silk.Encoder.SilkEncoderCore(48000, InternalRate, 20, 24000, complexity, false);
+        const int InternalRate = 8000;
+        var core = new Kiln.Audio.Silk.Encoder.SilkEncoderCore(48000, InternalRate, 20, 8000, complexity, false);
         if (forceGreedy)
         {
-            core.CurrentState.NStatesDelayedDecision = 1;
+            core.DelayedDecisionStatesOverride = 1;
             core.CurrentState.WarpingQ16 = 0;
         }
 
@@ -276,8 +276,8 @@ public class Enc2PhaseBTests
         var output = new List<short>(frames * FrameSamples);
         for (int frame = 0; frame < frames; frame++)
         {
-            // RFC 6716 §3.1, Table 2: config 9 is SILK-only wideband 20 ms.
-            packet[0] = 9 << 3;
+            // RFC 6716 §3.1, Table 2: config 1 is SILK-only narrowband 20 ms.
+            packet[0] = 1 << 3;
             int payload = core.Encode(amplified.AsSpan(frame * FrameSamples, FrameSamples), packet.AsSpan(1));
             decoder.Decode(packet.AsSpan(0, payload + 1), decoded);
             foreach (short sample in decoded)

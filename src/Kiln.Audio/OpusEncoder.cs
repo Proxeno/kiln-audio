@@ -428,6 +428,10 @@ public sealed class OpusEncoder : IDisposable
             MaxBandwidth = _autoMaxBandwidth,
             MaxDataBytes = packet.Length,
             SilkAllowsBandwidthSwitch = true,
+
+            // The SILK core is constructed wideband, so it is already in wideband mode and the
+            // reference's "hold at wideband until SILK settles" guard never needs to bind.
+            SilkInWidebandWithoutVariableLp = _autoSilkBandwidth == OpusBandwidth.Wideband,
             VoiceEstimate = UpdateVoiceEstimate(pcm),
         };
         OpusModeDecision decision = _selector!.Decide(request);

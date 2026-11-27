@@ -539,7 +539,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             state.ShapingLpcOrder,
             state.WarpingQ16);
 
-        delayed.Run(nsqParameters, _delayedDecisionStates, _delayedDecisionPulses, _delayedDecisionOutput, out int seed);
+        int states = DelayedDecisionStatesOverride > 0 ? DelayedDecisionStatesOverride : _delayedDecisionStates;
+        delayed.Run(nsqParameters, states, _delayedDecisionPulses, _delayedDecisionOutput, out int seed);
         // The surviving trellis state may have started from a different seed than the frame's.
         indices.Seed = seed;
         for (int i = 0; i < state.FrameLength; i++)
@@ -587,6 +588,11 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
 
     /// <summary>Exposes the encoder state for internal diagnostics and tests.</summary>
     internal SilkEncoderState CurrentState => _state;
+
+    /// <summary>
+    /// Test hook: forces the trellis width. Zero keeps the width the bitrate and complexity choose.
+    /// </summary>
+    internal int DelayedDecisionStatesOverride { get; set; }
 
     /// <summary>Exposes the side information of the last actual encoding for diagnostics.</summary>
     internal SilkSideInfo LastEncodedIndices => _lastEncodedIndices;
