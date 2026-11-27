@@ -2,6 +2,8 @@
 
 using System;
 
+using Kiln.Audio.Simd.Kernels;
+
 namespace Kiln.Audio.Silk.Encoder;
 
 /// <summary>
@@ -551,11 +553,16 @@ internal static class SilkEncoderMath
     /// <summary>Returns the number of leading zero bits of a 16-bit value (16 for zero).</summary>
     internal static int Clz16(int value) => System.Numerics.BitOperations.LeadingZeroCount((uint)(ushort)value) - 16;
 
+    /// <summary>Computes the autocorrelation sequence with the reference scaling (silk_autocorr), scalar tier.</summary>
+    internal static void Autocorr(out int scale, Span<int> results, ReadOnlySpan<short> input, int inputSize, int correlationCount) =>
+        Autocorr<ScalarKernels>(out scale, results, input, inputSize, correlationCount);
+
     /// <summary>Computes the autocorrelation sequence with the reference scaling (silk_autocorr).</summary>
-    internal static void Autocorr(out int scale, Span<int> results, ReadOnlySpan<short> input, int inputSize, int correlationCount)
+    internal static void Autocorr<TK>(out int scale, Span<int> results, ReadOnlySpan<short> input, int inputSize, int correlationCount)
+        where TK : struct, ISilkEncoderKernels
     {
         int count = Math.Min(inputSize, correlationCount);
-        long correlation64 = InnerProd64(input, input, inputSize) + 1;
+        long correlation64 = TK.InnerProd64(input, input, inputSize) + 1;
         int leadingZeros = Clz64(correlation64);
         int rightShifts = 35 - leadingZeros;
         scale = rightShifts;
@@ -565,7 +572,7 @@ internal static class SilkEncoderMath
             results[0] = (int)(correlation64 << -rightShifts);
             for (int i = 1; i < count; i++)
             {
-                results[i] = InnerProd(input, input[i..], inputSize - i) << -rightShifts;
+                results[i] = TK.InnerProd(input, input[i..], inputSize - i) << -rightShifts;
             }
         }
         else
@@ -573,7 +580,7 @@ internal static class SilkEncoderMath
             results[0] = (int)(correlation64 >> rightShifts);
             for (int i = 1; i < count; i++)
             {
-                results[i] = (int)(InnerProd64(input, input[i..], inputSize - i) >> rightShifts);
+                results[i] = (int)(TK.InnerProd64(input, input[i..], inputSize - i) >> rightShifts);
             }
         }
     }

@@ -1233,3 +1233,274 @@ The CELT synthesis stage roughly halves (vector 01: 1.75 to 0.99 us, 07: 1.82 to
 Float output changed only by FMA and reassociation: the conformance vectors, final-range and PLC
 tests pass unchanged and `KernelTierParityTests` bounds every tier against `ScalarKernels` at
 2e-6 of the signal RMS.
+
+## SIMD-3: encoder kernel sets (SILK + CELT analysis)
+
+SIMD-3 extends the SIMD-1 kernel-set design to the encoder. The same tier structs (`ScalarKernels`,
+`Vector128Kernels`, `AdvSimdArm64Kernels`, `Avx2FmaKernels`) now also implement `ISilkEncoderKernels`
+(exact 16-bit integer kernels) and `IEncoderKernels` (CELT analysis). `SilkEncoderCore` and `CeltEncoder`
+read `AudioKernels.Select()` once in their constructors and switch once per frame into a generic body
+(`EncodeFrameCore<TK>`, `EncodePayloadCore<TK>`); there is no dispatch inside a frame. No `Vector256` or
+`Vector<T>` is used; arm64 uses `AdvSimd` widening multiply-accumulate directly (`ArmIntOps`); the x64 tier
+uses 128-bit `pmaddwd` (`X86IntOps`, not runnable on the arm64 build machine, covered by the same parity
+tests on x64 CI).
+
+### Profile (us per 20 ms frame, `micro enc run ... profile`, `KILN_ENC_PROFILE` build)
+
+| Stage | SILK WB 20k cx0 | SILK WB 20k cx5 | CELT st 64k cx0 | CELT st 64k cx5 |
+| --- | --- | --- | --- | --- |
+| resample/VAD/wrap or pre-emphasis | 8.9 | 8.9 | 1.2 | 1.1 |
+| pitch analysis / prefilter | 11.0 | 12.8 | 2.2 | 18.6 |
+| noise-shape analysis / transient | 4.3 | 7.6 | 0.0 | 5.4 |
+| find-pred (Burg, LTP, NLSF) / MDCT | 16.2 | 24.3 | 4.1 | 4.0 |
+| prefilter / TF + spread decision | 2.5 | 3.7 | 0.0 | 7.9 |
+| NSQ delayed decision / quant all bands | **92.0** | **103.4** | **20.2** | **24.3** |
+| entropy / rest | 11.9 | 11.9 | 2.4 | 3.5 |
+
+The SILK delayed-decision NSQ (60-63%) and CELT quant-all-bands (38-67%) dominate. Hybrid was not profiled.
+
+### What moved
+
+- `InnerProd`, `InnerProd64`, `CorrLags` (four lags per pass, target loaded once), `LpcAnalysisFilter`
+  (transposed form, eight samples per pass) feed pitch analysis (stage 1 and 3 correlations, the whitening
+  filter), `Autocorr`, Burg's first row, the LTP correlation matrix and vector, and the residual-energy filters.
+  All are exact integer arithmetic with the reference wrap-around, so every tier is **bit-identical** to scalar
+  (`SilkKernelTierParityTests`: kernels incl. -32768 extremes, and whole SILK encodes byte-identical per tier).
+- `IEncoderKernels.XcorrLags`: the CELT prefilter's coarse pitch search, four lags per pass with the exact
+  accumulation structure of the single-lag dot (unfused on every vector tier), so encoder output is unchanged.
+- `EncProf` (`[Conditional("KILN_ENC_PROFILE")]`) stage marks, and `micro enc` in the benchmark harness.
+
+### Measurements (best of 7, whole 320 s corpus, CBR, M5 Max; libopus pinned to the same mode)
+
+| Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
+| --- | --- | --- | --- | --- | --- |
+| CELT stereo 64k cx0 | 18.29 | 29.94 | 30.03 | 1.64 | 1.64 |
+| CELT stereo 64k cx5 | 47.06 | 64.35 | 66.34 | 1.37 | 1.41 (noise) |
+| SILK WB mono 20k cx0 | 44.50 | 146.85 | 140.33 | 3.30 | 3.15 |
+| SILK WB mono 20k cx5 | 135.59 | 173.56 | 165.19 | 1.28 | 1.22 |
+| Hybrid FB mono 32k cx0 | 31.44 | not measured | 134.37 | n/a | 4.27 |
+| Hybrid FB mono 32k cx5 | 69.65 | not measured | 169.54 | n/a | 2.43 |
+
+### Remaining gap
+
+Not done in this lane: the NSQ delayed-decision loop (per-sample `LpcPrediction`, the serial warped shaping chain
+and `CopyState`; the right design is lanes = states), the CELT pulse coder (O(n*k) `Icwrs`, replace with the
+table rank), encoder spread rotation and Haar through `TK.Rotate`/`TK.Haar`, forward MDCT on the tier FFT with a
+vector fold and post-write, transient/TF/spread vector passes, the strided short-block IMDCT pre-rotation, and
+Burg's inner loops and `SumSqrShift`. The 3x SILK cx0 gap is mostly the deliberate four-state trellis.
+
+## SIMD-2: SILK decode kernel set and the public SILK path
+
+SIMD-1 moved the CELT decode/synthesis kernels onto per-ISA kernel sets and left SILK alone. After
+PUB-PERF-1 the SILK/hybrid vectors (02-06, 10, 12) were still 1.26-2.05x libopus through the
+public API. SIMD-2 profiles that path stage by stage, adds `ISilkKernels` to the same tier structs
+and `AudioKernels.Select()` selection, and moves the loops that dominate onto it.
+
+### Profile first (public API, 48 kHz stereo, instrumented build)
+
+`dotnet <Benchmarks.dll> micro silkpub` (built with `-p:DefineConstants=KILN_PERF4_PROFILE`) times
+each stage of `OpusDecoder.Decode(packet, short[])` over vectors 02-06, 10 and 12. Microseconds per
+packet, vector 02 (8 kHz SILK, 20 ms) and vector 04 (16 kHz SILK):
+
+| Stage | 02 before | 02 after | 04 before | 04 after |
+| --- | --- | --- | --- | --- |
+| range decode, all parameters | 3.38 | 3.11 | 3.68 | 3.40 |
+| of which excitation pulses | 2.77 | 2.51 | 3.06 | 2.80 |
+| NLSF to LPC | 0.40 | 0.39 | 0.67 | 0.67 |
+| excitation reconstruction | 0.45 | 0.45 | 0.81 | 0.83 |
+| LTP block (rewhitening, sLTP scaling, LTP) | 0.43 | 0.19 | 0.69 | 0.22 |
+| LPC synthesis | 0.56 | 0.42 | 1.14 | 0.97 |
+| stereo unmix | 0.18 | 0.04 | 0.36 | 0.07 |
+| synthesis, whole frame | 2.50 | 1.99 | 4.18 | 3.27 |
+| output deinterleave | 0.11 | 0.02 | 0.22 | 0.02 |
+| **output resampler** | **8.39** | **2.89** | **8.69** | **4.13** |
+| float conversion and interleave | 0.89 | 0.12 | 0.88 | 0.12 |
+| int16 conversion | 0.20 | 0.20 | 0.20 | 0.20 |
+| public `Decode`, whole packet | 16.30 | 8.49 | 18.67 | 11.31 |
+
+The output resampler was half the packet. Its FIR is ~518 taps at 48 kHz (86 taps per phase at an
+8 kHz input), and the old kernel did one dot product per output: two loads per fused multiply-add,
+so it was load-bound at about 27 cycles per output, with a horizontal sum and a scalar round per
+output on top. The per-stage timers are instrumented (a few percent overhead), so only the
+non-instrumented table below is a ratio.
+
+### What changed
+
+- **Kernel set.** `ISilkKernels` (`Simd/Kernels/ISilkKernels.cs`) is implemented by the same four
+  tier structs as `ICeltKernels` (`ScalarKernels`, `Vector128Kernels`, `AdvSimdArm64Kernels`,
+  `Avx2FmaKernels`, each a `partial struct` with a `*.SilkDecode.cs` file). `SilkSynthesis`,
+  `SilkOutput` and `SilkResampler` take the tier once at construction (`AudioKernels.Select()`,
+  honouring `KILN_AUDIO_DISABLE_SIMD` and `AudioKernels.Scope`) and enter a generic body with one
+  `switch` per frame; PLC and FEC reuse the same dispatchers. The shared vector bodies,
+  `SilkDecVec<TOps>`, are written against `ISilkOps` (`PortableSilkOps`, `ArmSilkOps`,
+  `X86SilkOps`); the x64 tier is 128-bit VEX with FMA, and there is no `Vector256`/`Vector<T>`
+  anywhere. (The SIMD-3 encoder kernels share the tier structs but have their own `SilkVec`;
+  the decode names carry a `Dec` prefix.)
+- **Bit-exact integer kernels.** `Smulwb` is one `SQDMULH` on arm64 (`(2 * a * (c << 15)) >> 32`
+  equals `(a * c) >> 16` exactly, and cannot saturate for a 16-bit `c`) and the split-multiply
+  identity elsewhere; `Smulww` is `SMULL` + `SHRN` on arm64 and `pmuldq` on x64. LPC and LTP
+  synthesis use them; LTP rewhitening (`LpcAnalysis`) is eight outputs per step across the tap
+  loop (`SMLAL`, two accumulators) instead of a nested scalar FIR; sLTP scaling and gain
+  adjustment are vector loops; the stereo unmix does the side prediction, the saturated L/R and the
+  interleave in one pass, eight samples at a time, with the ramped weights as lane vectors;
+  deinterleave and the mono average are `UZP1/UZP2` and `SHADD`.
+- **Resampler.** For the integer upsampling ratios 3, 4 and 6 (8, 12 and 16 kHz to 48 kHz) the
+  kernel works over time lanes: four consecutive input samples per vector, one accumulator per
+  phase, the coefficients stored `[tap][phase]` so each load feeds every phase by element
+  (`FMLA` by lane on arm64), and two blocks in flight. Loads per output fall from about 44 to
+  about 11. The result is transposed to time-major, rounded to nearest even and saturated in
+  registers (`FCVTNS`, `SQXTN`). Other ratios use a four-outputs-at-a-time dot product with a
+  transposed reduction. Input conversion is a kernel too.
+- **Output stages.** Float conversion and interleave are kernels (0.89 to 0.12 us); the SILK-only
+  frame no longer clears the output and adds, it copies (`OpusDecoderCore`), and the hybrid/FEC
+  merge is a vector add.
+- **Range decode of the excitation.** The pulse-count, pulse-split, LSB and sign tables now have
+  inverse-CDF forms built once, and `RangeDecoder.DecodeIcdf8` replaces `DecodePdf` for them: the
+  same symbol and the same state (`SilkIcdfDecodeTests` compares every table on random streams),
+  with one multiply and compare per candidate. About 0.26 us of 2.77.
+
+### Decode ratios (public API, same window as libopus)
+
+Before: the unmodified tree, libopus run in the same script. After: this branch. Ratio below 1.0
+means Kiln is faster.
+
+48 kHz stereo, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 36.89 | 36.07 | 0.98 | 36.90 | 36.95 | 1.00 |
+| 02 | 9.05 | 18.52 | 2.05 | 9.05 | 9.28 | 1.03 |
+| 03 | 9.08 | 17.87 | 1.97 | 9.18 | 9.39 | 1.02 |
+| 04 | 12.70 | 21.00 | 1.65 | 12.62 | 13.33 | 1.06 |
+| 05 | 22.68 | 28.50 | 1.26 | 22.64 | 20.76 | 0.92 |
+| 06 | 22.19 | 28.46 | 1.28 | 22.39 | 21.12 | 0.94 |
+| 07 | 18.17 | 16.23 | 0.89 | 18.32 | 16.10 | 0.88 |
+| 08 | 18.43 | 17.03 | 0.92 | 18.55 | 16.61 | 0.90 |
+| 09 | 35.35 | 37.81 | 1.07 | 35.73 | 37.52 | 1.05 |
+| 10 | 39.41 | 44.84 | 1.14 | 39.94 | 41.41 | 1.04 |
+| 11 | 28.40 | 24.42 | 0.86 | 28.84 | 24.51 | 0.85 |
+| 12 | 9.69 | 16.20 | 1.67 | 9.76 | 8.84 | 0.91 |
+
+48 kHz mono, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 32.22 | 33.73 | 1.05 | 32.58 | 34.21 | 1.05 |
+| 02 | 7.33 | 14.18 | 1.93 | 7.32 | 7.87 | 1.08 |
+| 03 | 7.35 | 13.76 | 1.87 | 7.52 | 8.13 | 1.08 |
+| 04 | 10.33 | 16.57 | 1.60 | 10.44 | 11.35 | 1.09 |
+| 05 | 18.14 | 23.82 | 1.31 | 18.21 | 17.99 | 0.99 |
+| 06 | 17.93 | 23.70 | 1.32 | 18.55 | 19.02 | 1.03 |
+| 07 | 14.51 | 15.22 | 1.05 | 14.89 | 15.21 | 1.02 |
+| 08 | 14.34 | 14.77 | 1.03 | 14.71 | 14.73 | 1.00 |
+| 09 | 31.27 | 35.88 | 1.15 | 31.68 | 35.44 | 1.12 |
+| 10 | 33.93 | 40.00 | 1.18 | 34.29 | 37.51 | 1.09 |
+| 11 | 24.09 | 23.04 | 0.96 | 24.16 | 22.65 | 0.94 |
+| 12 | 8.21 | 14.92 | 1.82 | 8.30 | 8.60 | 1.04 |
+
+Float output differs from the previous resampler only by fused multiply-add and summation order
+(at most one 16-bit step, at a rounding tie); the SILK synthesis is bit-exact
+(`SilkPcmOracleTests`), and `SilkDecodeKernelTierParityTests` pins every kernel of every tier to
+the scalar tier (bit-exact for the integer kernels, one step for the resampler kernels).
+
+### Remaining gap
+
+- SILK-only 8/12/16 kHz stereo (02-04) are at 1.02-1.06x and mono (02-04) at 1.08-1.09x, 05/06/12
+  at or below 1.0x stereo. What is left is the excitation range decode (2.5-2.8 us of 8.5-11.3 us,
+  a serial bit-by-bit walk of the shell tree that libopus does at about the same speed), the
+  resampler at its fused multiply-add floor (about 22 FMA per output with the current 518-tap
+  prototype; a shorter prototype would change the frequency response and the calibrated alignment
+  delays), NLSF to LPC and the excitation LCG (both serial), and the int16 conversion (0.2 us; a
+  SILK-only direct int16 path would remove it).
+- Hybrid (10) is 1.04x stereo and 1.09x mono. In the instrumented profile the SILK work is about
+  4 us per packet (range decode 1.5, synthesis 0.8, resampler 1.4) of 28 us; the rest is CELT
+  (band decode and the band 17-21 synthesis), which SIMD-1 already moved. The packet is a mix of
+  CELT-only and hybrid frames, so the CELT share is what keeps it above 1.0.
+
+## ENC-NSQ-1: SILK encoder NSQ + analysis hot paths
+
+The delayed-decision quantizer (`SilkNsqDelayedDecision`) now runs one SIMD lane per trellis state
+(`SilkNsqVec<TOps>`, state-major SoA histories; the winner search and state replacement stay scalar). The
+SMLAWB is exact on arm64 via `sqdmulh` with the coefficient pre-shifted by 15, and a 16-bit split elsewhere, so
+every tier is bit-identical to the scalar reference. `CopyLane` copies only the live history instead of the whole
+state. The gain scaling and Burg's rows/correlations are on the kernel tiers too. The LPC accumulation uses four
+independent accumulators (no measurable change, kept because it is exact).
+
+Proof of identical output: `SilkNsqByteHashTests` (26 golden byte hashes recorded from the 130f5f3 baseline
+encoder, all tiers) and `SilkNsqLaneParityTests` (against a verbatim copy of the old class).
+
+| Config (us/frame, best of 7) | libopus | before | after | ratio before | ratio after |
+| --- | --- | --- | --- | --- | --- |
+| SILK WB mono 20k cx0 | 44.5 | 137.5 | 103.0 | 3.09 | 2.31 |
+| SILK WB mono 20k cx5 | 135.8 | 156.0 | 121.6 | 1.15 | 0.90 |
+| Hybrid FB mono 32k cx0 | 31.7 | 131.5 | 101.2 | 4.15 | 3.19 |
+| Hybrid FB mono 32k cx5 | 70.0 | 157.4 | 131.7 | 2.25 | 1.88 |
+
+NSQ stage (WB 20k): cx0 92.0 -> 59.0 us/frame, cx5 103.3 -> 71.3 us/frame (the stage includes every CBR
+rate-loop iteration).
+
+### Remaining gap
+
+WB 20k is high-rate (one trellis state), so cx0 cost is per-sample work, not trellis width: Kiln runs the warped
+shaping and delayed-decision path where libopus runs its plain greedy quantizer. A single-state fast path that is
+bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
+are what is left for cx0 and hybrid.
+
+## ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
+
+Goal: CELT encode at or below 1.0x libopus. Same machine and harness as SIMD-3 (`micro enc run`, the libopus in-process
+encode bench, best of 7, whole corpus, CBR). The "before" window was disturbed by other lanes on the machine (its
+libopus numbers are 1.4x the quiet-machine ones for stereo), so the before ratios are each taken against the libopus
+figure of the same window.
+
+### What moved
+
+- **Pulse index.** `CeltEncoderVq.EncodePulses` is now O(n) table reads: the exact inverse of the decoder's `Cwrsi`
+  walk, reading the decoder's `PvqCwrs`/`PvqTable` cells (made `internal`). The O(n*k) `Icwrs`/`Unext` recurrence and
+  the n=2,3,4 special cases are gone. Test: `PulseIndex_inverts_the_decoder_walk` (3000 random vectors round-trip
+  through a copy of the decoder walk).
+- **Spread rotation and Haar** go through `TK.Rotate`/`TK.Haar` (`QuantAllBands`, `AlgQuant`, `TfAnalysis` are generic
+  over the tier; `IEncoderKernels` now extends `ICeltKernels`).
+- **PVQ search**: each group of four lanes is first tested with one vector compare against the current best and
+  skipped when no lane wins, otherwise walked in index order, so the result is bit-identical to the scalar search.
+- **Prefilter** (`CeltEncVec<T>`, all unfused, so bit-identical to the scalar loops): `Autocorr5` (five serial chains
+  side by side instead of five passes), `Fir4`/`Fir1` (samples are independent; four per step, top down in place),
+  `DecimateLowpass` (unzip), `Dot4` (four dots per pass, used by `RemoveDoubling` and the fine lag search, whose
+  lags are correlated four at a time), and `CombFilter` (four outputs per step; a zero new gain copies).
+- **Transient and spreading analysis**: channel sum via `AddInPlace`, `BlockMaxAbs`, `SpreadCounts` (integer counts,
+  exact); TF analysis uses `TK.Haar` and `AddInPlace`.
+- **Forward MDCT** (`Mdct.Forward<TK>`): vector middle fold (`UnzipEven/Odd`), the tier FFT, zipped post-rotation write
+  for contiguous blocks.
+- `EncProf` marks 30-35 split quant-all-bands; `micro enc run` prints an FNV hash of all packets.
+
+### Results (us per 20 ms frame)
+
+| Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
+| --- | --- | --- | --- | --- | --- |
+| CELT stereo 64k cx0 | 26.7 / 18.5 | 44.6 (32.1 in the profile run) | 25.3 | 1.67 (1.20) | 1.37 |
+| CELT stereo 64k cx5 | 47.4 / 47.2 | 62.9 | 40.2 | 1.33 | **0.85** |
+| CELT mono 32k cx0 | 12.6 / 9.5 | 24.7 | 12.7 | 1.96 | 1.34 |
+| CELT mono 32k cx5 | 34.4 / 34.4 | 42.0 | 25.7 | 1.22 | **0.75** |
+| Hybrid FB mono 32k cx0 | 37.4 / 31.6 | 200.6 | 130.2 | 5.4 | 4.1 |
+| Hybrid FB mono 32k cx5 | 70.1 / 69.5 | 160.1 | 152.4 | 2.28 | 2.19 |
+
+(libopus column: before window / after window.) Hybrid is dominated by the SILK layer (lane ENC-NSQ-1).
+
+Profile, stereo 64k (us): cx0 prefilter 2.4 to 0.4, MDCT 4.2 to 1.6, quant-all-bands 21.5 to 19.3; cx5 prefilter
+16.5 to 7.5, transient 5.5 to 2.3, spreading decision 5.4 to 0.2, TF 2.5 to 2.1, MDCT 4.0 to 1.9, quant-all-bands
+24.5 to 21.3. cx0 quant split: PVQ search 12.7, pulse index plus entropy 2.3, theta 2.0, Haar/Hadamard 1.3, rotation 0.5.
+
+### Output changes
+
+Not byte-identical to SIMD-3 for the configs above (hashes differ): the tier FFT and `TK.Rotate`/`TK.Haar` use fused
+multiply-add on arm64. Kernels written for this lane are unfused and exact. The CELT encoder, interop, KernelTier,
+Mdct/Fft and conformance gates pass (609 of 610 in the first window; the one failure was the new test's own
+reference, replaced).
+
+### Remaining gap
+
+The greedy PVQ pulse placement is 12.7 us of the cx0 25 us: a serial chain per pulse (the placed pulse updates xy/yy,
+which the next pulse's compare needs) plus a mispredicted branch whenever a group beats the running best. An exact
+fix needs a branch-free in-order lane walk; a lane-wise best (as libopus's SSE2 search does) is faster but not
+bit-identical to the scalar search the existing parity test pins. Also open: `StereoItheta` still uses double
+`Math.Atan2`, the transient high-pass IIR is serial, and `L1Metric` for 1-2 groups is a serial chain.

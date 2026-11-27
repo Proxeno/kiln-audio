@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Silk;
 
@@ -54,7 +55,12 @@ internal sealed class SilkResampler
     private const int BlockCapacity = 1024;
     private const int Lanes = 8;
 
-    private static readonly bool UseFma = Fma.IsSupported || AdvSimd.Arm64.IsSupported;
+    private readonly AudioKernelTier _tier;
+
+    // Transposed coefficients [tap][phase] for the integer-ratio upsampler (down == 1, up 3, 4 or 6);
+    // empty, with _upLength 0, when the ratio does not qualify.
+    private readonly float[] _bankT = [];
+    private readonly int _upLength;
 
     private readonly int[] _phaseLength;
     private readonly int[] _phaseOffset;
@@ -81,9 +87,11 @@ internal sealed class SilkResampler
     /// <param name="inRateHz">Input rate: 8000, 12000 or 16000.</param>
     /// <param name="outRateHz">Output rate: 8000, 12000, 16000, 24000 or 48000.</param>
     /// <param name="channels">Channel count of the stream being decoded, 1 or 2.</param>
+    /// <param name="tier">The kernel tier to run on, or <see langword="null"/> for the host's best.</param>
     /// <exception cref="ArgumentOutOfRangeException">A rate or the channel count is not supported.</exception>
-    internal SilkResampler(int inRateHz, int outRateHz, int channels = 1)
+    internal SilkResampler(int inRateHz, int outRateHz, int channels = 1, AudioKernelTier? tier = null)
     {
+        _tier = tier ?? AudioKernels.Select();
         if (inRateHz is not (8000 or 12000 or 16000))
         {
             throw new ArgumentOutOfRangeException(
@@ -173,6 +181,20 @@ internal sealed class SilkResampler
             }
         }
 
+        if (_down == 1 && _up is 3 or 4 or 6 && Array.TrueForAll(_bankLength, length => length == _bankLength[0]))
+        {
+            int pad = _up == 6 ? 8 : 4;
+            _upLength = _bankLength[0];
+            _bankT = new float[_upLength * pad];
+            for (int phase = 0; phase < _up; phase++)
+            {
+                for (int tap = 0; tap < _upLength; tap++)
+                {
+                    _bankT[(tap * pad) + phase] = _bank[_bankOffset[phase] + tap];
+                }
+            }
+        }
+
         // A decimating output can sit up to ceil(down / up) samples behind the newest input, so the
         // carried history covers the longest phase plus that lag.
         _historyLength = longest + ((_down + _up - 1) / _up);
@@ -253,7 +275,7 @@ internal sealed class SilkResampler
         while (inputOffset < input.Length)
         {
             int chunk = Math.Min(BlockCapacity, input.Length - inputOffset);
-            int produced = _copy ? chunk : FilterBlock(input.Slice(inputOffset, chunk), output.Slice(outputOffset));
+            int produced = _copy ? chunk : FilterBlockDispatch(input.Slice(inputOffset, chunk), output.Slice(outputOffset));
             if (_copy)
             {
                 input.Slice(inputOffset, chunk).CopyTo(output.Slice(outputOffset));
@@ -267,47 +289,56 @@ internal sealed class SilkResampler
         }
     }
 
+    /// <summary>Filters one block on the instance's kernel tier.</summary>
+    private int FilterBlockDispatch(ReadOnlySpan<short> input, Span<short> output) => _tier switch
+    {
+        AudioKernelTier.Avx2Fma => FilterBlock<Avx2FmaKernels>(input, output),
+        AudioKernelTier.AdvSimdArm64 => FilterBlock<AdvSimdArm64Kernels>(input, output),
+        AudioKernelTier.Vector128 => FilterBlock<Vector128Kernels>(input, output),
+        _ => FilterBlock<ScalarKernels>(input, output),
+    };
+
     /// <summary>Filters one block of at most <see cref="BlockCapacity"/> input samples.</summary>
     /// <returns>The number of output samples written.</returns>
-    private int FilterBlock(ReadOnlySpan<short> input, Span<short> output)
+    private int FilterBlock<TK>(ReadOnlySpan<short> input, Span<short> output)
+        where TK : struct, ISilkKernels
     {
         int history = _historyLength;
         Span<float> buffer = _buffer;
-        for (int i = 0; i < input.Length; i++)
-        {
-            buffer[history + i] = input[i];
-        }
+        TK.ShortsToFloat(input, buffer[history..], input.Length, 1f);
 
         long consumedBefore = _consumed;
         long target = ((consumedBefore + input.Length) * _up) / _down;
         int count = checked((int)(target - _produced));
 
         // Position of the first output: index = produced * down, phase = index % up and newest
-        // input sample = index / up, then advanced incrementally.
+        // input sample = index / up, then advanced incrementally inside the kernel.
         long index = _produced * _down;
         long newestAbsolute = index / _up;
         int phase = (int)(index - (newestAbsolute * _up));
-        int stepSamples = _down / _up;
-        int stepPhase = _down % _up;
         int newest = history + (int)(newestAbsolute - consumedBefore);
 
-        ref float bufferRef = ref MemoryMarshal.GetArrayDataReference(_buffer);
-        ref float bankRef = ref MemoryMarshal.GetArrayDataReference(_bank);
-        for (int n = 0; n < count; n++)
+        int fast = 0;
+        if (_upLength > 0 && phase == 0 && count == input.Length * _up)
         {
-            int length = _bankLength[phase];
-            float sum = Dot(
-                ref Unsafe.Add(ref bufferRef, newest - length + 1),
-                ref Unsafe.Add(ref bankRef, _bankOffset[phase]),
-                length);
-            output[n] = ToInt16(sum);
-            newest += stepSamples;
-            phase += stepPhase;
-            if (phase >= _up)
-            {
-                phase -= _up;
-                newest++;
-            }
+            fast = TK.ResampleUp(_buffer, _bankT, _up, _upLength, newest, input.Length, output);
+        }
+
+        int done = fast * _up;
+        if (done < count)
+        {
+            TK.Resample(
+                _buffer,
+                _bank,
+                _bankOffset,
+                _bankLength,
+                newest + fast,
+                phase,
+                _down / _up,
+                _down % _up,
+                _up,
+                count - done,
+                output[done..]);
         }
 
         // Carry the newest samples as the next block's history.
@@ -315,50 +346,6 @@ internal sealed class SilkResampler
         _consumed += input.Length;
         _produced += count;
         return count;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static short ToInt16(float sum)
-    {
-        float rounded = MathF.Round(sum);
-        if (rounded > short.MaxValue)
-        {
-            return short.MaxValue;
-        }
-
-        if (rounded < short.MinValue)
-        {
-            return short.MinValue;
-        }
-
-        return (short)rounded;
-    }
-
-    /// <summary>Dot product of <paramref name="length"/> (a multiple of 8) floats.</summary>
-    private static float Dot(ref float x, ref float c, int length)
-    {
-        Vector128<float> acc0 = Vector128<float>.Zero;
-        Vector128<float> acc1 = Vector128<float>.Zero;
-        if (UseFma)
-        {
-            for (int i = 0; i < length; i += Lanes)
-            {
-                acc0 = Vector128.FusedMultiplyAdd(
-                    Vector128.LoadUnsafe(ref x, (nuint)i), Vector128.LoadUnsafe(ref c, (nuint)i), acc0);
-                acc1 = Vector128.FusedMultiplyAdd(
-                    Vector128.LoadUnsafe(ref x, (nuint)(i + 4)), Vector128.LoadUnsafe(ref c, (nuint)(i + 4)), acc1);
-            }
-        }
-        else
-        {
-            for (int i = 0; i < length; i += Lanes)
-            {
-                acc0 += Vector128.LoadUnsafe(ref x, (nuint)i) * Vector128.LoadUnsafe(ref c, (nuint)i);
-                acc1 += Vector128.LoadUnsafe(ref x, (nuint)(i + 4)) * Vector128.LoadUnsafe(ref c, (nuint)(i + 4));
-            }
-        }
-
-        return Vector128.Sum(acc0 + acc1);
     }
 
     /// <summary>Delays a block of output by the alignment delay, carrying the tail between blocks.</summary>

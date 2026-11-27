@@ -248,6 +248,7 @@ static int run_encode(const char *path, int rate, int channels, const char *appl
     unsigned char *encoded;
     long frames;
     double best = 0.0;
+    long toc_count[3] = {0, 0, 0};
     int iteration;
 
     if (frame_size <= 0 || frame_samples <= 0) {
@@ -272,6 +273,25 @@ static int run_encode(const char *path, int rate, int channels, const char *appl
         if (error != OPUS_OK || encoder == NULL) {
             fail("opus_encoder_create failed");
         }
+        /* Optional pins, to compare like with like: KILN_BENCH_BANDWIDTH = NB|MB|WB|SWB|FB sets the
+           bandwidth; KILN_BENCH_FORCE_MODE = 1000 (SILK) | 1001 (hybrid) | 1002 (CELT) forces the
+           mode (OPUS_SET_FORCE_MODE, opus_private.h request 11002). */
+        {
+            const char *bandwidth = getenv("KILN_BENCH_BANDWIDTH");
+            const char *force_mode = getenv("KILN_BENCH_FORCE_MODE");
+
+            if (bandwidth != NULL) {
+                int value = strcmp(bandwidth, "NB") == 0 ? OPUS_BANDWIDTH_NARROWBAND
+                          : strcmp(bandwidth, "MB") == 0 ? OPUS_BANDWIDTH_MEDIUMBAND
+                          : strcmp(bandwidth, "WB") == 0 ? OPUS_BANDWIDTH_WIDEBAND
+                          : strcmp(bandwidth, "SWB") == 0 ? OPUS_BANDWIDTH_SUPERWIDEBAND
+                          : OPUS_BANDWIDTH_FULLBAND;
+                opus_encoder_ctl(encoder, OPUS_SET_BANDWIDTH(value));
+            }
+            if (force_mode != NULL) {
+                opus_encoder_ctl(encoder, 11002, atoi(force_mode));
+            }
+        }
         if (opus_encoder_ctl(encoder, OPUS_SET_BITRATE(bitrate)) != OPUS_OK ||
             opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(complexity)) != OPUS_OK ||
             opus_encoder_ctl(encoder, OPUS_SET_VBR(cbr ? 0 : 1)) != OPUS_OK) {
@@ -287,6 +307,7 @@ static int run_encode(const char *path, int rate, int channels, const char *appl
             if (produced < 0) {
                 fail("opus_encode failed");
             }
+            toc_count[(encoded[0] >> 3) < 12 ? 0 : (encoded[0] >> 3) < 16 ? 1 : 2]++;
         }
         elapsed = now_seconds() - start;
         opus_encoder_destroy(encoder);
@@ -296,6 +317,7 @@ static int run_encode(const char *path, int rate, int channels, const char *appl
         }
     }
 
+    printf("packet modes (all passes): silk=%ld hybrid=%ld celt=%ld\n", toc_count[0], toc_count[1], toc_count[2]);
     print_common("encode", path, rate, channels, frames,
                  (double)frames * (double)frame_size / (double)rate, best, iterations);
     return 0;

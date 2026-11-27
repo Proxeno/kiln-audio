@@ -1,6 +1,8 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using System;
+using System.Runtime.Intrinsics;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Silk;
 
@@ -49,9 +51,6 @@ internal sealed class SilkNsqDelayedDecision
     /// <summary>The longest short-term prediction order (Appendix A <c>MAX_LPC_ORDER</c>).</summary>
     internal const int MaxPredictionOrder = 16;
 
-    /// <summary>The number of harmonic shaping FIR taps (Appendix A <c>HARM_SHAPE_FIR_TAPS</c>).</summary>
-    private const int HarmonicShapeTaps = 3;
-
     // Quantizer state shared across frames (Appendix A silk_nsq_state).
     private readonly short[] _xq = new short[2 * MaxFrameLength];
     private readonly int[] _sLtpShpQ14 = new int[2 * MaxFrameLength];
@@ -65,35 +64,75 @@ internal sealed class SilkNsqDelayedDecision
     private readonly int[] _delayedGainQ10 = new int[DecisionDelay];
     private readonly sbyte[] _pulses = new sbyte[MaxFrameLength];
 
-    // Per-state buffers (Appendix A NSQ_del_dec_struct).
-    private readonly int[][] _stateLpcQ14 = new int[MaxStates][];
-    private readonly int[][] _stateRandState = new int[MaxStates][];
-    private readonly int[][] _stateQQ10 = new int[MaxStates][];
-    private readonly int[][] _stateXqQ14 = new int[MaxStates][];
-    private readonly int[][] _statePredQ15 = new int[MaxStates][];
-    private readonly int[][] _stateShapeQ14 = new int[MaxStates][];
-    private readonly int[][] _stateAr2Q14 = new int[MaxStates][];
-    private readonly int[] _stateLfArQ14 = new int[MaxStates];
-    private readonly int[] _stateSeed = new int[MaxStates];
-    private readonly int[] _stateSeedInit = new int[MaxStates];
-    private readonly int[] _stateRdQ10 = new int[MaxStates];
+    // Per-state histories (Appendix A NSQ_del_dec_struct), one SIMD lane per trellis state: position-major,
+    // array[position * Lanes + state], so one position of all states is one vector.
+    private const int Lanes = 4;
+    private readonly int[] _lpcSoa = new int[(MaxSubframeLength + LpcBufferLength) * Lanes];
+    private readonly int[] _ar2Soa = new int[MaxShapingOrder * Lanes];
+    private readonly int[] _randSoa = new int[DecisionDelay * Lanes];
+    private readonly int[] _qSoa = new int[DecisionDelay * Lanes];
+    private readonly int[] _xqSoa = new int[DecisionDelay * Lanes];
+    private readonly int[] _predSoa = new int[DecisionDelay * Lanes];
+    private readonly int[] _shapeSoa = new int[DecisionDelay * Lanes];
+    private readonly int[] _laneLfAr = new int[Lanes];
+    private readonly int[] _laneSeed = new int[Lanes];
+    private readonly int[] _laneSeedInit = new int[Lanes];
+    private readonly int[] _laneRd = new int[Lanes];
 
-    // Per-sample candidate scratch (SoA over the states for the vector kernel).
-    private readonly int[] _residualQ10 = new int[MaxStates];
-    private readonly int[] _seeds = new int[MaxStates];
-    private readonly int[] _q1Q10 = new int[MaxStates];
-    private readonly int[] _q2Q10 = new int[MaxStates];
-    private readonly int[] _rd1Q10 = new int[MaxStates];
-    private readonly int[] _rd2Q10 = new int[MaxStates];
-    private readonly int[] _stateLpcPredQ14 = new int[MaxStates];
-    private readonly int[] _stateNoiseArQ14 = new int[MaxStates];
-    private readonly int[] _stateNoiseLfQ14 = new int[MaxStates];
-    private readonly int[] _candRdQ10 = new int[MaxStates * 2];
-    private readonly int[] _candQQ10 = new int[MaxStates * 2];
-    private readonly int[] _candXqQ14 = new int[MaxStates * 2];
-    private readonly int[] _candLfArQ14 = new int[MaxStates * 2];
-    private readonly int[] _candShapeQ14 = new int[MaxStates * 2];
-    private readonly int[] _candLpcExcQ14 = new int[MaxStates * 2];
+    // Per-sample candidate scores (first and second candidate of every state) and prepared filter taps.
+    private readonly int[] _candidates = new int[2 * Lanes];
+    private readonly Vector128<int>[] _predictionPrepared = new Vector128<int>[MaxPredictionOrder];
+    private readonly Vector128<int>[] _shapingPrepared = new Vector128<int>[MaxShapingOrder];
+    private readonly AudioKernelTier _tier = AudioKernels.Select();
+
+    // Accessors for the lane-parallel kernel (SilkNsqVec).
+    internal int[] LpcSoa => _lpcSoa;
+
+    internal int[] Ar2Soa => _ar2Soa;
+
+    internal int[] RandSoa => _randSoa;
+
+    internal int[] QSoa => _qSoa;
+
+    internal int[] XqSoa => _xqSoa;
+
+    internal int[] PredSoa => _predSoa;
+
+    internal int[] ShapeSoa => _shapeSoa;
+
+    internal int[] LaneLfAr => _laneLfAr;
+
+    internal int[] LaneSeed => _laneSeed;
+
+    internal int[] LaneSeedInit => _laneSeedInit;
+
+    internal int[] LaneRd => _laneRd;
+
+    internal int[] Candidates => _candidates;
+
+    internal Vector128<int>[] PredictionPrepared => _predictionPrepared;
+
+    internal Vector128<int>[] ShapingPrepared => _shapingPrepared;
+
+    internal int[] SLtpQ15 => _sLtpQ15;
+
+    internal int[] SLtpShpQ14 => _sLtpShpQ14;
+
+    internal int[] XScQ10 => _xScQ10;
+
+    internal int[] DelayedGainQ10 => _delayedGainQ10;
+
+    internal sbyte[] Pulses => _pulses;
+
+    internal short[] Xq => _xq;
+
+    internal int SampleBufferIdx { get; set; }
+
+    internal int SLtpBufIdx { get => _sLtpBufIdx; set => _sLtpBufIdx = value; }
+
+    internal int SLtpShpBufIdx { get => _sLtpShpBufIdx; set => _sLtpShpBufIdx = value; }
+
+    internal int CurrentSubframeLength { get; private set; }
 
     private int _sLfArShpQ14;
     private int _lagPrev;
@@ -105,17 +144,6 @@ internal sealed class SilkNsqDelayedDecision
     /// <summary>Creates a quantizer in its initial state.</summary>
     public SilkNsqDelayedDecision()
     {
-        for (int k = 0; k < MaxStates; k++)
-        {
-            _stateLpcQ14[k] = new int[MaxSubframeLength + LpcBufferLength];
-            _stateRandState[k] = new int[DecisionDelay];
-            _stateQQ10[k] = new int[DecisionDelay];
-            _stateXqQ14[k] = new int[DecisionDelay];
-            _statePredQ15[k] = new int[DecisionDelay];
-            _stateShapeQ14[k] = new int[DecisionDelay];
-            _stateAr2Q14[k] = new int[MaxShapingOrder];
-        }
-
         Reset();
     }
 
@@ -173,21 +201,18 @@ internal sealed class SilkNsqDelayedDecision
         other._sLtpShpQ14.AsSpan().CopyTo(_sLtpShpQ14);
         other._sLpcQ14.AsSpan().CopyTo(_sLpcQ14);
         other._sAr2Q14.AsSpan().CopyTo(_sAr2Q14);
-        for (int k = 0; k < MaxStates; k++)
-        {
-            other._stateLpcQ14[k].AsSpan().CopyTo(_stateLpcQ14[k]);
-            other._stateRandState[k].AsSpan().CopyTo(_stateRandState[k]);
-            other._stateQQ10[k].AsSpan().CopyTo(_stateQQ10[k]);
-            other._stateXqQ14[k].AsSpan().CopyTo(_stateXqQ14[k]);
-            other._statePredQ15[k].AsSpan().CopyTo(_statePredQ15[k]);
-            other._stateShapeQ14[k].AsSpan().CopyTo(_stateShapeQ14[k]);
-            other._stateAr2Q14[k].AsSpan().CopyTo(_stateAr2Q14[k]);
-        }
-
-        other._stateLfArQ14.AsSpan().CopyTo(_stateLfArQ14);
-        other._stateSeed.AsSpan().CopyTo(_stateSeed);
-        other._stateSeedInit.AsSpan().CopyTo(_stateSeedInit);
-        other._stateRdQ10.AsSpan().CopyTo(_stateRdQ10);
+        other._lpcSoa.AsSpan().CopyTo(_lpcSoa);
+        other._ar2Soa.AsSpan().CopyTo(_ar2Soa);
+        other._randSoa.AsSpan().CopyTo(_randSoa);
+        other._qSoa.AsSpan().CopyTo(_qSoa);
+        other._xqSoa.AsSpan().CopyTo(_xqSoa);
+        other._predSoa.AsSpan().CopyTo(_predSoa);
+        other._shapeSoa.AsSpan().CopyTo(_shapeSoa);
+        other._laneLfAr.AsSpan().CopyTo(_laneLfAr);
+        other._laneSeed.AsSpan().CopyTo(_laneSeed);
+        other._laneSeedInit.AsSpan().CopyTo(_laneSeedInit);
+        other._laneRd.AsSpan().CopyTo(_laneRd);
+        SampleBufferIdx = other.SampleBufferIdx;
         _sLfArShpQ14 = other._sLfArShpQ14;
         _lagPrev = other._lagPrev;
         _sLtpBufIdx = other._sLtpBufIdx;
@@ -251,6 +276,11 @@ internal sealed class SilkNsqDelayedDecision
             throw new ArgumentException("The subframe geometry is out of range.", nameof(parameters));
         }
 
+        if (predictOrder is < 1 or > MaxPredictionOrder)
+        {
+            throw new ArgumentException("The prediction order must be 1 to 16.", nameof(parameters));
+        }
+
         if (shapingOrder is < 2 or > MaxShapingOrder || (shapingOrder & 1) != 0)
         {
             throw new ArgumentException("The shaping order must be even, 2 to 16.", nameof(parameters));
@@ -279,31 +309,72 @@ internal sealed class SilkNsqDelayedDecision
             throw new ArgumentException("An input buffer is shorter than the frame needs.", nameof(parameters));
         }
 
+        // One switch per frame; everything below it is a direct call specialised to the tier.
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                seed = RunCore<Avx2FmaKernels>(parameters, stateCount, pulses, xq);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                seed = RunCore<AdvSimdArm64Kernels>(parameters, stateCount, pulses, xq);
+                break;
+            case AudioKernelTier.Vector128:
+                seed = RunCore<Vector128Kernels>(parameters, stateCount, pulses, xq);
+                break;
+            default:
+                seed = RunCore<ScalarKernels>(parameters, stateCount, pulses, xq);
+                break;
+        }
+    }
+
+    private int RunCore<TK>(
+        in SilkNsqParameters parameters,
+        int stateCount,
+        Span<sbyte> pulses,
+        Span<short> xq)
+        where TK : struct, ISilkEncoderKernels
+    {
+        int subframeLength = parameters.SubframeLength;
+        int subframeCount = parameters.SubframeCount;
+        int frameLength = subframeLength * subframeCount;
+        int ltpMemLength = parameters.LtpMemoryLength;
+        int predictOrder = parameters.PredictLpcOrder;
+        int shapingOrder = parameters.ShapingLpcOrder;
         ReadOnlySpan<int> pitchLags = parameters.PitchLags;
         ReadOnlySpan<int> gainsQ16 = parameters.GainsQ16;
         bool voiced = parameters.SignalType == 2;
         int lag = _lagPrev;
+        CurrentSubframeLength = subframeLength;
 
         // Initialize the delayed-decision states. The reference zeroes the whole state array
-        // first, so the sample buffers start at zero in every frame.
-        for (int k = 0; k < stateCount; k++)
+        // first, so the sample buffers start at zero in every frame. Lanes past the live states
+        // shadow state 0 (they are computed but never read by a decision).
+        _randSoa.AsSpan().Clear();
+        _qSoa.AsSpan().Clear();
+        _xqSoa.AsSpan().Clear();
+        _predSoa.AsSpan().Clear();
+        _shapeSoa.AsSpan().Clear();
+        for (int k = 0; k < Lanes; k++)
         {
-            _stateSeed[k] = (k + parameters.Seed) & 3;
-            _stateSeedInit[k] = _stateSeed[k];
-            _stateRdQ10[k] = 0;
-            _stateLfArQ14[k] = _sLfArShpQ14;
-            _stateRandState[k].AsSpan().Clear();
-            _stateQQ10[k].AsSpan().Clear();
-            _stateXqQ14[k].AsSpan().Clear();
-            _statePredQ15[k].AsSpan().Clear();
-            _stateShapeQ14[k].AsSpan().Clear();
-            _stateShapeQ14[k][0] = _sLtpShpQ14[ltpMemLength - 1];
-            _sLpcQ14.AsSpan().CopyTo(_stateLpcQ14[k]);
-            _sAr2Q14.AsSpan().CopyTo(_stateAr2Q14[k]);
+            int s = k < stateCount ? k : 0;
+            _laneSeed[k] = (s + parameters.Seed) & 3;
+            _laneSeedInit[k] = _laneSeed[k];
+            _laneRd[k] = 0;
+            _laneLfAr[k] = _sLfArShpQ14;
+            _shapeSoa[k] = _sLtpShpQ14[ltpMemLength - 1];
+            for (int p = 0; p < LpcBufferLength; p++)
+            {
+                _lpcSoa[(p * Lanes) + k] = _sLpcQ14[p];
+            }
+
+            for (int j = 0; j < MaxShapingOrder; j++)
+            {
+                _ar2Soa[(j * Lanes) + k] = _sAr2Q14[j];
+            }
         }
 
         int offsetQ10 = SilkSynthesisTables.QuantizationOffsetQ10[parameters.SignalType >> 1][parameters.QuantizationOffsetType];
-        int sampleBufferIdx = 0;
+        SampleBufferIdx = 0;
         int decisionDelay = Math.Min(DecisionDelay, subframeLength);
         if (voiced)
         {
@@ -342,24 +413,25 @@ internal sealed class SilkNsqDelayedDecision
                     if (k == 2)
                     {
                         // Reset the delayed decisions at the interpolation boundary.
-                        int winner = SelectWinner(stateCount, _stateRdQ10);
+                        int winner = SelectWinner(stateCount, _laneRd);
                         for (int i = 0; i < stateCount; i++)
                         {
                             if (i != winner)
                             {
-                                _stateRdQ10[i] = SilkFixedPoint.Add(_stateRdQ10[i], int.MaxValue >> 4);
+                                _laneRd[i] = SilkFixedPoint.Add(_laneRd[i], int.MaxValue >> 4);
                             }
                         }
 
-                        int lastIndex = sampleBufferIdx + decisionDelay;
+                        int lastIndex = SampleBufferIdx + decisionDelay;
                         for (int i = 0; i < decisionDelay; i++)
                         {
                             lastIndex = (lastIndex - 1) & (DecisionDelay - 1);
+                            int slot = (lastIndex * Lanes) + winner;
                             int pulseIndex = (2 * subframeLength) + i - decisionDelay;
-                            _pulses[pulseIndex] = (sbyte)SilkFixedPoint.RshiftRound(_stateQQ10[winner][lastIndex], 10);
+                            _pulses[pulseIndex] = (sbyte)SilkFixedPoint.RshiftRound(_qSoa[slot], 10);
                             _xq[ltpMemLength + pulseIndex] = (short)SilkFixedPoint.Sat16(SilkFixedPoint.RshiftRound(
-                                SilkFixedPoint.Smulww(_stateXqQ14[winner][lastIndex], gainsQ16[1]), 14));
-                            _sLtpShpQ14[_sLtpShpBufIdx - decisionDelay + i] = _stateShapeQ14[winner][lastIndex];
+                                SilkFixedPoint.Smulww(_xqSoa[slot], gainsQ16[1]), 14));
+                            _sLtpShpQ14[_sLtpShpBufIdx - decisionDelay + i] = _shapeSoa[slot];
                         }
 
                         subframeArgument = 0;
@@ -369,50 +441,72 @@ internal sealed class SilkNsqDelayedDecision
                     int startIndex = ltpMemLength - lag - predictOrder - (LtpOrder / 2);
                     int filterLength = ltpMemLength - startIndex;
                     ReadOnlySpan<short> filterInput = _xq.AsSpan(startIndex + (k * subframeLength), filterLength);
-                    LpcAnalysisFilter(
+                    TK.LpcAnalysisFilter(
                         _sLtp.AsSpan(startIndex, filterLength), filterInput, prediction, filterLength, predictOrder);
                     _sLtpBufIdx = ltpMemLength;
                     _rewhiteFlag = 1;
                 }
             }
 
-            ScaleStates(parameters, stateCount, k, lag, decisionDelay);
-            QuantizeSubframe(
-                parameters, stateCount, k, subframeArgument, lag, ltpMemLength, prediction, ltp, shaping,
-                harmonicFirPacked, offsetQ10, decisionDelay, ref sampleBufferIdx);
+            ScaleStates<TK>(parameters, k, lag, decisionDelay);
+            TK.NsqSubframe(this, new SilkNsqSubframeArgs
+            {
+                StateCount = stateCount,
+                Subframe = k,
+                SubframeArgument = subframeArgument,
+                Lag = lag,
+                DecisionDelay = decisionDelay,
+                OffsetQ10 = offsetQ10,
+                LambdaQ10 = parameters.LambdaQ10,
+                WarpingQ16 = parameters.WarpingQ16,
+                HarmonicFirPacked = harmonicFirPacked,
+                TiltQ14 = parameters.TiltQ14[k],
+                LowFrequencyShapingQ14 = parameters.LowFrequencyShapingQ14[k],
+                GainQ10 = gainsQ16[k] >> 6,
+                Voiced = voiced,
+                LtpMemoryLength = ltpMemLength,
+                Prediction = prediction,
+                Ltp = ltp,
+                Shaping = shaping,
+            });
             subframeArgument++;
 
             if (k != subframeCount - 1)
             {
                 // End of subframe: shift the short-term prediction history. The last subframe
                 // leaves its array in place; the winner copy below skips the shifted part.
-                for (int state = 0; state < stateCount; state++)
-                {
-                    _stateLpcQ14[state].AsSpan(subframeLength, LpcBufferLength)
-                        .CopyTo(_stateLpcQ14[state]);
-                }
+                _lpcSoa.AsSpan(subframeLength * Lanes, LpcBufferLength * Lanes).CopyTo(_lpcSoa);
             }
         }
 
         // Pick the winner and flush its last decisionDelay samples.
-        int finalWinner = SelectWinner(stateCount, _stateRdQ10);
-        seed = _stateSeedInit[finalWinner];
-        LastCostQ10 = _stateRdQ10[finalWinner];
-        int finalIndex = sampleBufferIdx + decisionDelay;
+        int finalWinner = SelectWinner(stateCount, _laneRd);
+        int result = _laneSeedInit[finalWinner];
+        LastCostQ10 = _laneRd[finalWinner];
+        int finalIndex = SampleBufferIdx + decisionDelay;
         int gainQ10 = gainsQ16[subframeCount - 1] >> 6;
         for (int i = 0; i < decisionDelay; i++)
         {
             finalIndex = (finalIndex - 1) & (DecisionDelay - 1);
+            int slot = (finalIndex * Lanes) + finalWinner;
             int pulseIndex = frameLength + i - decisionDelay;
-            _pulses[pulseIndex] = (sbyte)SilkFixedPoint.RshiftRound(_stateQQ10[finalWinner][finalIndex], 10);
+            _pulses[pulseIndex] = (sbyte)SilkFixedPoint.RshiftRound(_qSoa[slot], 10);
             _xq[ltpMemLength + pulseIndex] = (short)SilkFixedPoint.Sat16(SilkFixedPoint.RshiftRound(
-                SilkFixedPoint.Smulww(_stateXqQ14[finalWinner][finalIndex], gainQ10), 8));
-            _sLtpShpQ14[_sLtpShpBufIdx - decisionDelay + i] = _stateShapeQ14[finalWinner][finalIndex];
+                SilkFixedPoint.Smulww(_xqSoa[slot], gainQ10), 8));
+            _sLtpShpQ14[_sLtpShpBufIdx - decisionDelay + i] = _shapeSoa[slot];
         }
 
-        _stateLpcQ14[finalWinner].AsSpan(subframeLength, LpcBufferLength).CopyTo(_sLpcQ14);
-        _stateAr2Q14[finalWinner].AsSpan().CopyTo(_sAr2Q14);
-        _sLfArShpQ14 = _stateLfArQ14[finalWinner];
+        for (int p = 0; p < LpcBufferLength; p++)
+        {
+            _sLpcQ14[p] = _lpcSoa[((subframeLength + p) * Lanes) + finalWinner];
+        }
+
+        for (int j = 0; j < MaxShapingOrder; j++)
+        {
+            _sAr2Q14[j] = _ar2Soa[(j * Lanes) + finalWinner];
+        }
+
+        _sLfArShpQ14 = _laneLfAr[finalWinner];
         _lagPrev = pitchLags[subframeCount - 1];
 
         for (int i = 0; i < frameLength; i++)
@@ -425,9 +519,11 @@ internal sealed class SilkNsqDelayedDecision
         _sLtpShpQ14.AsSpan(frameLength, ltpMemLength).CopyTo(_sLtpShpQ14);
 
         _pulses.AsSpan(0, frameLength).CopyTo(pulses);
+        return result;
     }
 
-    private void ScaleStates(in SilkNsqParameters parameters, int stateCount, int subframe, int lag, int decisionDelay)
+    private void ScaleStates<TK>(in SilkNsqParameters parameters, int subframe, int lag, int decisionDelay)
+        where TK : struct, ISilkEncoderKernels
     {
         int subframeLength = parameters.SubframeLength;
         int gainQ16 = parameters.GainsQ16[subframe];
@@ -460,236 +556,20 @@ internal sealed class SilkNsqDelayedDecision
 
         if (gainAdjustQ16 != 1 << 16)
         {
-            for (int i = _sLtpShpBufIdx - parameters.LtpMemoryLength; i < _sLtpShpBufIdx; i++)
-            {
-                _sLtpShpQ14[i] = SilkFixedPoint.Smulww(gainAdjustQ16, _sLtpShpQ14[i]);
-            }
+            int shapeStart = _sLtpShpBufIdx - parameters.LtpMemoryLength;
+            TK.ScaleQ16(_sLtpShpQ14.AsSpan(shapeStart, parameters.LtpMemoryLength), gainAdjustQ16);
 
             if (parameters.SignalType == 2 && _rewhiteFlag == 0)
             {
-                for (int i = _sLtpBufIdx - lag - (LtpOrder / 2); i < _sLtpBufIdx - decisionDelay; i++)
-                {
-                    _sLtpQ15[i] = SilkFixedPoint.Smulww(gainAdjustQ16, _sLtpQ15[i]);
-                }
+                int start = _sLtpBufIdx - lag - (LtpOrder / 2);
+                TK.ScaleQ16(_sLtpQ15.AsSpan(start, _sLtpBufIdx - decisionDelay - start), gainAdjustQ16);
             }
 
-            for (int state = 0; state < stateCount; state++)
-            {
-                _stateLfArQ14[state] = SilkFixedPoint.Smulww(gainAdjustQ16, _stateLfArQ14[state]);
-                int[] lpc = _stateLpcQ14[state];
-                for (int i = 0; i < LpcBufferLength; i++)
-                {
-                    lpc[i] = SilkFixedPoint.Smulww(gainAdjustQ16, lpc[i]);
-                }
-
-                int[] ar = _stateAr2Q14[state];
-                for (int i = 0; i < MaxShapingOrder; i++)
-                {
-                    ar[i] = SilkFixedPoint.Smulww(gainAdjustQ16, ar[i]);
-                }
-
-                int[] pred = _statePredQ15[state];
-                int[] shape = _stateShapeQ14[state];
-                for (int i = 0; i < DecisionDelay; i++)
-                {
-                    pred[i] = SilkFixedPoint.Smulww(gainAdjustQ16, pred[i]);
-                    shape[i] = SilkFixedPoint.Smulww(gainAdjustQ16, shape[i]);
-                }
-            }
-        }
-    }
-
-    private void QuantizeSubframe(
-        in SilkNsqParameters parameters,
-        int stateCount,
-        int subframe,
-        int subframeArgument,
-        int lag,
-        int ltpMemLength,
-        ReadOnlySpan<short> prediction,
-        ReadOnlySpan<short> ltp,
-        ReadOnlySpan<short> shaping,
-        int harmonicFirPacked,
-        int offsetQ10,
-        int decisionDelay,
-        ref int sampleBufferIdx)
-    {
-        int subframeLength = parameters.SubframeLength;
-        bool voiced = parameters.SignalType == 2;
-        int gainQ10 = parameters.GainsQ16[subframe] >> 6;
-        int tiltQ14 = parameters.TiltQ14[subframe];
-        int lowFrequencyShapingQ14 = parameters.LowFrequencyShapingQ14[subframe];
-        int shapingLagIndex = _sLtpShpBufIdx - lag + (HarmonicShapeTaps / 2);
-        int predictionLagIndex = _sLtpBufIdx - lag + (LtpOrder / 2);
-
-        for (int i = 0; i < subframeLength; i++)
-        {
-            // Long-term prediction.
-            int ltpPredictionQ14 = 0;
-            if (voiced)
-            {
-                ltpPredictionQ14 = 2;
-                for (int j = 0; j < LtpOrder; j++)
-                {
-                    ltpPredictionQ14 = SilkFixedPoint.Smlawb(
-                        ltpPredictionQ14, _sLtpQ15[predictionLagIndex - j], ltp[j]);
-                }
-
-                ltpPredictionQ14 = SilkFixedPoint.Lshift(ltpPredictionQ14, 1);
-                predictionLagIndex++;
-            }
-
-            // Long-term shaping.
-            int longTermShapingQ14 = 0;
-            if (lag > 0)
-            {
-                longTermShapingQ14 = SilkFixedPoint.Smulwb(
-                    _sLtpShpQ14[shapingLagIndex] + _sLtpShpQ14[shapingLagIndex - 2], harmonicFirPacked);
-                longTermShapingQ14 = Smlawt(longTermShapingQ14, _sLtpShpQ14[shapingLagIndex - 1], harmonicFirPacked);
-                longTermShapingQ14 = SilkFixedPoint.Sub(ltpPredictionQ14, longTermShapingQ14 << 2);
-                shapingLagIndex++;
-            }
-
-            for (int state = 0; state < stateCount; state++)
-            {
-                _stateSeed[state] = SilkFixedPoint.Rand(_stateSeed[state]);
-                int lpcBase = LpcBufferLength - 1 + i;
-                int lpcPrediction = LpcPrediction(_stateLpcQ14[state], lpcBase, prediction);
-                int noiseAr = NoiseShaping(
-                    _stateAr2Q14[state], _stateLpcQ14[state][lpcBase], _stateLfArQ14[state],
-                    shaping, parameters.WarpingQ16, tiltQ14);
-                int noiseLf = SilkFixedPoint.Smulwb(_stateShapeQ14[state][sampleBufferIdx], lowFrequencyShapingQ14);
-                noiseLf = Smlawt(noiseLf, _stateLfArQ14[state], lowFrequencyShapingQ14);
-                noiseLf = SilkFixedPoint.Lshift(noiseLf, 2);
-
-                int shapingSum = SilkFixedPoint.Add(noiseAr, noiseLf);
-                int predictionSum = SilkFixedPoint.Add(longTermShapingQ14, lpcPrediction);
-                int combined = SilkFixedPoint.RshiftRound(SilkFixedPoint.Sub(predictionSum, shapingSum), 4);
-                _residualQ10[state] = SilkFixedPoint.Sub(_xScQ10[i], combined);
-                _seeds[state] = _stateSeed[state];
-                _stateLpcPredQ14[state] = lpcPrediction;
-                _stateNoiseArQ14[state] = noiseAr;
-                _stateNoiseLfQ14[state] = noiseLf;
-            }
-
-            SilkNsqDelayedDecisionKernel.Evaluate(
-                _residualQ10, _seeds, stateCount, offsetQ10, parameters.LambdaQ10,
-                _q1Q10, _q2Q10, _rd1Q10, _rd2Q10);
-
-            for (int state = 0; state < stateCount; state++)
-            {
-                int firstQ;
-                int secondQ;
-                int firstRd;
-                int secondRd;
-                if (_rd1Q10[state] < _rd2Q10[state])
-                {
-                    firstRd = SilkFixedPoint.Add(_stateRdQ10[state], _rd1Q10[state]);
-                    secondRd = SilkFixedPoint.Add(_stateRdQ10[state], _rd2Q10[state]);
-                    firstQ = _q1Q10[state];
-                    secondQ = _q2Q10[state];
-                }
-                else
-                {
-                    firstRd = SilkFixedPoint.Add(_stateRdQ10[state], _rd2Q10[state]);
-                    secondRd = SilkFixedPoint.Add(_stateRdQ10[state], _rd1Q10[state]);
-                    firstQ = _q2Q10[state];
-                    secondQ = _q1Q10[state];
-                }
-
-                _candRdQ10[state] = firstRd;
-                _candQQ10[state] = firstQ;
-                _candRdQ10[MaxStates + state] = secondRd;
-                _candQQ10[MaxStates + state] = secondQ;
-                CompleteCandidate(state, candidate: 0, firstQ, ltpPredictionQ14);
-                CompleteCandidate(state, candidate: 1, secondQ, ltpPredictionQ14);
-            }
-
-            sampleBufferIdx = (sampleBufferIdx - 1) & (DecisionDelay - 1);
-            int lastSampleIndex = (sampleBufferIdx + decisionDelay) & (DecisionDelay - 1);
-
-            // Find the winner and penalize states that have diverged from its history.
-            int winner = 0;
-            int minimum = _candRdQ10[0];
-            for (int state = 1; state < stateCount; state++)
-            {
-                if (_candRdQ10[state] < minimum)
-                {
-                    minimum = _candRdQ10[state];
-                    winner = state;
-                }
-            }
-
-            int winnerRandState = _stateRandState[winner][lastSampleIndex];
-            for (int state = 0; state < stateCount; state++)
-            {
-                if (_stateRandState[state][lastSampleIndex] != winnerRandState)
-                {
-                    _candRdQ10[state] = SilkFixedPoint.Add(_candRdQ10[state], int.MaxValue >> 4);
-                    _candRdQ10[MaxStates + state] = SilkFixedPoint.Add(_candRdQ10[MaxStates + state], int.MaxValue >> 4);
-                }
-            }
-
-            // Replace the worst first-set state when the best second-set state beats it.
-            int worstIndex = 0;
-            int worst = _candRdQ10[0];
-            int bestIndex = 0;
-            int best = _candRdQ10[MaxStates];
-            for (int state = 1; state < stateCount; state++)
-            {
-                if (_candRdQ10[state] > worst)
-                {
-                    worst = _candRdQ10[state];
-                    worstIndex = state;
-                }
-
-                if (_candRdQ10[MaxStates + state] < best)
-                {
-                    best = _candRdQ10[MaxStates + state];
-                    bestIndex = state;
-                }
-            }
-
-            if (best < worst)
-            {
-                CopyState(bestIndex, worstIndex, i);
-                _candRdQ10[worstIndex] = _candRdQ10[MaxStates + bestIndex];
-                _candQQ10[worstIndex] = _candQQ10[MaxStates + bestIndex];
-                _candXqQ14[worstIndex] = _candXqQ14[MaxStates + bestIndex];
-                _candLfArQ14[worstIndex] = _candLfArQ14[MaxStates + bestIndex];
-                _candShapeQ14[worstIndex] = _candShapeQ14[MaxStates + bestIndex];
-                _candLpcExcQ14[worstIndex] = _candLpcExcQ14[MaxStates + bestIndex];
-            }
-
-            // Write the delayed sample from the winner.
-            if (subframeArgument > 0 || i >= decisionDelay)
-            {
-                int pulseIndex = (subframe * subframeLength) + i - decisionDelay;
-                _pulses[pulseIndex] = (sbyte)SilkFixedPoint.RshiftRound(_stateQQ10[winner][lastSampleIndex], 10);
-                _xq[ltpMemLength + pulseIndex] = (short)SilkFixedPoint.Sat16(SilkFixedPoint.RshiftRound(
-                    SilkFixedPoint.Smulww(_stateXqQ14[winner][lastSampleIndex], _delayedGainQ10[lastSampleIndex]), 8));
-                _sLtpShpQ14[_sLtpShpBufIdx - decisionDelay] = _stateShapeQ14[winner][lastSampleIndex];
-                _sLtpQ15[_sLtpBufIdx - decisionDelay] = _statePredQ15[winner][lastSampleIndex];
-            }
-
-            _sLtpShpBufIdx++;
-            _sLtpBufIdx++;
-
-            for (int state = 0; state < stateCount; state++)
-            {
-                _stateLfArQ14[state] = _candLfArQ14[state];
-                _stateLpcQ14[state][LpcBufferLength + i] = _candXqQ14[state];
-                _stateXqQ14[state][sampleBufferIdx] = _candXqQ14[state];
-                _stateQQ10[state][sampleBufferIdx] = _candQQ10[state];
-                _statePredQ15[state][sampleBufferIdx] = SilkFixedPoint.Lshift(_candLpcExcQ14[state], 1);
-                _stateShapeQ14[state][sampleBufferIdx] = _candShapeQ14[state];
-                _stateSeed[state] = SilkFixedPoint.Add(
-                    _stateSeed[state], SilkFixedPoint.RshiftRound(_candQQ10[state], 10));
-                _stateRandState[state][sampleBufferIdx] = _stateSeed[state];
-                _stateRdQ10[state] = _candRdQ10[state];
-            }
-
-            _delayedGainQ10[sampleBufferIdx] = gainQ10;
+            TK.ScaleQ16(_laneLfAr, gainAdjustQ16);
+            TK.ScaleQ16(_lpcSoa.AsSpan(0, LpcBufferLength * Lanes), gainAdjustQ16);
+            TK.ScaleQ16(_ar2Soa, gainAdjustQ16);
+            TK.ScaleQ16(_predSoa, gainAdjustQ16);
+            TK.ScaleQ16(_shapeSoa, gainAdjustQ16);
         }
     }
 
@@ -707,106 +587,5 @@ internal sealed class SilkNsqDelayedDecision
         }
 
         return winner;
-    }
-
-    private static int LpcPrediction(int[] lpc, int lpcBase, ReadOnlySpan<short> coefficients)
-    {
-        int prediction = coefficients.Length >> 1;
-        for (int j = 0; j < coefficients.Length; j++)
-        {
-            prediction = SilkFixedPoint.Smlawb(prediction, lpc[lpcBase - j], coefficients[j]);
-        }
-
-        return SilkFixedPoint.Lshift(prediction, 4);
-    }
-
-    private static int NoiseShaping(
-        int[] ar2, int lpcCurrent, int lfAr, ReadOnlySpan<short> coefficients, int warpingQ16, int tiltQ14)
-    {
-        int order = coefficients.Length;
-        int tmp2 = SilkFixedPoint.Smlawb(lpcCurrent, ar2[0], warpingQ16);
-        int tmp1 = SilkFixedPoint.Smlawb(ar2[0], ar2[1] - tmp2, warpingQ16);
-        ar2[0] = tmp2;
-        int noiseAr = order >> 1;
-        noiseAr = SilkFixedPoint.Smlawb(noiseAr, tmp2, coefficients[0]);
-        for (int j = 2; j < order; j += 2)
-        {
-            tmp2 = SilkFixedPoint.Smlawb(ar2[j - 1], ar2[j] - tmp1, warpingQ16);
-            ar2[j - 1] = tmp1;
-            noiseAr = SilkFixedPoint.Smlawb(noiseAr, tmp1, coefficients[j - 1]);
-            tmp1 = SilkFixedPoint.Smlawb(ar2[j], ar2[j + 1] - tmp2, warpingQ16);
-            ar2[j] = tmp2;
-            noiseAr = SilkFixedPoint.Smlawb(noiseAr, tmp2, coefficients[j]);
-        }
-
-        ar2[order - 1] = tmp1;
-        noiseAr = SilkFixedPoint.Smlawb(noiseAr, tmp1, coefficients[order - 1]);
-        noiseAr = SilkFixedPoint.Lshift(noiseAr, 1);
-        noiseAr = SilkFixedPoint.Smlawb(noiseAr, lfAr, tiltQ14);
-        return SilkFixedPoint.Lshift(noiseAr, 2);
-    }
-
-    /// <summary>Completes one candidate's quantized-signal state (Appendix A, best/second best update).</summary>
-    private void CompleteCandidate(int state, int candidate, int qQ10, int ltpPredictionQ14)
-    {
-        int index = (candidate * MaxStates) + state;
-        int excitationQ14 = SilkFixedPoint.Lshift(qQ10, 4);
-        if (_stateSeed[state] < 0)
-        {
-            excitationQ14 = -excitationQ14;
-        }
-
-        int lpcExcitationQ14 = SilkFixedPoint.Add(excitationQ14, ltpPredictionQ14);
-        int xqQ14 = SilkFixedPoint.Add(lpcExcitationQ14, _stateLpcPredQ14[state]);
-        int lfAr = SilkFixedPoint.Sub(xqQ14, _stateNoiseArQ14[state]);
-        _candLpcExcQ14[index] = lpcExcitationQ14;
-        _candXqQ14[index] = xqQ14;
-        _candLfArQ14[index] = lfAr;
-        _candShapeQ14[index] = SilkFixedPoint.Sub(lfAr, _stateNoiseLfQ14[state]);
-    }
-
-    private void CopyState(int source, int destination, int sample)
-    {
-        int[] sourceLpc = _stateLpcQ14[source];
-        int[] destinationLpc = _stateLpcQ14[destination];
-        Array.Copy(sourceLpc, sample, destinationLpc, sample, sourceLpc.Length - sample);
-        Array.Copy(_stateRandState[source], _stateRandState[destination], DecisionDelay);
-        Array.Copy(_stateQQ10[source], _stateQQ10[destination], DecisionDelay);
-        Array.Copy(_stateXqQ14[source], _stateXqQ14[destination], DecisionDelay);
-        Array.Copy(_statePredQ15[source], _statePredQ15[destination], DecisionDelay);
-        Array.Copy(_stateShapeQ14[source], _stateShapeQ14[destination], DecisionDelay);
-        Array.Copy(_stateAr2Q14[source], _stateAr2Q14[destination], MaxShapingOrder);
-        _stateLfArQ14[destination] = _stateLfArQ14[source];
-        _stateSeed[destination] = _stateSeed[source];
-        _stateSeedInit[destination] = _stateSeedInit[source];
-        _stateRdQ10[destination] = _stateRdQ10[source];
-    }
-
-    /// <summary>Multiplies by the high half of a packed coefficient (Appendix A <c>silk_SMLAWT</c>).</summary>
-    private static int Smlawt(int a, int b, int c) =>
-        unchecked(a + (int)(((long)b * (c >> 16)) >> 16));
-
-    /// <summary>The inverse LPC filter used to re-whiten the LTP state (Appendix A <c>silk_LPC_analysis_filter</c>).</summary>
-    private static void LpcAnalysisFilter(
-        Span<short> output,
-        ReadOnlySpan<short> input,
-        ReadOnlySpan<short> coefficients,
-        int length,
-        int order)
-    {
-        for (int ix = order; ix < length; ix++)
-        {
-            int out32Q12 = 0;
-            for (int j = 0; j < order; j++)
-            {
-                out32Q12 = SilkFixedPoint.Add(
-                    out32Q12, SilkFixedPoint.Smulbb(input[ix - 1 - j], coefficients[j]));
-            }
-
-            out32Q12 = SilkFixedPoint.Sub(SilkFixedPoint.Lshift(input[ix], 12), out32Q12);
-            output[ix] = (short)SilkFixedPoint.Sat16(SilkFixedPoint.RshiftRound(out32Q12, 12));
-        }
-
-        output[..order].Clear();
     }
 }
