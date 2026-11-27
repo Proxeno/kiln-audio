@@ -23,6 +23,11 @@ internal static class Perf4ProfileMeasure
     private const int OutputChannels = 2;
 #endif
 
+#if !KILN_PERF4_PROFILE
+    internal static void RunPublicSilk() =>
+        Console.WriteLine("Profiling is compiled out; build with -p:DefineConstants=KILN_PERF4_PROFILE.");
+#endif
+
     /// <summary>Runs the stage profile for the three CELT comparison vectors.</summary>
     public static void Run()
     {
@@ -46,6 +51,56 @@ internal static class Perf4ProfileMeasure
     }
 
 #if KILN_PERF4_PROFILE
+    /// <summary>SIMD-2: per-stage profile of the public SILK/hybrid decode path (48 kHz).</summary>
+    internal static void RunPublicSilk()
+    {
+        foreach (int channels in new[] { 2, 1 })
+        {
+            foreach (int vector in new[] { 2, 3, 4, 5, 6, 10, 12 })
+            {
+                byte[][] packets = TestVectorData.ReadPackets(vector);
+                var options = new OpusDecoderOptions { SampleRate = 48000, Channels = channels };
+                short[] pcm = new short[48000 * 120 / 1000 * channels];
+                using (var warm = new OpusDecoder(options))
+                {
+                    for (int p = 0; p < 20; p++)
+                    {
+                        foreach (byte[] packet in packets)
+                        {
+                            warm.Decode(packet, pcm);
+                        }
+                    }
+                }
+
+                SilkPerf4Profile.Reset();
+                const int Passes = 5;
+                for (int p = 0; p < Passes; p++)
+                {
+                    using var decoder = new OpusDecoder(options);
+                    foreach (byte[] packet in packets)
+                    {
+                        decoder.Decode(packet, pcm);
+                    }
+                }
+
+                double us = 1_000_000.0 / Stopwatch.Frequency;
+                double packetsDone = Math.Max(1, SilkPerf4Profile.Calls[27]);
+                Console.WriteLine(FormattableString.Invariant(
+                    $"-- vector {vector:D2} api-channels={channels}: us per packet (packets={packetsDone / Passes:F0}/pass)"));
+                for (int slot = 0; slot < SilkPerf4Profile.SlotCount; slot++)
+                {
+                    if (SilkPerf4Profile.Calls[slot] == 0)
+                    {
+                        continue;
+                    }
+
+                    Console.WriteLine(FormattableString.Invariant(
+                        $"  {SilkPerf4Profile.Names[slot],-13} {SilkPerf4Profile.Ticks[slot] * us / packetsDone,8:F3} us   {SilkPerf4Profile.Calls[slot] / packetsDone,6:F2} calls/pkt"));
+                }
+            }
+        }
+    }
+
     private static void MeasureSilk(int vector)
     {
         int rateHz = vector switch

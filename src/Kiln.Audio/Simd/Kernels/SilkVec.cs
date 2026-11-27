@@ -59,6 +59,31 @@ internal static class SilkScalar
 
         output[..order].Clear();
     }
+
+    internal static void BurgRows(
+        Span<int> firstRow, Span<int> lastRow, ReadOnlySpan<int> afQa, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed,
+        int n, int x1, int x2, ref int tmp1, ref int tmp2)
+    {
+        int length = x.Length;
+        for (int k = 0; k < n; k++)
+        {
+            firstRow[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(firstRow[k], x1, x[n - k - 1]);
+            lastRow[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(lastRow[k], x2, x[length - n + k]);
+            tmp1 = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(tmp1, afQa[k], x[n - k - 1]);
+            tmp2 = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(tmp2, afQa[k], x[length - n + k]);
+        }
+    }
+
+    internal static void BurgCorr(
+        Span<int> caf, Span<int> cab, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed, int n, int tmp1, int tmp2)
+    {
+        int length = x.Length;
+        for (int k = 0; k <= n; k++)
+        {
+            caf[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(caf[k], tmp1, x[n - k]);
+            cab[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(cab[k], tmp2, x[length - n + k - 1]);
+        }
+    }
 }
 
 /// <summary>
@@ -256,5 +281,86 @@ internal static class SilkVec<T>
         }
 
         output[..order].Clear();
+    }
+
+    private static Vector128<int> Load4(ReadOnlySpan<short> source, int index) =>
+        Vector128.WidenLower(Vector64.LoadUnsafe(ref MemoryMarshal.GetReference(source), (nuint)index).ToVector128Unsafe());
+
+    private static Vector128<int> LoadInts(Span<int> source, int index) =>
+        Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(source), (nuint)index);
+
+    private static Vector128<int> LoadInts(ReadOnlySpan<int> source, int index) =>
+        Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(source), (nuint)index);
+
+    /// <summary>Burg's first-half update; see <see cref="ISilkEncoderKernels.BurgRows"/>. Four taps per pass.</summary>
+    internal static void BurgRows(
+        Span<int> firstRow, Span<int> lastRow, ReadOnlySpan<int> afQa, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed,
+        int n, int x1, int x2, ref int tmp1, ref int tmp2)
+    {
+        int length = x.Length;
+        if (n > firstRow.Length || n > lastRow.Length || n > afQa.Length || length < n || xReversed.Length < length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(n));
+        }
+
+        int k = 0;
+        if (n >= 4)
+        {
+            Vector128<int> b1 = Vector128.Create(x1);
+            Vector128<int> b2 = Vector128.Create(x2);
+            Vector128<int> t1 = Vector128<int>.Zero;
+            Vector128<int> t2 = Vector128<int>.Zero;
+            for (; k + 4 <= n; k += 4)
+            {
+                // x[n - k - 1 - j] is xReversed[length - n + k + j]: both operands run upward.
+                Vector128<int> cr = T.PrepCoefV(Load4(xReversed, length - n + k));
+                Vector128<int> cf = T.PrepCoefV(Load4(x, length - n + k));
+                Vector128<int> af = LoadInts(afQa, k);
+                T.Smlawb(LoadInts(firstRow, k), b1, cr).StoreUnsafe(ref MemoryMarshal.GetReference(firstRow), (nuint)k);
+                T.Smlawb(LoadInts(lastRow, k), b2, cf).StoreUnsafe(ref MemoryMarshal.GetReference(lastRow), (nuint)k);
+                t1 = T.Smlawb(t1, af, cr);
+                t2 = T.Smlawb(t2, af, cf);
+            }
+
+            tmp1 = unchecked(tmp1 + Vector128.Sum(t1));
+            tmp2 = unchecked(tmp2 + Vector128.Sum(t2));
+        }
+
+        for (; k < n; k++)
+        {
+            firstRow[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(firstRow[k], x1, x[n - k - 1]);
+            lastRow[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(lastRow[k], x2, x[length - n + k]);
+            tmp1 = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(tmp1, afQa[k], x[n - k - 1]);
+            tmp2 = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(tmp2, afQa[k], x[length - n + k]);
+        }
+    }
+
+    /// <summary>Burg's second-half update; see <see cref="ISilkEncoderKernels.BurgCorr"/>. Four taps per pass.</summary>
+    internal static void BurgCorr(
+        Span<int> caf, Span<int> cab, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed, int n, int tmp1, int tmp2)
+    {
+        int length = x.Length;
+        if (n + 1 > caf.Length || n + 1 > cab.Length || length < n + 1 || xReversed.Length < length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(n));
+        }
+
+        int k = 0;
+        Vector128<int> b1 = Vector128.Create(tmp1);
+        Vector128<int> b2 = Vector128.Create(tmp2);
+        for (; k + 4 <= n + 1; k += 4)
+        {
+            // x[n - k - j] is xReversed[length - 1 - n + k + j].
+            Vector128<int> cr = T.PrepCoefV(Load4(xReversed, length - 1 - n + k));
+            Vector128<int> cf = T.PrepCoefV(Load4(x, length - n + k - 1));
+            T.Smlawb(LoadInts(caf, k), b1, cr).StoreUnsafe(ref MemoryMarshal.GetReference(caf), (nuint)k);
+            T.Smlawb(LoadInts(cab, k), b2, cf).StoreUnsafe(ref MemoryMarshal.GetReference(cab), (nuint)k);
+        }
+
+        for (; k <= n; k++)
+        {
+            caf[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(caf[k], tmp1, x[n - k]);
+            cab[k] = Kiln.Audio.Silk.SilkFixedPoint.Smlawb(cab[k], tmp2, x[length - n + k - 1]);
+        }
     }
 }

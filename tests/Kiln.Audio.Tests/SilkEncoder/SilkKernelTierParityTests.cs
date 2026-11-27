@@ -92,6 +92,58 @@ public class SilkKernelTierParityTests
                     }
                 }
 
+                // ENC-NSQ-1: Burg's recursion steps and the gain re-scaling, with extreme operands.
+                var rng = new Random(31 + mode);
+                foreach (int length in new[] { 40, 56, 96 })
+                {
+                    foreach (int n in new[] { 0, 1, 3, 4, 5, 8, 9, 12, 15 })
+                    {
+                        short[] x = Signal(length + n, length, mode);
+                        short[] xr = (short[])x.Clone();
+                        Array.Reverse(xr);
+                        int[] afQa = Enumerable.Range(0, 16).Select(_ => rng.Next(int.MinValue, int.MaxValue)).ToArray();
+                        int[] rows1 = Enumerable.Range(0, 16).Select(_ => rng.Next(int.MinValue, int.MaxValue)).ToArray();
+                        int[] rows2 = Enumerable.Range(0, 16).Select(_ => rng.Next(int.MinValue, int.MaxValue)).ToArray();
+                        int x1 = rng.Next(int.MinValue, int.MaxValue);
+                        int x2 = rng.Next(int.MinValue, int.MaxValue);
+                        int[] expectedFirst = (int[])rows1.Clone();
+                        int[] expectedLast = (int[])rows2.Clone();
+                        int[] actualFirst = (int[])rows1.Clone();
+                        int[] actualLast = (int[])rows2.Clone();
+                        int et1 = rng.Next(int.MinValue, int.MaxValue);
+                        int et2 = rng.Next(int.MinValue, int.MaxValue);
+                        int at1 = et1;
+                        int at2 = et2;
+                        ScalarKernels.BurgRows(expectedFirst, expectedLast, afQa, x, xr, n, x1, x2, ref et1, ref et2);
+                        TK.BurgRows(actualFirst, actualLast, afQa, x, xr, n, x1, x2, ref at1, ref at2);
+                        Assert.Equal(expectedFirst, actualFirst);
+                        Assert.Equal(expectedLast, actualLast);
+                        Assert.Equal(et1, at1);
+                        Assert.Equal(et2, at2);
+
+                        int[] caf = Enumerable.Range(0, 17).Select(_ => rng.Next(int.MinValue, int.MaxValue)).ToArray();
+                        int[] cab = Enumerable.Range(0, 17).Select(_ => rng.Next(int.MinValue, int.MaxValue)).ToArray();
+                        int[] cafActual = (int[])caf.Clone();
+                        int[] cabActual = (int[])cab.Clone();
+                        ScalarKernels.BurgCorr(caf, cab, x, xr, n, x1, x2);
+                        TK.BurgCorr(cafActual, cabActual, x, xr, n, x1, x2);
+                        Assert.Equal(caf, cafActual);
+                        Assert.Equal(cab, cabActual);
+                    }
+                }
+
+                foreach (int length in new[] { 0, 3, 4, 7, 32, 100, 321 })
+                {
+                    foreach (int gain in new[] { 1 << 16, 1, -1, 65535, 65536 + 1, int.MaxValue, int.MinValue, 12345678, -98765 })
+                    {
+                        int[] expected = Enumerable.Range(0, length).Select(_ => rng.Next(int.MinValue, int.MaxValue)).ToArray();
+                        int[] actual = (int[])expected.Clone();
+                        ScalarKernels.ScaleQ16(expected, gain);
+                        TK.ScaleQ16(actual, gain);
+                        Assert.Equal(expected, actual);
+                    }
+                }
+
                 foreach (int order in new[] { 6, 8, 10, 12, 16 })
                 {
                     foreach (int length in new[] { order + 1, order + 7, order + 8, 100, 321, 640 })

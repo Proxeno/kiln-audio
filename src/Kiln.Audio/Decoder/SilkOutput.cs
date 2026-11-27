@@ -2,6 +2,7 @@
 
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Silk;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Decoder;
 
@@ -29,6 +30,7 @@ internal sealed class SilkOutput
     private const int MaxInternalSamples = 16 * 60;
     private const int MaxInternalChannels = 2;
 
+    private readonly AudioKernelTier _tier = AudioKernels.Select();
     private readonly int _apiRate;
     private readonly int _apiChannels;
     private readonly SilkDecoder _decoder = new();
@@ -71,8 +73,8 @@ internal sealed class SilkOutput
         for (int index = 0; index < _leftByRate.Length; index++)
         {
             int internalRate = InternalRate(index);
-            _leftByRate[index] = new SilkResampler(internalRate, apiRate, channels: 2);
-            _rightByRate[index] = new SilkResampler(internalRate, apiRate, channels: 2);
+            _leftByRate[index] = new SilkResampler(internalRate, apiRate, channels: 2, _tier);
+            _rightByRate[index] = new SilkResampler(internalRate, apiRate, channels: 2, _tier);
         }
     }
 
@@ -202,15 +204,27 @@ internal sealed class SilkOutput
     /// <param name="pcm">Destination for normalized interleaved PCM at the API rate.</param>
     /// <returns>The number of samples per channel written.</returns>
     private int WriteOutput(
-        int internalSamples, int internalChannels, int outputSamples, short heldMid, Span<float> pcm)
-    {
-        for (int i = 0; i < internalSamples; i++)
+        int internalSamples, int internalChannels, int outputSamples, short heldMid, Span<float> pcm) =>
+        _tier switch
         {
-            _channel0[i] = _internalPcm[i * internalChannels];
-            if (internalChannels == 2)
-            {
-                _channel1[i] = _internalPcm[(i * 2) + 1];
-            }
+            AudioKernelTier.Avx2Fma => WriteOutput<Avx2FmaKernels>(internalSamples, internalChannels, outputSamples, heldMid, pcm),
+            AudioKernelTier.AdvSimdArm64 => WriteOutput<AdvSimdArm64Kernels>(internalSamples, internalChannels, outputSamples, heldMid, pcm),
+            AudioKernelTier.Vector128 => WriteOutput<Vector128Kernels>(internalSamples, internalChannels, outputSamples, heldMid, pcm),
+            _ => WriteOutput<ScalarKernels>(internalSamples, internalChannels, outputSamples, heldMid, pcm),
+        };
+
+    private int WriteOutput<TK>(
+        int internalSamples, int internalChannels, int outputSamples, short heldMid, Span<float> pcm)
+        where TK : struct, ISilkKernels
+    {
+        long profileStart = SilkPerf4Profile.Start();
+        if (internalChannels == 2)
+        {
+            TK.Deinterleave(_internalPcm, _channel0, _channel1, internalSamples);
+        }
+        else
+        {
+            _internalPcm.AsSpan(0, internalSamples).CopyTo(_channel0);
         }
 
         EnsureResamplers(_internalRate);
@@ -232,10 +246,7 @@ internal sealed class SilkOutput
             // A stereo stream decoded to mono uses the mid signal without the MS-to-LR
             // conversion, exactly as dec_API.c's buffering branch does. The stereo synthesis
             // output is already history-delayed, so no extra buffering is applied.
-            for (int i = 0; i < internalSamples; i++)
-            {
-                _feed0[i] = (short)((_channel0[i] + _channel1[i]) >> 1);
-            }
+            TK.AverageShorts(_channel0, _channel1, _feed0, internalSamples);
 
             feed0 = _feed0.AsSpan(0, internalSamples);
             feed1 = feed0;
@@ -248,6 +259,7 @@ internal sealed class SilkOutput
             feed1 = _feed1.AsSpan(0, internalSamples);
         }
 
+        SilkPerf4Profile.Stop(23, profileStart);
         int produced = _left!.OutputCount(internalSamples);
         if (produced != outputSamples)
         {
@@ -270,29 +282,28 @@ internal sealed class SilkOutput
             _rightMirrorsLeft = false;
         }
 
+        profileStart = SilkPerf4Profile.Start();
         _left.Process(feed0, _resampled0.AsSpan(0, produced));
         if (runRight)
         {
             _right!.Process(feed1, _resampled1.AsSpan(0, produced));
         }
 
+        SilkPerf4Profile.Stop(24, profileStart);
+        profileStart = SilkPerf4Profile.Start();
+
         const float scale = 1f / 32768f;
         if (_apiChannels == 2)
         {
-            for (int i = 0; i < produced; i++)
-            {
-                pcm[i * 2] = _resampled0[i] * scale;
-                pcm[(i * 2) + 1] = (internalChannels == 2 ? _resampled1[i] : _resampled0[i]) * scale;
-            }
+            TK.InterleaveToFloat(
+                _resampled0, internalChannels == 2 ? _resampled1 : _resampled0, pcm, produced, scale);
         }
         else
         {
-            for (int i = 0; i < produced; i++)
-            {
-                pcm[i] = _resampled0[i] * scale;
-            }
+            TK.ShortsToFloat(_resampled0, pcm, produced, scale);
         }
 
+        SilkPerf4Profile.Stop(25, profileStart);
         return produced;
     }
 

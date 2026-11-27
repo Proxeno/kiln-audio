@@ -122,6 +122,7 @@ public sealed class OpusDecoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ValidateDestination(packet, pcm.Length);
 
+        long profileTotal = Kiln.Audio.Silk.SilkPerf4Profile.Start();
         int samples = _core.DecodePacket(packet, _floatScratch, decodeFec);
         int count = samples * Options.Channels;
         if (pcm.Length < count)
@@ -132,7 +133,10 @@ public sealed class OpusDecoder : IDisposable
                 nameof(pcm));
         }
 
+        long profileInt16 = Kiln.Audio.Silk.SilkPerf4Profile.Start();
         CeltPcm.ToInt16(_floatScratch.AsSpan(0, count), pcm);
+        Kiln.Audio.Silk.SilkPerf4Profile.Stop(26, profileInt16);
+        Kiln.Audio.Silk.SilkPerf4Profile.Stop(27, profileTotal);
 
         return samples;
     }

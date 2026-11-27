@@ -1,3 +1,5 @@
+using Kiln.Audio.Silk;
+
 namespace Kiln.Audio.Simd.Kernels;
 
 /// <summary>
@@ -26,4 +28,30 @@ internal interface ISilkEncoderKernels
     /// <summary>The LPC analysis (whitening) filter over Q12 coefficients; the first <paramref name="order"/> outputs are zero.</summary>
     static abstract void LpcAnalysisFilter(
         Span<short> output, ReadOnlySpan<short> input, ReadOnlySpan<short> coefficients, int length, int order);
+
+    /// <summary><c>data[i] = Smulww(gainQ16, data[i])</c> over the span (the delayed-decision quantizer's gain re-scaling), exact.</summary>
+    static abstract void ScaleQ16(Span<int> data, int gainQ16);
+
+    /// <summary>
+    /// Quantizes one subframe over all delayed-decision states, one SIMD lane per state (the loop over the samples is inside
+    /// the kernel). Bit-identical to the scalar reference on every tier.
+    /// </summary>
+    static abstract void NsqSubframe(SilkNsqDelayedDecision quantizer, in SilkNsqSubframeArgs args);
+
+    /// <summary>
+    /// One step of Burg's recursion over one subframe, first half (<c>silk_burg_modified</c>, the <c>k &lt; n</c> loop):
+    /// <c>firstRow[k]</c> and <c>lastRow[k]</c> gain a <c>Smlawb</c> term and the two running correlations
+    /// <paramref name="tmp1"/>/<paramref name="tmp2"/> accumulate <c>Smlawb(afQa[k], x[..])</c>.
+    /// <paramref name="xReversed"/> is <paramref name="x"/> reversed. Exact.
+    /// </summary>
+    static abstract void BurgRows(
+        Span<int> firstRow, Span<int> lastRow, ReadOnlySpan<int> afQa, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed,
+        int n, int x1, int x2, ref int tmp1, ref int tmp2);
+
+    /// <summary>
+    /// Burg's recursion, second half (the <c>k &lt;= n</c> loop): <c>caf[k]</c> and <c>cab[k]</c> gain
+    /// <c>Smlawb(.., tmp, x[..])</c> terms. Exact.
+    /// </summary>
+    static abstract void BurgCorr(
+        Span<int> caf, Span<int> cab, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed, int n, int tmp1, int tmp2);
 }

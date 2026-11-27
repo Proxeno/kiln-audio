@@ -424,6 +424,41 @@ internal ref struct RangeDecoder
     }
 
     /// <summary>
+    /// Decodes a symbol from an inverse-CDF table whose total frequency is 256 and whose entries
+    /// are <c>256 - cumulative(k)</c>, strictly decreasing and terminated by zero.
+    /// </summary>
+    /// <remarks>
+    /// Bit-exact with <see cref="DecodePdf"/> on the forward table the inverse was built from:
+    /// the symbol is the first <c>k</c> with <c>val &gt;= ext * icdf[k]</c> and the update is the
+    /// branch-free <c>val -= s; rng = previous - s</c> (the same state change as
+    /// <see cref="Update"/>). The caller guarantees the terminating zero (see
+    /// <c>SilkTables.IcdfOf</c>), so the search always ends inside the table.
+    /// </remarks>
+    /// <param name="icdf">The inverse table, 256-based, ending in zero.</param>
+    /// <returns>The decoded symbol.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int DecodeIcdf8(ReadOnlySpan<byte> icdf)
+    {
+        uint ext = _rng >> 8;
+        uint d = _val;
+        uint previous = _rng;
+        int k = 0;
+        uint s = ext * icdf[0];
+        while (d < s)
+        {
+            previous = s;
+            k++;
+            s = ext * icdf[k];
+        }
+
+        _val = d - s;
+        _rng = previous - s;
+        _ext = ext;
+        Normalize();
+        return k;
+    }
+
+    /// <summary>
     /// Decodes raw bits packed LSB-first from the end of the frame (RFC 6716 §4.1.4).
     /// </summary>
     /// <param name="bits">The number of bits to read, 1 to 25.</param>
