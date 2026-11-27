@@ -272,6 +272,81 @@ internal sealed class CeltEncoder
             _vbr.ConstrainPreamble(ref enc, vbrRate, enc.Tell(), 0, ref nbCompressedBytes, ref nbAvailableBytes);
         }
 
+        int written = EncodePayload(
+            ref enc, pcm, start, end, nbCompressedBytes, ref nbAvailableBytes, vbrRate, effectiveBytes,
+            _frameBuffer.AsSpan(0, nbCompressedBytes), _snapshot.AsSpan(0, nbCompressedBytes));
+        enc.Done();
+        _frameBuffer.AsSpan(0, written).CopyTo(destination);
+        return written;
+    }
+
+    /// <summary>
+    /// Encodes one CELT frame's symbols into a caller-owned range encoder without finalizing it.
+    /// Hybrid frames use this so that the CELT layer continues the SILK layer's coder in the same
+    /// Opus frame (RFC 6716 §4.5.2).
+    /// </summary>
+    /// <param name="enc">The shared range encoder, positioned after the SILK layer.</param>
+    /// <param name="pcm">Exactly <see cref="FrameSamples"/> interleaved samples.</param>
+    /// <param name="startBand">The first coded band; 17 for a hybrid frame.</param>
+    /// <param name="endBand">One past the last coded band.</param>
+    /// <param name="nbCompressedBytes">The CELT layer's byte budget.</param>
+    /// <param name="frameBuffer">
+    /// The shared coder's storage, the same span the range encoder was created over.
+    /// </param>
+    /// <returns>The number of bytes the layer wrote.</returns>
+    /// <remarks>Variable bitrate is not supported through this hook; the caller finalizes the coder.</remarks>
+    internal int EncodeFrameInto(
+        ref RangeEncoder enc,
+        ReadOnlySpan<short> pcm,
+        int startBand,
+        int endBand,
+        int nbCompressedBytes,
+        Span<byte> frameBuffer)
+    {
+        if (startBand < 0 || endBand <= startBand || endBand > BandCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(endBand),
+                FormattableString.Invariant($"The coded band range must satisfy 0 <= start < end <= {BandCount}."));
+        }
+
+        if (pcm.Length != _apiFrameSamples * _channels)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The frame must contain {_apiFrameSamples * _channels} interleaved samples."),
+                nameof(pcm));
+        }
+
+        if (frameBuffer.Length < nbCompressedBytes)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant($"The scratch buffer must hold {nbCompressedBytes} bytes."),
+                nameof(frameBuffer));
+        }
+
+        int nbAvailableBytes = nbCompressedBytes;
+        return EncodePayload(
+            ref enc, pcm, startBand, endBand, nbCompressedBytes, ref nbAvailableBytes, 0, nbCompressedBytes,
+            frameBuffer, _snapshot.AsSpan(0, frameBuffer.Length));
+    }
+
+    private int EncodePayload(
+        ref RangeEncoder enc,
+        ReadOnlySpan<short> pcm,
+        int start,
+        int end,
+        int nbCompressedBytes,
+        ref int nbAvailableBytes,
+        int vbrRate,
+        int effectiveBytes,
+        Span<byte> frameBuffer,
+        Span<byte> snapshot)
+    {
+        int channels = _channels;
+        int n = _internalFrameSamples;
+        int lm = _lm;
+        int m = 1 << lm;
         int totalBits = nbCompressedBytes * 8;
 
         // Pre-emphasis (RFC 6716 Appendix A, celt/celt.c: the prefilter block).
@@ -304,8 +379,6 @@ internal sealed class CeltEncoder
                 nbCompressedBytes = size;
             }
 
-            enc.Done();
-            _frameBuffer.AsSpan(0, nbCompressedBytes).CopyTo(destination);
             return nbCompressedBytes;
         }
 
@@ -374,7 +447,7 @@ internal sealed class CeltEncoder
 
         CeltEncoderEnergy.QuantCoarseEnergy(
             ref enc, lm, start, end, end, channels, _bandLogE, _oldBandE, _error,
-            _intraOldBandE, _intraError, _frameBuffer.AsSpan(0, nbCompressedBytes), _snapshot,
+            _intraOldBandE, _intraError, frameBuffer, snapshot,
             nbAvailableBytes, totalBits, twoPass: _complexity >= 4, ref _delayedIntra);
 
         CeltEncoderAnalysis.TfEncode(
@@ -502,8 +575,6 @@ internal sealed class CeltEncoder
 
         _consecutiveTransient = isTransient ? _consecutiveTransient + 1 : 0;
         _finalRange = enc.Rng;
-        enc.Done();
-        _frameBuffer.AsSpan(0, nbCompressedBytes).CopyTo(destination);
         return nbCompressedBytes;
     }
 

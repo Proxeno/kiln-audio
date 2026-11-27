@@ -11,8 +11,8 @@ public sealed record OpusEncoderOptions
 
     /// <summary>Intended application. Default <see cref="OpusApplication.Voip"/>.</summary>
     /// <remarks>
-    /// All three applications currently map onto the same CELT-only settings. Automatic SILK and
-    /// hybrid mode selection is added separately.
+    /// Voip and Audio use the automatic SILK/hybrid/CELT policy for mono 48 kHz 10 and 20 ms
+    /// frames; RestrictedLowDelay always uses CELT.
     /// </remarks>
     public OpusApplication Application { get; init; } = OpusApplication.Voip;
 
