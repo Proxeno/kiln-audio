@@ -261,6 +261,8 @@ internal sealed class SilkEncoderState
     internal int PacketSizeMs;
     internal int FrameCounter;
     internal int Complexity;
+    /// <summary>Non-zero when the configured bitrate exceeds 1.2 bits per internal-rate sample.</summary>
+    internal int HighRate;
     internal int UseInterpolatedNlsfs;
     internal int ShapingLpcOrder;
     internal int PredictLpcOrder;

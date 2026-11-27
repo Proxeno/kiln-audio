@@ -103,9 +103,15 @@ internal sealed class SilkEncoderCore
         _complexity = Math.Clamp(complexity, 0, 10);
         _useCbr = useCbr;
         _silkFrames = durationMs == 10 ? 1 : durationMs / 20;
+        // Above 1.2 bits per internal-rate sample the quantization is fine enough that the
+        // delayed-decision trellis stops paying: a single greedy state is cheaper and slightly
+        // better. Below it the trellis and warped shaping are what let the encoder beat libopus.
+        _state.HighRate = _bitrateBps * 10 >= _internalRate * 12 ? 1 : 0;
         // Complexity 0 and 1 use a four-state trellis (the reference uses one) so the delayed
         // decision and warped shaping also pay off at the fastest setting.
-        _delayedDecisionStates = _complexity < 2 ? 4 : SilkNsqDelayedDecision.StatesForComplexity(_complexity);
+        _delayedDecisionStates = _state.HighRate != 0
+            ? 1
+            : (_complexity < 2 ? 4 : SilkNsqDelayedDecision.StatesForComplexity(_complexity));
 
         _resampler = new SilkInputResampler(apiRate, bandwidthHz);
         _resampled = new short[bandwidthHz * durationMs / 1000];
@@ -450,6 +456,13 @@ internal sealed class SilkEncoderCore
         _state.PitchEstimationLpcOrder = Math.Min(_state.PitchEstimationLpcOrder, _state.PredictLpcOrder);
         _state.ShapeWinLength = (5 * fsKhz) + (2 * _state.LaShape);
 
+        // Warped shaping only helps when the quantization is coarse. At high bits per sample it
+        // moves noise without lowering it, so it is disabled there (see the constructor).
+        if (_state.HighRate != 0)
+        {
+            _state.WarpingQ16 = 0;
+        }
+
         SilkVad.Initialize(_state.Vad);
     }
 
@@ -486,11 +499,14 @@ internal sealed class SilkEncoderCore
         }
 
         // The RFC 1.0 SNR table leaves about 2 kbps of the budget unused at 20 kbps. Spend it:
-        // above 14 kbps the target SNR rises by up to 3 dB, which tracks the observed bit usage
-        // back to the configured rate.
-        if (target > 14000)
+        // above the threshold the target SNR rises by up to 3 dB, which tracks the observed bit
+        // usage back to the configured rate. At the high-rate side the table already spends the
+        // budget, so the boost starts later there.
+        int thresholdBps = _state.HighRate != 0 ? 14000 : 11000;
+        const int boostCeilingQ7 = 3 * 128;
+        if (target > thresholdBps)
         {
-            int boostQ7 = Math.Min((target - 14000) * (3 * 128) / 6000, 3 * 128);
+            int boostQ7 = Math.Min((target - thresholdBps) * boostCeilingQ7 / 6000, boostCeilingQ7);
             _state.SnrDbQ7 += boostQ7;
         }
     }

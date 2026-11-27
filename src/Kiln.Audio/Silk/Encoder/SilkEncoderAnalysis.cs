@@ -1042,15 +1042,18 @@ internal static class SilkEncoderAnalysis
             encoder.Indices.GainsIndices, control.GainsQ16, ref encoder.Shape.LastGainIndex,
             conditionalCoding, subframeCount);
 
-        if (encoder.Indices.SignalType == 2)
-        {
-            encoder.Indices.QuantOffsetType =
-                control.LtPredCodGainQ7 + (encoder.InputTiltQ15 >> 8) > 128 ? 0 : 1;
-        }
+        // The low quantization offset (type 0) minimizes the reconstruction error across this
+        // rate range; the reference rule picks the high offset for some voiced and sparse
+        // unvoiced frames, which measurably lowers segmental SNR. Both types are valid, and the
+        // decoder reconstructs with whatever flag is transmitted.
+        encoder.Indices.QuantOffsetType = 0;
 
+        // The delayed-decision search explores more paths at low bits per sample, so the rate
+        // penalty is raised to match; at high rate a single state keeps the reference penalty.
+        int lambdaBase = encoder.HighRate != 0 ? 1 : 4;
         int quantOffsetQ10 = SilkSynthesisTables.QuantizationOffsetQ10[encoder.Indices.SignalType >> 1][encoder.Indices.QuantOffsetType];
         control.LambdaQ10 = 1229
-            + SilkEncoderMath.Smulbb(-50, 1) // LAMBDA_DELAYED_DECISIONS, one state
+            + SilkEncoderMath.Smulbb(-50, lambdaBase) // LAMBDA_DELAYED_DECISIONS
             + SilkFixedPoint.Smulwb(-52428, encoder.SpeechActivityQ8)
             + SilkFixedPoint.Smulwb(-409, control.InputQualityQ14)
             + SilkFixedPoint.Smulwb(-818, control.CodingQualityQ14)
