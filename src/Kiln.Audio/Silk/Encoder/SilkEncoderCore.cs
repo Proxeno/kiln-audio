@@ -43,6 +43,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private readonly short[] _residual = new short[(2 * SilkEncoderMath.MaxFrameLength) + SilkEncoderMath.LaPitchMax];
 
     private readonly int[] _speechActivity = new int[SilkEncoderState.MaxFramesPerPacket];
+    private readonly int[] _frameWeight = new int[SilkEncoderState.MaxFramesPerPacket];
+    private readonly int[] _frameTargetRate = new int[SilkEncoderState.MaxFramesPerPacket];
     private readonly int[] _inputTilt = new int[SilkEncoderState.MaxFramesPerPacket];
     private readonly int[] _vadSignalType = new int[SilkEncoderState.MaxFramesPerPacket];
     private readonly int[][] _bandQuality =
@@ -228,6 +230,12 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         }
 
         int packetBits = silkBitrate * _durationMs / 1000;
+        bool weightedAllocation = _state.HighRate != 0 && _silkFrames > 1;
+        if (weightedAllocation)
+        {
+            ComputeFrameTargetRates(silkBitrate);
+        }
+
         for (int f = 0; f < _silkFrames; f++)
         {
             HpVariableCutoff();
@@ -238,11 +246,21 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             _state.Indices.SignalType = _vadSignalType[f];
             _state.VadFlags[f] = _vadSignalType[f];
 
-            int framesLeft = _silkFrames - f;
-            int frameBits = (packetBits - (rangeEncoder.Tell() >> 1)) / framesLeft;
-            int targetRate = frameBits * (_durationMs == 10 ? 100 : 50);
-            targetRate -= _bitsExceeded * 1000 / BitReservoirDecayTimeMs;
-            targetRate = Math.Max(Math.Min(targetRate, silkBitrate), 5000);
+            int targetRate;
+            if (weightedAllocation)
+            {
+                targetRate = _frameTargetRate[f] - (_bitsExceeded * 1000 / BitReservoirDecayTimeMs);
+                targetRate = Math.Clamp(targetRate, 5000, 2 * silkBitrate);
+            }
+            else
+            {
+                int framesLeft = _silkFrames - f;
+                int frameBits = (packetBits - (rangeEncoder.Tell() >> 1)) / framesLeft;
+                targetRate = frameBits * (_durationMs == 10 ? 100 : 50);
+                targetRate -= _bitsExceeded * 1000 / BitReservoirDecayTimeMs;
+                targetRate = Math.Max(Math.Min(targetRate, silkBitrate), 5000);
+            }
+
             ControlSnr(targetRate);
 
             int maxBits = packetMaxBits;
@@ -271,6 +289,27 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         int payloadBits = rangeEncoder.Tell();
         _bitsExceeded = Math.Clamp(_bitsExceeded + (((payloadBits + 7) >> 3) * 8) - packetBits, 0, 10000);
         return payloadBits;
+    }
+
+    /// <summary>
+    /// Distributes the packet bit budget across the SILK frames of a packet by voice activity, so
+    /// the target SNR spends more bits on active frames and fewer on inactive ones while the mean
+    /// stays at the configured rate. The per-frame totals are normalized, so the packet budget is
+    /// preserved over the block; the bit reservoir damps the actual excursions.
+    /// </summary>
+    private void ComputeFrameTargetRates(int silkBitrate)
+    {
+        int totalWeight = 0;
+        for (int f = 0; f < _silkFrames; f++)
+        {
+            _frameWeight[f] = 128 + Math.Min(_speechActivity[f], 255);
+            totalWeight += _frameWeight[f];
+        }
+
+        for (int f = 0; f < _silkFrames; f++)
+        {
+            _frameTargetRate[f] = silkBitrate * _frameWeight[f] * _silkFrames / totalWeight;
+        }
     }
 
     /// <summary>
@@ -772,6 +811,14 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         {
             int boostQ7 = Math.Min((target - thresholdBps) * boostCeilingQ7 / 6000, boostCeilingQ7);
             _state.SnrDbQ7 += boostQ7;
+        }
+
+        // SILK-QUAL-3: at narrowband 12 kbps the high-rate single-state quantizer is bit-starved
+        // relative to libopus; one extra dB of target SNR flips both frame durations above it.
+        // It is applied only in the high-rate regime, leaving the low-rate wins untouched.
+        if (_state.HighRate != 0 && _state.FsKhz == 8)
+        {
+            _state.SnrDbQ7 += 128;
         }
     }
 
