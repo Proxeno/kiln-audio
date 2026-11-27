@@ -569,6 +569,46 @@ Not done: closed-form N=2/3/4 unranking, explicit-stack theta recursion, fused d
 int16. PVQ decode (about 6 us/frame on 01) is unchanged and is the remaining gap: roughly 1.2 us
 of the 1.18 ratio on 01 is decode. Target of 1.0 is not met on any vector.
 
+## PERF-7: CELT PVQ/quant_bands decode hot paths
+
+Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window per
+side). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process. Gates: 375 tests
+pass, 0 warnings, 0 errors, final range exact, 0 B allocated.
+
+| Vector | Before | PERF-7 |
+| --- | --- | --- |
+| 01 | 1.19 (decode 6.12) | 1.14 (decode 5.78) |
+| 07 | 1.18 (decode 3.28) | 1.12 (decode 3.05) |
+| 11 | 1.04 (decode 14.84) | 1.03 (decode 14.58) |
+
+**Profile** (`micro perf4`, instrumented, us/frame; the timers cost about 20 ns per call, so
+nested stages overcount). The profiler gained `noisefill`, `quantband` (whole `QuantBand`) and
+`lowband-out` slots. Vector 01 before: pvq-bands 6.63, quantband 5.64, pulses 3.52 (32.6 leaves per
+frame, of which rotation 0.96), theta 0.48 (17.3 per frame), noise fill 0.16, lowband copy 0.19,
+coarse energy 0.48, allocation 0.51, fine energy 0.09, TF 0.07, denormalise 0.18, anti-collapse
+about 0. After: pvq-bands 6.25, quantband 5.19, pulses 3.00, rotation 0.69 (now only 7.9 calls),
+theta 0.56. Vector 07 before/after: pvq-bands 3.40 / 3.15, pulses 1.34 / 1.05. Vector 11:
+18.1 / 18.1 (pulses 10.8 / 9.9). Raw output is in the lane scratch files, not committed.
+
+- **Spread rotation**: `(cos, sin)` depends only on `(spread, length, k)`, so a 512-entry
+  direct-mapped cache per decoder replaces the double-precision `Math.SinCos`. A hit returns the
+  value the miss computed (bit-identical). The `2k >= n` and no-spread early outs moved to the
+  caller so dense leaves skip the call.
+- **Pulse search**: the pulse-cache row is resolved once per leaf; `Bits2Pulses` and the
+  bit-cost lookups index it by reference (the unused `Pulses2Bits`/`CacheRow` helpers are gone).
+- **CWRS unrank**: for the last two dimensions `S(2,k) = 2k-1`, so the search for the pulse
+  count is closed form, `(i+1)/2` clipped to `k-1`. This removes a data-dependent loop (and its
+  mispredicts) from every vector. Index-exact; `Perf7Tests` checks the bijection for all
+  `k <= 128` and the conformance vectors check the order.
+- **`TellFrac`**: the three fractional bits are the count of seven precomputed thresholds the
+  16-bit range has reached, replacing three dependent multiply/shift rounds. `Perf7Tests`
+  compares it with the reference loop for every normalized range.
+
+Tried and not done: fusing de-emphasis with the int16 pass (int16 is 0.05 us/frame, nothing to
+gain), explicit-stack theta recursion and closed-form N=3/4 unranking (the leaf cost is dominated by
+the two range-decoder divides, the data-dependent unrank branches and `1/sqrt`; none of these is
+removed by restructuring). Remaining gap on 01/07 is about 0.9 us/frame decode-side; 11 is 3 % over.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
