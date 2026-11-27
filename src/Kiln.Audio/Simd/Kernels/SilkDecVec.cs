@@ -670,7 +670,30 @@ internal static class SilkDecVec<T>
             }
         }
 
-        return done;
+        if (done < inputs)
+        {
+            // Finish the last one to three input samples with the same lane arithmetic, so the result
+            // does not depend on how the stream was chunked; the extra lanes are computed and dropped.
+            Span<short> tail = stackalloc short[24];
+            ref short t = ref MemoryMarshal.GetReference(tail);
+            ref float x = ref Unsafe.Add(ref h, newest + done - length + 1);
+            if (up == 6)
+            {
+                Up6Single(ref x, ref c, length, ref t);
+            }
+            else if (up == 4)
+            {
+                Up4Single(ref x, ref c, length, ref t);
+            }
+            else
+            {
+                Up3Single(ref x, ref c, length, ref t);
+            }
+
+            tail[..((inputs - done) * up)].CopyTo(output[(done * up)..]);
+        }
+
+        return inputs;
     }
 
     private static void Up6Pair(ref float x, ref float c, int length, ref short o)

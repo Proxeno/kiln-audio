@@ -196,7 +196,7 @@ internal static class SilkDecScalar
     {
         if (up is not (3 or 4 or 6) || length <= 0 || (length & 3) != 0 || inputs < 0
             || bankT.Length < length * UpPad(up) || output.Length < inputs * up
-            || (inputs > 0 && (newest - length + 1 < 0 || newest + inputs > history.Length)))
+            || (inputs > 0 && (newest - length + 1 < 0 || newest + ((inputs + 3) & ~3) > history.Length)))
         {
             throw new ArgumentException("The upsampler block geometry is invalid.");
         }
@@ -208,7 +208,7 @@ internal static class SilkDecScalar
     {
         ValidateResampleUp(history, bankT, up, length, newest, inputs, output);
         int pad = UpPad(up);
-        int done = inputs & ~3;
+        int done = inputs;
         for (int j = 0; j < done; j++)
         {
             for (int p = 0; p < up; p++)
