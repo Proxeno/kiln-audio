@@ -25,6 +25,11 @@ namespace Kiln.Audio;
 /// period before switching to shaped noise. <see cref="Decode(ReadOnlySpan{byte},Span{short},bool)"/>
 /// with <c>decodeFec: true</c> recovers the preceding frame from the in-band LBRR data.
 /// </para>
+/// <para>
+/// A decoder instance is not thread-safe: it carries the codec state of one stream, so calls on
+/// one instance must not overlap. Separate instances are independent and can be used concurrently
+/// on different threads.
+/// </para>
 /// </remarks>
 public sealed class OpusDecoder : IDisposable
 {
@@ -88,7 +93,7 @@ public sealed class OpusDecoder : IDisposable
     /// The output has the frame size of <paramref name="packet"/> itself, which is not
     /// necessarily the size of the lost frame; an interval without LBRR falls back to packet
     /// loss concealment. CELT-only and hybrid packets have no SILK LBRR for the CELT layer, so
-    /// their CELT contribution is concealed as well. Set <see cref="LastFecOutcome"/> on the
+    /// their CELT contribution is concealed as well. <see cref="LastFecOutcome"/> on the
     /// same decoder reports whether the LBRR data was present, and
     /// <see cref="OpusPacket.HasLbrr"/> answers that for a packet without decoding it.
     /// </param>
@@ -184,8 +189,10 @@ public sealed class OpusDecoder : IDisposable
     /// <remarks>
     /// <para>
     /// The concealed duration is the frame duration of the last successfully decoded packet, or
-    /// 2.5 ms if nothing has been decoded yet. CELT-only streams use the CELT <c>DecodeLost</c>
-    /// hook; SILK and hybrid streams conceal the last frame with a decay. See the class remarks.
+    /// 2.5 ms if nothing has been decoded yet. Concealment follows the mode of the last good
+    /// frame: SILK extrapolates from its LPC/LTP state with comfort noise, CELT repeats the pitch
+    /// period before switching to shaped noise, and hybrid frames conceal both layers according to
+    /// their mode. See the class remarks.
     /// </para>
     /// <para>
     /// Concealment accepts no packet bytes, so the only possible outcomes are the documented

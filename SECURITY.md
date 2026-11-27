@@ -2,9 +2,8 @@
 
 ## Supported versions
 
-Kiln.Audio is pre-1.0 and currently a skeleton with no codec. Security fixes
-land on `main` and in the latest published minor version only; there are no
-long-term support branches yet.
+Security fixes land on `main` and in the latest published minor version
+only; there are no long-term support branches.
 
 ## Reporting a vulnerability
 
@@ -40,12 +39,16 @@ untrusted network input, so memory-safety issues are always in scope:
 
 - Kiln.Audio has **no native dependencies**; a bounds-check gap is a bug in
   Kiln.Audio, not a wrapped native library.
-- Once implemented, hot paths will use `unsafe` code and hardware intrinsics.
+- Hot paths use `unsafe` code and hardware intrinsics.
   Out-of-bounds reads/writes, uninitialized-memory disclosure, or
   SIMD-vs-scalar divergence are the class of bug this policy most wants
   reported.
 - Crashes, panics, or hangs on malformed or adversarial packets (including
   malformed TOC bytes and frame-count codes) are in scope.
+
+The decoder's input contract (which exceptions a malformed packet may raise,
+and what the fuzz suite asserts) is in [docs/robustness.md](docs/robustness.md).
+A violation of that contract is a security bug.
 
 Out of scope:
 

@@ -2,7 +2,9 @@ namespace Kiln.Audio;
 
 /// <summary>
 /// Opus frame durations (RFC 6716 §2.1.4, Table 2). Not every duration is legal in every mode:
-/// 2.5 ms and 5 ms are CELT-only; 40 ms and 60 ms are SILK-only.
+/// 2.5 ms and 5 ms are CELT-only; 40 ms and 60 ms are SILK-only on the wire. The encoder's
+/// CELT-only path also accepts 40 ms and 60 ms, by packing two or three 20 ms CELT frames into one
+/// packet.
 /// </summary>
 public enum OpusFrameDuration
 {
