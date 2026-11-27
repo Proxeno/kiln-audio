@@ -115,13 +115,6 @@ internal ref struct RangeDecoder
         int lg = Ilog(_rng);
         // r_Q15 is a Q15 representation of the fractional part of rng, in [32768, 65536).
         uint rQ15 = _rng >> (lg - 16);
-        if (rQ15 is >= (uint)1 << 15 and < (uint)1 << 16)
-        {
-            // PERF-4: the three squaring steps only depend on the 16-bit mantissa, so a
-            // 32 KiB table replaces them. Valid streams always normalize into this range.
-            return (uint)((_nbitsTotal * 8) - ((lg << BitRes) + FractionTable[rQ15 - ((uint)1 << 15)]));
-        }
-
         for (int i = 0; i < BitRes; i++)
         {
             rQ15 = (rQ15 * rQ15) >> 15;
@@ -136,35 +129,6 @@ internal ref struct RangeDecoder
         return (uint)((_nbitsTotal * 8) - lg);
     }
 
-    /// <summary>
-    /// The three fractional bits of <see cref="TellFrac"/>, indexed by the 16-bit mantissa of the
-    /// range minus 2^15.
-    /// </summary>
-    private static readonly byte[] FractionTable = BuildFractionTable();
-
-    private static byte[] BuildFractionTable()
-    {
-        byte[] table = new byte[1 << 15];
-        for (int index = 0; index < table.Length; index++)
-        {
-            uint rQ15 = (uint)(index + (1 << 15));
-            int bits = 0;
-            for (int i = 0; i < BitRes; i++)
-            {
-                rQ15 = (rQ15 * rQ15) >> 15;
-                uint bit = rQ15 >> 16;
-                bits = (bits << 1) + (int)bit;
-                if (bit != 0)
-                {
-                    rQ15 >>= 1;
-                }
-            }
-
-            table[index] = (byte)bits;
-        }
-
-        return table;
-    }
 
     /// <summary>
     /// Computes the first step of symbol decoding: the value <c>fs</c> in [0, ft) (RFC 6716 §4.1.2).

@@ -471,9 +471,6 @@ the ≤ 1.0 target.**
   one hardware divide per symbol. Every SILK PDF symbol — pulse counts, locations, LSBs, signs,
   gains, NLSF, LTP — now takes this path; the excitation decode alone is thousands of symbols per
   frame.
-- **`TellFrac` table.** The three Q15 squaring steps only depend on the 16-bit range mantissa, so
-  a 32 KiB table replaces them; the general loop remains as the fallback for a non-normalized
-  range (which a valid stream never reaches).
 - **Allocation table.** `c * width * BandAllocation[q][band] << lm >> 2` depends only on
   `(lm, channels, q, band)`, so a 7 KiB `AllocScaled` table replaces the multiply/shift pair in
   the bisection and the final pair of vectors. The per-band balance divisor is dispatched to
