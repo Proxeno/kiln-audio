@@ -118,10 +118,7 @@ public class CeltDecodeStageBenchmarks
                 }
 
                 int count = frameSamples * OutputChannels;
-                for (int j = 0; j < count; j++)
-                {
-                    pcm[j] = CeltPcm.ToInt16(floatPcm[j]);
-                }
+                CeltPcm.ToInt16(floatPcm[..count], pcm);
 
                 long converted = Stopwatch.GetTimestamp();
                 _convertTicks += converted - start;

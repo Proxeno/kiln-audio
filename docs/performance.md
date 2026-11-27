@@ -539,6 +539,36 @@ synthesis 2.61 / 2.69 / 8.33 to 2.16 / 2.24 / 6.68.
 Not done: closed-form small-N unranking, vectorized inverse MDCT changes, fusing int16 conversion.
 Remaining gap is mostly the PVQ band-decode path (about 6 us/frame on 01) and the inverse MDCT.
 
+## PERF-6: CELT quant_bands/renorm/IMDCT hot paths
+
+Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window each
+side). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
+
+| Vector | PERF-5 base (this window) | PERF-6 |
+| --- | --- | --- |
+| 01 | 1.27 | 1.18 |
+| 07 | 1.31 | 1.16 |
+| 11 | 1.19 | 1.08 |
+| 02 / 03 / 04 (SILK) | 1.16 / 1.13 / 1.14 | 1.16 / 1.13 / 1.13 |
+
+Per-stage (us/frame, vector 01 / 07 / 11): decode 6.15 / 3.28 / 15.16 to 6.04 / 3.23 / 15.43
+(unchanged); synthesis 2.15 / 2.24 / 6.69 to 1.75 / 1.80 / 5.20; int16 0.31 / 0.25 / 0.90 to
+0.05 / 0.05 / 0.18.
+
+- **Bulk int16 conversion** (`CeltPcm.ToInt16(span, span)`): Vector128 scale, clamp, add 0.5,
+  floor, convert and narrow; bit-identical to the scalar overload. Used by `OpusDecoder` and the
+  benchmarks.
+- **Inverse MDCT**: the stride-1 pre-rotation deinterleaves four coefficient pairs per step, the
+  de-shuffle is a vector interleave, and the mirror's middle copies are vector copies. The `2/N`
+  scale and the synthesizer's `N/2` cancel, so `InverseUnscaled` skips both multiplies.
+- **Synthesis**: the overlap-add writes straight into the rolling history (no `_rawOutput` pass);
+  short-block accumulation is vectorized.
+- `MathF.Sqrt` replaces `(float)Math.Sqrt` on float values in PVQ gain (identical result).
+
+Not done: closed-form N=2/3/4 unranking, explicit-stack theta recursion, fused de-emphasis with
+int16. PVQ decode (about 6 us/frame on 01) is unchanged and is the remaining gap: roughly 1.2 us
+of the 1.18 ratio on 01 is decode. Target of 1.0 is not met on any vector.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:

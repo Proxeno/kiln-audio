@@ -1431,7 +1431,7 @@ internal sealed class CeltDecoder
 
         if (!lowbandOut.IsEmpty)
         {
-            float scale = (float)Math.Sqrt(n0);
+            float scale = MathF.Sqrt(n0);
             DecKernels.ScaleCopy(lowbandOut, x[..n0], scale);
         }
 
@@ -1998,7 +1998,7 @@ internal sealed class CeltDecoder
         // second pass over the pulse vector.
         Cwrsi(n, k, index, iy, out float energy, out int mask, blocks);
 
-        float g = (1f / (float)Math.Sqrt(energy)) * gain;
+        float g = (1f / MathF.Sqrt(energy)) * gain;
         DecKernels.ScaleIntToFloat(x, iy, g);
 
         ExpRotation(x, n, -1, blocks, k, _ctx.Spread);
@@ -2302,7 +2302,7 @@ internal sealed class CeltDecoder
             energy += x[i] * x[i];
         }
 
-        float g = (1f / (float)Math.Sqrt(energy)) * gain;
+        float g = (1f / MathF.Sqrt(energy)) * gain;
         DecKernels.ScaleInPlace(x, g);
         Perf4Profile.Stop(12, start12);
     }

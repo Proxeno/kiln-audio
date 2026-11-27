@@ -132,10 +132,7 @@ public sealed class OpusDecoder : IDisposable
                 nameof(pcm));
         }
 
-        for (int i = 0; i < count; i++)
-        {
-            pcm[i] = CeltPcm.ToInt16(_floatScratch[i]);
-        }
+        CeltPcm.ToInt16(_floatScratch.AsSpan(0, count), pcm);
 
         return samples;
     }
@@ -207,10 +204,7 @@ public sealed class OpusDecoder : IDisposable
                 nameof(pcm));
         }
 
-        for (int i = 0; i < count; i++)
-        {
-            pcm[i] = CeltPcm.ToInt16(_floatScratch[i]);
-        }
+        CeltPcm.ToInt16(_floatScratch.AsSpan(0, count), pcm);
 
         return samples;
     }
