@@ -511,6 +511,34 @@ Static tables are built once at type initialization; the decode and synthesis pa
    Decode is dominated by the excitation symbol stream, which has no obvious redundancy left.
 4. **Zero allocations hold**, and the profiler is compiled out of Release builds.
 
+## PERF-5: CELT PVQ, rotation and de-emphasis hot paths
+
+Same-window measurement (`micro decode` and `scripts/bench-libopus-inproc.sh`, one lock window per
+change set). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
+
+| Vector | Before | PVQ only | PVQ + rotation + de-emphasis |
+| --- | --- | --- | --- |
+| 01 | 1.40 | 1.37 | 1.28 |
+| 07 | 1.44 | 1.42 | 1.31 |
+| 11 | 1.33 | 1.31 | 1.18 |
+| 02 / 03 / 04 (SILK) | 1.15 / 1.16 / 1.15 | 1.16 / 1.14 / 1.14 | 1.15 / 1.13 / 1.14 |
+
+Per-stage (µs/frame, vector 01 / 07 / 11): decode 6.55 / 3.44 / 16.42 to 6.06 / 3.24 / 14.99;
+synthesis 2.61 / 2.69 / 8.33 to 2.16 / 2.24 / 6.68.
+
+- **CWRS unrank** (`Cwrsi`): a `(remaining, k)` table of the prefix sum `S` and `V(N-1,K)` turns a
+  zero pulse into one unsigned compare, stops at `k == 0` (rest of the vector is zero), and takes
+  the last dimension as +-k. Energy is accumulated in int32. Index-exact; about 0.1-0.2 us/frame.
+- **Spread rotation** (`ExpRotation1`): stride 1 keeps the recurrence value in a register;
+  stride >= 4 runs four independent iterations per `Vector128` step. Same operation order, so
+  bit-identical to the scalar loop.
+- **De-emphasis**: four samples per step from precomputed powers of the coefficient, so the
+  loop-carried chain is one multiply-add per four samples. Differs from the serial loop only by
+  float reassociation. Output indexing is fused with the interleave.
+
+Not done: closed-form small-N unranking, vectorized inverse MDCT changes, fusing int16 conversion.
+Remaining gap is mostly the PVQ band-decode path (about 6 us/frame on 01) and the inverse MDCT.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
