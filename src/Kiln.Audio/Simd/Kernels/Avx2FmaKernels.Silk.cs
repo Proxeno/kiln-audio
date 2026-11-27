@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Kiln.Audio.Silk;
 
 namespace Kiln.Audio.Simd.Kernels;
 
@@ -25,4 +26,22 @@ internal readonly partial struct Avx2FmaKernels
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void XcorrLags(ReadOnlySpan<float> x, ReadOnlySpan<float> y, int lagCount, int len, Span<float> output) =>
         CeltEncVec<PortableOps>.XcorrLags(x, y, lagCount, len, output);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void ScaleQ16(Span<int> data, int gainQ16) => SilkNsqVec<X86IntOps>.ScaleQ16(data, gainQ16);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void NsqSubframe(SilkNsqDelayedDecision quantizer, in SilkNsqSubframeArgs args) =>
+        SilkNsqVec<X86IntOps>.Subframe(quantizer, args);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void BurgRows(
+        Span<int> firstRow, Span<int> lastRow, ReadOnlySpan<int> afQa, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed,
+        int n, int x1, int x2, ref int tmp1, ref int tmp2) =>
+        SilkVec<X86IntOps>.BurgRows(firstRow, lastRow, afQa, x, xReversed, n, x1, x2, ref tmp1, ref tmp2);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void BurgCorr(
+        Span<int> caf, Span<int> cab, ReadOnlySpan<short> x, ReadOnlySpan<short> xReversed, int n, int tmp1, int tmp2) =>
+        SilkVec<X86IntOps>.BurgCorr(caf, cab, x, xReversed, n, tmp1, tmp2);
 }

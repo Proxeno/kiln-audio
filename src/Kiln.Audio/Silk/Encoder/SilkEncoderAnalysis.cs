@@ -37,8 +37,6 @@ internal static class SilkEncoderAnalysis
         int order)
         where TK : struct, ISilkEncoderKernels
     {
-        const int maxFrameSize = 384;
-        _ = maxFrameSize;
         const int maxRightShifts = 32 - Qa;
         const int minRightShifts = -16;
 
@@ -70,6 +68,16 @@ internal static class SilkEncoderAnalysis
             }
 
             rightShifts += extraShifts;
+        }
+
+        // Each subframe reversed, so the recursion's descending reads become ascending vector loads.
+        Span<short> reversed = stackalloc short[subframeCount * subframeLength];
+        for (int s = 0; s < subframeCount; s++)
+        {
+            for (int j = 0; j < subframeLength; j++)
+            {
+                reversed[(s * subframeLength) + j] = x[((s + 1) * subframeLength) - 1 - j];
+            }
         }
 
         cab[0] = caf[0] = unchecked(c0 + SilkFixedPoint.Smmul(FindLpcConditionFactorQ32, c0) + 1);
@@ -115,22 +123,13 @@ internal static class SilkEncoderAnalysis
                     int x2 = -SilkEncoderMath.Shl(x[start + subframeLength - n - 1], 16 - rightShifts);
                     int tmp1 = SilkEncoderMath.Shl(x[start + n], Qa - 16);
                     int tmp2 = SilkEncoderMath.Shl(x[start + subframeLength - n - 1], Qa - 16);
-                    for (int k = 0; k < n; k++)
-                    {
-                        firstRow[k] = SilkFixedPoint.Smlawb(firstRow[k], x1, x[start + n - k - 1]);
-                        lastRow[k] = SilkFixedPoint.Smlawb(lastRow[k], x2, x[start + subframeLength - n + k]);
-                        int atmpQa = afQa[k];
-                        tmp1 = SilkFixedPoint.Smlawb(tmp1, atmpQa, x[start + n - k - 1]);
-                        tmp2 = SilkFixedPoint.Smlawb(tmp2, atmpQa, x[start + subframeLength - n + k]);
-                    }
+                    ReadOnlySpan<short> xs = x.Slice(start, subframeLength);
+                    ReadOnlySpan<short> xr = reversed.Slice(start, subframeLength);
+                    TK.BurgRows(firstRow, lastRow, afQa, xs, xr, n, x1, x2, ref tmp1, ref tmp2);
 
                     tmp1 = SilkEncoderMath.Shl(-tmp1, 32 - Qa - rightShifts);
                     tmp2 = SilkEncoderMath.Shl(-tmp2, 32 - Qa - rightShifts);
-                    for (int k = 0; k <= n; k++)
-                    {
-                        caf[k] = SilkFixedPoint.Smlawb(caf[k], tmp1, x[start + n - k]);
-                        cab[k] = SilkFixedPoint.Smlawb(cab[k], tmp2, x[start + subframeLength - n + k - 1]);
-                    }
+                    TK.BurgCorr(caf, cab, xs, xr, n, tmp1, tmp2);
                 }
             }
             else
