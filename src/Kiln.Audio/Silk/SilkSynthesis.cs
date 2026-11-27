@@ -110,6 +110,15 @@ internal sealed partial class SilkSynthesis
     private int _frameLength;
     private int _ltpMemoryLength;
 
+    /// <summary>
+    /// Gets the internal rate the packet-loss concealment is configured for, or 0 when the
+    /// synthesizer has no history yet.
+    /// </summary>
+    internal int RateHz => _rateHz;
+
+    /// <summary>Gets the channel count the packet-loss concealment is configured for.</summary>
+    internal int Channels => _channels;
+
     /// <summary>Creates a synthesizer in its reset state.</summary>
     public SilkSynthesis() => Reset();
 

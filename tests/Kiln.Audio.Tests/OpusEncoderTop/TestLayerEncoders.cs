@@ -18,7 +18,7 @@ namespace Kiln.Audio.Tests.OpusEncoderTop;
 internal sealed class MockInactiveSilkEncoder : ISilkLayerEncoder
 {
     /// <inheritdoc />
-    public void Encode(ref RangeEncoder encoder, ReadOnlySpan<short> pcm, int frameSamples)
+    public void Encode(ref RangeEncoder encoder, ReadOnlySpan<short> pcm, int frameSamples, int maxFrameBytes)
     {
         if (frameSamples != 960)
         {
@@ -90,6 +90,9 @@ internal sealed class MockSilentRedundantCeltEncoder : IRedundantCeltEncoder
 
     /// <inheritdoc />
     public uint FinalRange => _finalRange;
+
+    /// <inheritdoc />
+    public int FrameBytes => 2;
 
     /// <inheritdoc />
     public void Encode(ReadOnlySpan<short> pcm, int endBand, Span<byte> destination)
