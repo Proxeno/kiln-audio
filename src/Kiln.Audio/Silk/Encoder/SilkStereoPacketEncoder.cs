@@ -249,13 +249,31 @@ internal sealed class SilkStereoPacketEncoder
         }
 
         int packetBits = silkBitrate * _durationMs / 1000;
+        // The mono path is the one SILK-QUAL-3 measured: at high rate and 60 ms the target rate is
+        // distributed across the frame by voice activity, exactly as the single-stream
+        // EncodeInto path does. Stereo keeps the packet-level mid/side allocation.
+        bool weightedAllocation = _channels == 1 && _mid.UsesWeightedFrameAllocation;
+        if (weightedAllocation)
+        {
+            _mid.PrepareWeightedFrameAllocation(silkBitrate);
+        }
+
         for (int f = 0; f < _silkFrames; f++)
         {
-            int framesLeft = _silkFrames - f;
-            int frameBits = (packetBits - (rangeEncoder.Tell() >> 1)) / framesLeft;
-            int targetRate = frameBits * (_durationMs == 10 ? 100 : 50);
-            targetRate -= _bitsExceeded * 1000 / BitReservoirDecayTimeMs;
-            targetRate = Math.Max(Math.Min(targetRate, silkBitrate), 5000);
+            int targetRate;
+            if (weightedAllocation)
+            {
+                targetRate = _mid.WeightedFrameTargetRate(f) - (_bitsExceeded * 1000 / BitReservoirDecayTimeMs);
+                targetRate = Math.Clamp(targetRate, 5000, 2 * silkBitrate);
+            }
+            else
+            {
+                int framesLeft = _silkFrames - f;
+                int frameBits = (packetBits - (rangeEncoder.Tell() >> 1)) / framesLeft;
+                targetRate = frameBits * (_durationMs == 10 ? 100 : 50);
+                targetRate -= _bitsExceeded * 1000 / BitReservoirDecayTimeMs;
+                targetRate = Math.Max(Math.Min(targetRate, silkBitrate), 5000);
+            }
 
             int maxBits = packetMaxBits;
             if (_silkFrames == 2 && f == 0)

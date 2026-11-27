@@ -292,6 +292,21 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     }
 
     /// <summary>
+    /// Whether the voice-activity-weighted per-frame allocation applies. The packet layer drives
+    /// the frames directly and must use this to reproduce the same rate control as
+    /// <see cref="EncodeInto"/>; the high-rate regime and multi-frame packets are its only scope.
+    /// </summary>
+    internal bool UsesWeightedFrameAllocation => _state.HighRate != 0 && _silkFrames > 1;
+
+    /// <summary>Prepares the weighted per-frame target rates for one packet.</summary>
+    /// <param name="silkBitrate">The packet's SILK rate, from the byte budget.</param>
+    internal void PrepareWeightedFrameAllocation(int silkBitrate) => ComputeFrameTargetRates(silkBitrate);
+
+    /// <summary>Gets the weighted target rate for one frame, before the bit-reservoir damping.</summary>
+    /// <param name="frameIndex">The SILK frame index.</param>
+    internal int WeightedFrameTargetRate(int frameIndex) => _frameTargetRate[frameIndex];
+
+    /// <summary>
     /// Distributes the packet bit budget across the SILK frames of a packet by voice activity, so
     /// the target SNR spends more bits on active frames and fewer on inactive ones while the mean
     /// stays at the configured rate. The per-frame totals are normalized, so the packet budget is
