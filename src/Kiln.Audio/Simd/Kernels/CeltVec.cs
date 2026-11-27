@@ -1061,7 +1061,7 @@ internal static class CeltVec<T>
 
 /// <summary>The CELT encoder analysis kernels, written once over the tier's multiply-add.</summary>
 /// <typeparam name="T">The tier's vector operations.</typeparam>
-internal static class CeltEncVec<T>
+internal static partial class CeltEncVec<T>
     where T : struct, IVecOps
 {
     /// <summary>The multi-lag cross-correlation; each lag accumulates exactly like <c>CeltVec&lt;T&gt;.Dot</c>.</summary>

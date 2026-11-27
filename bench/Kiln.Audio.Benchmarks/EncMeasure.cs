@@ -63,6 +63,7 @@ internal static class EncMeasure
         double best = double.MaxValue;
         long[] bestTicks = new long[EncProf.Slots];
         long[] modes = new long[3];
+        ulong hash = 14695981039346656037UL;
 
         for (int pass = 0; pass < passes; pass++)
         {
@@ -78,17 +79,24 @@ internal static class EncMeasure
                 UseCbr = true,
             });
             long[] pm = new long[3];
+            ulong passHash = 14695981039346656037UL;
             EncProf.Reset();
             long start = Stopwatch.GetTimestamp();
             for (int f = 0; f < frames; f++)
             {
                 int n = encoder.Encode(pcm.AsSpan(f * frameSamples, frameSamples), packet);
+                for (int bi = 0; bi < n; bi++)
+                {
+                    passHash = (passHash ^ packet[bi]) * 1099511628211UL;
+                }
+
                 int cfg = packet[0] >> 3;
                 pm[cfg < 12 ? 0 : cfg < 16 ? 1 : 2]++;
             }
 
             double us = (Stopwatch.GetTimestamp() - start) * 1e6 / Stopwatch.Frequency / frames;
             encoder.Dispose();
+            hash = passHash;
             if (us < best)
             {
                 best = us;
@@ -98,7 +106,7 @@ internal static class EncMeasure
         }
 
         Console.WriteLine(FormattableString.Invariant(
-            $"kiln-encode file={Path.GetFileName(path)} rate={rate} ch={channels} app={a[3]} bitrate={bitrate} bw={a[5]} cx={complexity} frames={frames} us_per_frame={best:F3} modes: silk={modes[0]} hybrid={modes[1]} celt={modes[2]}"));
+            $"kiln-encode file={Path.GetFileName(path)} rate={rate} ch={channels} app={a[3]} bitrate={bitrate} bw={a[5]} cx={complexity} frames={frames} us_per_frame={best:F3} modes: silk={modes[0]} hybrid={modes[1]} celt={modes[2]} hash={hash:x16}"));
         if (profile)
         {
             double total = 0;
