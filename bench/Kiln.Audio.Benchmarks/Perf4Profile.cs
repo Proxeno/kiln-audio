@@ -41,6 +41,7 @@ internal static class Perf4ProfileMeasure
 #endif
     }
 
+#if KILN_PERF4_PROFILE
     private static void MeasureSilk(int vector)
     {
         int rateHz = vector switch
@@ -243,4 +244,5 @@ internal static class Perf4ProfileMeasure
 
         return frameTotal;
     }
+#endif
 }
