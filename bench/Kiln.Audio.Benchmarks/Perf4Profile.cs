@@ -1,7 +1,9 @@
+#if KILN_PERF4_PROFILE
 using System.Diagnostics;
 using Kiln.Audio.Celt;
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Silk;
+#endif
 
 namespace Kiln.Audio.Benchmarks;
 
@@ -17,7 +19,9 @@ namespace Kiln.Audio.Benchmarks;
 /// </remarks>
 internal static class Perf4ProfileMeasure
 {
+#if KILN_PERF4_PROFILE
     private const int OutputChannels = 2;
+#endif
 
     /// <summary>Runs the stage profile for the three CELT comparison vectors.</summary>
     public static void Run()
