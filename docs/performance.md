@@ -1214,4 +1214,22 @@ encoder's forward MDCT is not perturbed.
 
 ### Measurements
 
-SIMD1_RESULTS
+One lock window on the M5 Max: `micro decode` (tier-1 warmed; decode + synthesis + int16) from a
+`train-next` baseline worktree and from this branch, alternated five times each, best of five;
+`scripts/bench-libopus-inproc.sh` twice, best of five passes per run, best of two runs. Ratio is
+Kiln / libopus; below 1.0 means Kiln is faster.
+
+| Vector | libopus us/frame | Kiln before | Kiln after | Ratio before | Ratio after |
+| --- | --- | --- | --- | --- | --- |
+| 01 (CELT) | 6.69 | 7.51 | 6.58 | 1.12 | **0.98** |
+| 07 (CELT) | 4.38 | 4.86 | 3.84 | 1.11 | **0.88** |
+| 11 (CELT) | 19.25 | 19.43 | 16.43 | 1.01 | **0.85** |
+| 02 (SILK) | 4.52 | 5.25 | 5.20 | 1.16 | 1.15 |
+| 03 (SILK) | 5.73 | 6.61 | 6.63 | 1.15 | 1.16 |
+| 04 (SILK) | 6.32 | 7.10 | 7.11 | 1.12 | 1.12 |
+
+The CELT synthesis stage roughly halves (vector 01: 1.75 to 0.99 us, 07: 1.82 to 0.82 us, 11:
+5.06 to 2.80 us); the SILK vectors are unchanged because SIMD-1 does not touch SILK (SIMD-2).
+Float output changed only by FMA and reassociation: the conformance vectors, final-range and PLC
+tests pass unchanged and `KernelTierParityTests` bounds every tier against `ScalarKernels` at
+2e-6 of the signal RMS.
