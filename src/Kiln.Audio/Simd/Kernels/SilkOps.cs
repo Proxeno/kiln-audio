@@ -203,19 +203,19 @@ internal readonly struct ArmSilkOps : ISilkOps
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<float> MulAddLane0(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
-        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 0);
+        AdvSimd.Arm64.FusedMultiplyAddBySelectedScalar(acc, x, c, 0);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<float> MulAddLane1(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
-        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 1);
+        AdvSimd.Arm64.FusedMultiplyAddBySelectedScalar(acc, x, c, 1);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<float> MulAddLane2(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
-        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 2);
+        AdvSimd.Arm64.FusedMultiplyAddBySelectedScalar(acc, x, c, 2);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<float> MulAddLane3(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
-        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 3);
+        AdvSimd.Arm64.FusedMultiplyAddBySelectedScalar(acc, x, c, 3);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<int> RoundToInt(Vector128<float> value) => AdvSimd.ConvertToInt32RoundToEven(value);
