@@ -2037,68 +2037,99 @@ internal sealed class CeltDecoder
     /// Recovers the integer pulse vector, accumulating <c>sum(y[j]^2)</c> and the collapse mask
     /// (which blocks contain a non-zero pulse) in the same walk.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PERF-5: the five steps of RFC 6716 §4.3.4.2 reduce to a table-driven walk. With
+    /// <c>S = (V(N-j,k) - V(N-j-1,k)) / 2</c> (the number of non-negative codewords with a
+    /// non-zero pulse at this position) and <c>B = V(N-j-1,k)</c>, the step-1 value
+    /// <c>p = S + B</c>. A zero pulse is exactly the index range <c>S &lt;= i &lt; S + B</c>
+    /// (one unsigned compare), and a non-zero pulse is found by walking the monotone prefix sums
+    /// <c>S(N-j, k')</c>, which are the step-4 running values of <c>p</c>. Once the pulses are
+    /// used up (<c>k == 0</c>) the rest of the vector is zero, and the last dimension is
+    /// <c>+-k</c>, so neither needs a table walk. The energy is accumulated in 32-bit integers
+    /// (the sum is at most <c>k^2</c>).
+    /// </para>
+    /// </remarks>
     private static void Cwrsi(
         int n, int k, uint index, Span<int> y, out float energy, out int collapseMask, int blocks)
     {
         bool fused = blocks > 1 && n % blocks == 0;
         int perBlock = fused ? n / blocks : n;
-        int inBlock = 0;
+        int blockEnd = perBlock;
         int bit = 1;
         int mask = 0;
         uint i = index;
-        float sum = 0;
-        for (int j = 0; j < n; j++)
+        int sum = 0;
+        ref PvqEntry table = ref MemoryMarshal.GetArrayDataReference(PvqCwrs);
+        ref int yr = ref MemoryMarshal.GetReference(y);
+        if (y.Length < n)
+        {
+            throw new ArgumentException("The pulse vector is shorter than n.", nameof(y));
+        }
+
+        int j = 0;
+        while (j < n && k > 0)
         {
             int remaining = n - j;
-
-            // 1. p = (V(N-j-1,k) + V(N-j,k)) / 2. The sum can exceed 32 bits even
-            // when both terms and the halved U value fit, so accumulate in 64 bits. The
-            // V(N-j-1,k) term is reused in step 3, so read it once.
-            uint below = PvqV(remaining - 1, k);
-            uint p = (uint)(((ulong)below + PvqV(remaining, k)) >> 1);
-
-            // 2. If i < p, sgn = 1; otherwise sgn = -1 and i = i - p.
-            int sgn;
-            if (i < p)
+            int value;
+            if (remaining == 1)
             {
-                sgn = 1;
+                value = i == 0 ? k : -k;
+                k = 0;
             }
             else
             {
-                sgn = -1;
-                i -= p;
+                ref PvqEntry row = ref Unsafe.Add(ref table, remaining * PvqMaxK);
+                PvqEntry e = Unsafe.Add(ref row, k);
+                uint d = i - e.Zero;
+                if (d < e.Below)
+                {
+                    // Zero pulse: S <= i < S + B.
+                    Unsafe.Add(ref yr, j) = 0;
+                    i = d;
+                    j++;
+                    continue;
+                }
+
+                bool negative = i >= e.Zero + e.Below;
+                if (negative)
+                {
+                    i -= e.Zero + e.Below;
+                }
+
+                int kk = k - 1;
+                uint prefix = Unsafe.Add(ref row, kk).Zero;
+                while (prefix > i)
+                {
+                    kk--;
+                    prefix = Unsafe.Add(ref row, kk).Zero;
+                }
+
+                i -= prefix;
+                int magnitude = k - kk;
+                k = kk;
+                value = negative ? -magnitude : magnitude;
             }
 
-            // 3. k0 = k and p = p - V(N-j-1,k).
-            int k0 = k;
-            p -= below;
-
-            // 4. While p > i, set k = k - 1 and p = p - V(N-j-1,k).
-            while (p > i && k > 0)
-            {
-                k--;
-                p -= PvqV(remaining - 1, k);
-            }
-
-            // 5. X[j] = sgn*(k0 - k) and i = i - p.
-            int value = sgn * (k0 - k);
-            y[j] = value;
+            Unsafe.Add(ref yr, j) = value;
             sum += value * value;
-            i -= p;
-
             if (fused)
             {
-                if (value != 0)
+                while (j >= blockEnd)
                 {
-                    mask |= bit;
-                }
-
-                if (++inBlock == perBlock)
-                {
-                    inBlock = 0;
+                    blockEnd += perBlock;
                     bit <<= 1;
                 }
+
+                mask |= bit;
             }
+
+            j++;
+        }
+
+        if (j < n)
+        {
+            y.Slice(j, n - j).Clear();
         }
 
         energy = sum;
@@ -2619,6 +2650,18 @@ internal sealed class CeltDecoder
     /// </remarks>
     private static readonly uint[] PvqTable = BuildPvqTable();
 
+    /// <summary>
+    /// One <c>(remaining, k)</c> cell of the CWRS walk: <c>Zero</c> is <c>S(N, K)</c> (the sum of
+    /// <c>V(N-1, t)</c> for <c>t &lt; K</c>) and <c>Below</c> is <c>V(N-1, K)</c>.
+    /// </summary>
+    private struct PvqEntry
+    {
+        public uint Zero;
+        public uint Below;
+    }
+
+    private static readonly PvqEntry[] PvqCwrs = BuildPvqCwrs();
+
     private const int PvqMaxN = 177;
     private const int PvqMaxK = 129;
 
@@ -2650,6 +2693,27 @@ internal sealed class CeltDecoder
                         table[row + band] = c * width * allocVectors[(vector * BandCount) + band] << lm >> 2;
                     }
                 }
+            }
+        }
+
+        return table;
+    }
+
+    private static PvqEntry[] BuildPvqCwrs()
+    {
+        var table = new PvqEntry[PvqMaxN * PvqMaxK];
+        for (int n = 1; n < PvqMaxN; n++)
+        {
+            ulong prefix = 0;
+            for (int k = 0; k < PvqMaxK; k++)
+            {
+                uint below = PvqTable[((n - 1) * PvqMaxK) + k];
+                table[(n * PvqMaxK) + k] = new PvqEntry
+                {
+                    Zero = prefix > uint.MaxValue ? uint.MaxValue : (uint)prefix,
+                    Below = below,
+                };
+                prefix += below;
             }
         }
 
