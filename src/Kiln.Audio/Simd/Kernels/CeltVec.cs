@@ -1058,3 +1058,61 @@ internal static class CeltVec<T>
         }
     }
 }
+
+/// <summary>The CELT encoder analysis kernels, written once over the tier's multiply-add.</summary>
+/// <typeparam name="T">The tier's vector operations.</typeparam>
+internal static class CeltEncVec<T>
+    where T : struct, IVecOps
+{
+    /// <summary>The multi-lag cross-correlation; each lag accumulates exactly like <c>CeltVec&lt;T&gt;.Dot</c>.</summary>
+    internal static void XcorrLags(ReadOnlySpan<float> x, ReadOnlySpan<float> y, int lagCount, int len, Span<float> output)
+    {
+        if (len > x.Length || (long)lagCount - 1 + len > y.Length || output.Length < lagCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(len));
+        }
+
+        ref float xr = ref MemoryMarshal.GetReference(x);
+        ref float yr = ref MemoryMarshal.GetReference(y);
+        int i = 0;
+        for (; i + 4 <= lagCount; i += 4)
+        {
+            Vector128<float> a0 = Vector128<float>.Zero;
+            Vector128<float> a1 = Vector128<float>.Zero;
+            Vector128<float> a2 = Vector128<float>.Zero;
+            Vector128<float> a3 = Vector128<float>.Zero;
+            int n = 0;
+            for (; n + 4 <= len; n += 4)
+            {
+                Vector128<float> xv = Vector128.LoadUnsafe(ref xr, (nuint)n);
+                a0 = T.MulAdd(a0, xv, Vector128.LoadUnsafe(ref yr, (nuint)(i + n)));
+                a1 = T.MulAdd(a1, xv, Vector128.LoadUnsafe(ref yr, (nuint)(i + 1 + n)));
+                a2 = T.MulAdd(a2, xv, Vector128.LoadUnsafe(ref yr, (nuint)(i + 2 + n)));
+                a3 = T.MulAdd(a3, xv, Vector128.LoadUnsafe(ref yr, (nuint)(i + 3 + n)));
+            }
+
+            float s0 = Vector128.Sum(a0);
+            float s1 = Vector128.Sum(a1);
+            float s2 = Vector128.Sum(a2);
+            float s3 = Vector128.Sum(a3);
+            for (; n < len; n++)
+            {
+                float xv = Unsafe.Add(ref xr, n);
+                s0 += xv * Unsafe.Add(ref yr, i + n);
+                s1 += xv * Unsafe.Add(ref yr, i + 1 + n);
+                s2 += xv * Unsafe.Add(ref yr, i + 2 + n);
+                s3 += xv * Unsafe.Add(ref yr, i + 3 + n);
+            }
+
+            output[i] = s0;
+            output[i + 1] = s1;
+            output[i + 2] = s2;
+            output[i + 3] = s3;
+        }
+
+        for (; i < lagCount; i++)
+        {
+            output[i] = CeltVec<T>.Dot(x[..len], y.Slice(i, len));
+        }
+    }
+}

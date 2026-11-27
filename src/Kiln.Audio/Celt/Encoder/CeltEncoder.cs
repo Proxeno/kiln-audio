@@ -2,6 +2,7 @@
 
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt.Encoder;
 
@@ -36,6 +37,7 @@ internal sealed class CeltEncoder
     private readonly int _internalFrameSamples;
     private readonly int _apiFrameSamples;
     private readonly int _channels;
+    private readonly AudioKernelTier _tier = AudioKernels.Select();
     private readonly int _upsample;
     private readonly int _end;
     private readonly int _complexity;
@@ -343,17 +345,50 @@ internal sealed class CeltEncoder
         Span<byte> frameBuffer,
         Span<byte> snapshot)
     {
+        // One switch per frame; everything below it is a direct call specialised to the tier.
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                return EncodePayloadCore<Avx2FmaKernels>(
+                    ref enc, pcm, start, end, nbCompressedBytes, ref nbAvailableBytes, vbrRate, effectiveBytes, frameBuffer, snapshot);
+            case AudioKernelTier.AdvSimdArm64:
+                return EncodePayloadCore<AdvSimdArm64Kernels>(
+                    ref enc, pcm, start, end, nbCompressedBytes, ref nbAvailableBytes, vbrRate, effectiveBytes, frameBuffer, snapshot);
+            case AudioKernelTier.Vector128:
+                return EncodePayloadCore<Vector128Kernels>(
+                    ref enc, pcm, start, end, nbCompressedBytes, ref nbAvailableBytes, vbrRate, effectiveBytes, frameBuffer, snapshot);
+            default:
+                return EncodePayloadCore<ScalarKernels>(
+                    ref enc, pcm, start, end, nbCompressedBytes, ref nbAvailableBytes, vbrRate, effectiveBytes, frameBuffer, snapshot);
+        }
+    }
+
+    private int EncodePayloadCore<TK>(
+        ref RangeEncoder enc,
+        ReadOnlySpan<short> pcm,
+        int start,
+        int end,
+        int nbCompressedBytes,
+        ref int nbAvailableBytes,
+        int vbrRate,
+        int effectiveBytes,
+        Span<byte> frameBuffer,
+        Span<byte> snapshot)
+        where TK : struct, IEncoderKernels
+    {
         int channels = _channels;
         int n = _internalFrameSamples;
         int lm = _lm;
         int m = 1 << lm;
         int totalBits = nbCompressedBytes * 8;
 
+        EncProf.Mark(10, "celt other (wrap/frame setup)");
         // Pre-emphasis (RFC 6716 Appendix A, celt/celt.c: the prefilter block).
         Span<float> input = _in.AsSpan(0, channels * (n + Overlap));
         CeltEncoderKernels.PreEmphasis(
             pcm, channels, _upsample, n, n + Overlap, Overlap, input, _preEmphasisMemory, out bool silent);
 
+        EncProf.Mark(11, "celt preemphasis");
         // Silence is reported once, on the first symbol of a fresh frame.
         if (enc.Tell() == 1)
         {
@@ -382,10 +417,11 @@ internal sealed class CeltEncoder
             return nbCompressedBytes;
         }
 
-        bool pfOn = _prefilter.Process(
+        bool pfOn = _prefilter.Process<TK>(
             ref enc, input, channels, n, nbAvailableBytes, totalBits, _complexity, _tapsetDecision,
             allowPitch: start == 0, _window);
 
+        EncProf.Mark(12, "celt prefilter");
         bool isTransient = false;
         int shortBlocks = 0;
         if (lm > 0 && enc.Tell() + 3 <= totalBits)
@@ -403,7 +439,9 @@ internal sealed class CeltEncoder
             enc.EncodeBitLogp(isTransient ? 1 : 0, 3);
         }
 
+        EncProf.Mark(13, "celt transient");
         ComputeMdcts(shortBlocks, n, input, channels);
+        EncProf.Mark(14, "celt mdct");
         if (_upsample != 1)
         {
             for (int c = 0; c < channels; c++)
@@ -422,6 +460,7 @@ internal sealed class CeltEncoder
         ComputeBandEnergies(end, n, channels);
         CeltEncoderEnergy.Amp2Log2(_bandEnergy, channels, end, end, _bandLogE);
         NormaliseBands(end, n, channels);
+        EncProf.Mark(15, "celt band energy+normalise");
 
         int tfSelect;
         int tfSum;
@@ -445,6 +484,7 @@ internal sealed class CeltEncoder
                 _spectrum, lm, out tfSum, _metric, _path0, _path1, _tfScratch);
         }
 
+        EncProf.Mark(16, "celt tf analysis");
         CeltEncoderEnergy.QuantCoarseEnergy(
             ref enc, lm, start, end, end, channels, _bandLogE, _oldBandE, _error,
             _intraOldBandE, _intraError, frameBuffer, snapshot,
@@ -453,6 +493,7 @@ internal sealed class CeltEncoder
         CeltEncoderAnalysis.TfEncode(
             ref enc, start, end, isTransient, _tfResolution, lm, tfSelect, nbCompressedBytes);
 
+        EncProf.Mark(17, "celt coarse energy+tf encode");
         _spread = 2;
         if (enc.Tell() + 4 <= totalBits)
         {
@@ -473,6 +514,7 @@ internal sealed class CeltEncoder
             enc.EncodeIcdf(CeltTables.SpreadIcdf, 5, _spread);
         }
 
+        EncProf.Mark(18, "celt spreading decision");
         CeltEncoderAnalysis.InitCaps(CeltTables.EBands, lm, channels, _cap);
         _offsets.AsSpan().Clear();
         if (effectiveBytes > 50 && lm >= 1)
@@ -513,6 +555,7 @@ internal sealed class CeltEncoder
             enc.EncodeIcdf(CeltTables.TrimIcdf, 7, allocTrim);
         }
 
+        EncProf.Mark(19, "celt dynalloc+trim");
         if (vbrRate > 0)
         {
             int finalSize = _vbr.Update(
@@ -556,13 +599,16 @@ internal sealed class CeltEncoder
             out int balance, _lastCodedBands);
         _lastCodedBands = codedBands;
 
+        EncProf.Mark(20, "celt vbr+stereo analysis+allocation");
         CeltEncoderEnergy.QuantFineEnergy(ref enc, start, end, channels, _oldBandE, _error, _fineQuant);
 
+        EncProf.Mark(21, "celt fine energy");
         _bands.QuantAllBands(
             ref enc, CeltTables.EBands, start, end, _spectrum, channels, n, lm, shortBlocks != 0, _spread,
             codedBands, (nbCompressedBytes << (3 + BitRes)) - antiCollapseReserve, balance, _pulses,
             _tfResolution, intensity, dualStereo, _bandEnergy);
 
+        EncProf.Mark(22, "celt quant all bands");
         if (antiCollapseReserve > 0)
         {
             int antiCollapseOn = _consecutiveTransient < 2 ? 1 : 0;
@@ -573,6 +619,7 @@ internal sealed class CeltEncoder
             ref enc, start, end, channels, _oldBandE, _error, _fineQuant, _finePriority,
             (nbCompressedBytes * 8) - enc.Tell());
 
+        EncProf.Mark(23, "celt finalise");
         _consecutiveTransient = isTransient ? _consecutiveTransient + 1 : 0;
         _finalRange = enc.Rng;
         return nbCompressedBytes;

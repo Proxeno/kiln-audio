@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Kiln.Audio.Simd.Kernels;
 
 /// <summary>The x64 AVX2+FMA3 tier: VEX-encoded 128-bit shuffles with fused multiply-add. This is the only tier where 256-bit types are permitted.</summary>
-internal readonly struct Avx2FmaKernels : ICeltKernels
+internal readonly partial struct Avx2FmaKernels : ICeltKernels, ISilkEncoderKernels, IEncoderKernels
 {
     private const MethodImplOptions Inline = MethodImplOptions.AggressiveInlining;
 
