@@ -2697,9 +2697,10 @@ internal sealed class CeltDecoder
 /// </summary>
 /// <remarks>
 /// This is a compile-time switch: define <c>KILN_PERF4_PROFILE</c> to have the decoder stamp each
-/// stage. With the symbol undefined <see cref="Enabled"/> is the constant false, so
-/// <see cref="Start"/> folds to zero and <see cref="Stop"/> to nothing; a normal build carries no
-/// instrumentation overhead. The counters are read by the <c>Perf4Profile</c> benchmark.
+/// stage. With the symbol undefined <see cref="Start"/> folds to zero and <see cref="Stop"/> to
+/// nothing, so a normal build carries no instrumentation overhead. The accumulators live in a
+/// nested type so that a Release build never runs a type initializer (and never allocates) on the
+/// first call from the decoder hot path.
 /// </remarks>
 internal static class Perf4Profile
 {
@@ -2715,19 +2716,13 @@ internal static class Perf4Profile
     internal const int SlotCount = 24;
 
     /// <summary>Stage names, in slot order.</summary>
-    internal static readonly string[] Names =
-    [
-        "frame", "flags", "coarse", "tf", "dynalloc", "alloc", "interp", "fine",
-        "pvq-bands", "partition", "pulses", "theta", "renorm", "rotation", "anticollapse",
-        "finalise", "publish", "denorm", "imdct", "postfilter", "deemph", "synth-total",
-        "synth-other", "spare",
-    ];
+    internal static string[] Names => Counters.Names;
 
     /// <summary>Accumulated stopwatch ticks per slot.</summary>
-    internal static readonly long[] Ticks = new long[SlotCount];
+    internal static long[] Ticks => Counters.Ticks;
 
     /// <summary>Number of samples accumulated per slot.</summary>
-    internal static readonly long[] Calls = new long[SlotCount];
+    internal static long[] Calls => Counters.Calls;
 
     /// <summary>Starts a stage timer, or returns zero when instrumentation is off.</summary>
     /// <returns>The starting timestamp.</returns>
@@ -2747,15 +2742,41 @@ internal static class Perf4Profile
     internal static void Stop(int slot, long start)
     {
 #if KILN_PERF4_PROFILE
-        Ticks[slot] += System.Diagnostics.Stopwatch.GetTimestamp() - start;
-        Calls[slot]++;
+        Counters.Ticks[slot] += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+        Counters.Calls[slot]++;
 #endif
     }
 
     /// <summary>Clears every accumulator.</summary>
     internal static void Reset()
     {
-        Ticks.AsSpan().Clear();
-        Calls.AsSpan().Clear();
+#if KILN_PERF4_PROFILE
+        Counters.Reset();
+#endif
+    }
+
+    /// <summary>The storage touched only by a profiling build.</summary>
+    private static class Counters
+    {
+        /// <summary>Stage names, in slot order.</summary>
+        internal static readonly string[] Names =
+        [
+            "frame", "flags", "coarse", "tf", "dynalloc", "alloc", "interp", "fine",
+            "pvq-bands", "partition", "pulses", "theta", "renorm", "rotation", "anticollapse",
+            "finalise", "publish", "denorm", "imdct", "postfilter", "deemph", "synth-total",
+            "synth-other", "spare",
+        ];
+
+        /// <summary>Accumulated stopwatch ticks per slot.</summary>
+        internal static readonly long[] Ticks = new long[SlotCount];
+
+        /// <summary>Number of samples accumulated per slot.</summary>
+        internal static readonly long[] Calls = new long[SlotCount];
+
+        internal static void Reset()
+        {
+            Ticks.AsSpan().Clear();
+            Calls.AsSpan().Clear();
+        }
     }
 }

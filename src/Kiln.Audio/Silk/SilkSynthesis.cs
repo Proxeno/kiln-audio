@@ -566,19 +566,13 @@ internal static class SilkPerf4Profile
     internal const int SlotCount = 22;
 
     /// <summary>Stage names, in slot order.</summary>
-    internal static readonly string[] Names =
-    [
-        "reserved", "nlsf-decode", "nlsf-to-lpc", "excitation", "ltp-block", "ltp-synth",
-        "lpc-synth", "gain-adjust", "state-copy", "stereo", "reserved", "channel", "frame",
-        "decode", "silkhdr", "lbrr", "regular", "gains-ec", "nlsf-ec", "ltp-ec",
-        "exc-ec", "decode-other",
-    ];
+    internal static string[] Names => Counters.Names;
 
     /// <summary>Accumulated stopwatch ticks per slot.</summary>
-    internal static readonly long[] Ticks = new long[SlotCount];
+    internal static long[] Ticks => Counters.Ticks;
 
     /// <summary>Number of samples accumulated per slot.</summary>
-    internal static readonly long[] Calls = new long[SlotCount];
+    internal static long[] Calls => Counters.Calls;
 
     /// <summary>Starts a stage timer, or returns zero when instrumentation is off.</summary>
     /// <returns>The starting timestamp.</returns>
@@ -598,15 +592,41 @@ internal static class SilkPerf4Profile
     internal static void Stop(int slot, long start)
     {
 #if KILN_PERF4_PROFILE
-        Ticks[slot] += System.Diagnostics.Stopwatch.GetTimestamp() - start;
-        Calls[slot]++;
+        Counters.Ticks[slot] += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+        Counters.Calls[slot]++;
 #endif
     }
 
     /// <summary>Clears every accumulator.</summary>
     internal static void Reset()
     {
-        Ticks.AsSpan().Clear();
-        Calls.AsSpan().Clear();
+#if KILN_PERF4_PROFILE
+        Counters.Reset();
+#endif
+    }
+
+    /// <summary>The storage touched only by a profiling build.</summary>
+    private static class Counters
+    {
+        /// <summary>Stage names, in slot order.</summary>
+        internal static readonly string[] Names =
+        [
+            "reserved", "nlsf-decode", "nlsf-to-lpc", "excitation", "ltp-block", "ltp-synth",
+            "lpc-synth", "gain-adjust", "state-copy", "stereo", "reserved", "channel", "frame",
+            "decode", "silkhdr", "lbrr", "regular", "gains-ec", "nlsf-ec", "ltp-ec",
+            "exc-ec", "decode-other",
+        ];
+
+        /// <summary>Accumulated stopwatch ticks per slot.</summary>
+        internal static readonly long[] Ticks = new long[SlotCount];
+
+        /// <summary>Number of samples accumulated per slot.</summary>
+        internal static readonly long[] Calls = new long[SlotCount];
+
+        internal static void Reset()
+        {
+            Ticks.AsSpan().Clear();
+            Calls.AsSpan().Clear();
+        }
     }
 }
