@@ -648,6 +648,14 @@ internal static class SilkEncoderAnalysis
             harmonicShapeGainQ16 = 0;
         }
 
+        // SILK-QUAL-3: in the high-rate single-state quantizer a 1.5x stronger tilt shaping
+        // lowers the reconstruction noise at every 12-20 kbps target; the low-rate path keeps
+        // the reference strength that SILK-QUAL-2 tuned.
+        if (encoder.HighRate != 0)
+        {
+            tiltQ16 = (int)(((long)tiltQ16 * 3) >> 1);
+        }
+
         for (int k = 0; k < 4; k++)
         {
             shape.HarmBoostSmthQ16 = SilkFixedPoint.Smlawb(
@@ -1048,9 +1056,12 @@ internal static class SilkEncoderAnalysis
         // decoder reconstructs with whatever flag is transmitted.
         encoder.Indices.QuantOffsetType = 0;
 
-        // The delayed-decision search explores more paths at low bits per sample, so the rate
-        // penalty is raised to match; at high rate a single state keeps the reference penalty.
-        int lambdaBase = encoder.HighRate != 0 ? 1 : 4;
+        // SILK-QUAL-3: above 1.2 bits per sample the single-state quantizer over-produces pulses
+        // at narrowband and under-produces at medium and wideband; the measured optima are 4 and
+        // 2 respectively (the low-rate path keeps the reference value of 4).
+        int lambdaBase = encoder.HighRate != 0
+            ? (encoder.FsKhz == 8 ? 4 : 2)
+            : 4;
         int quantOffsetQ10 = SilkSynthesisTables.QuantizationOffsetQ10[encoder.Indices.SignalType >> 1][encoder.Indices.QuantOffsetType];
         control.LambdaQ10 = 1229
             + SilkEncoderMath.Smulbb(-50, lambdaBase) // LAMBDA_DELAYED_DECISIONS

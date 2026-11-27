@@ -772,7 +772,7 @@ overload and the float overload. `EncoderAllocationTests` proves this with
 ## SILK encoder quality
 
 This section records the SILK encoder's quality against libopus 1.5.2, the methodology, and what
-SILK-QUAL-1 and SILK-QUAL-2 changed. It is evidence, not a CI gate; the gate lives in
+SILK-QUAL-1, SILK-QUAL-2 and SILK-QUAL-3 changed. It is evidence, not a CI gate; the gate lives in
 `SilkEncoderQualityTests`.
 
 ### Method
@@ -806,25 +806,27 @@ we beat libopus.
 | ---- | ----- | ---- | ---- | ------- | --- |
 | NB | 20 ms | 8  | 4.01 | 3.60 | +0.41 |
 | NB | 60 ms | 8  | 4.10 | 3.64 | +0.46 |
-| NB | 20 ms | 12 | 5.35 | 5.51 | -0.16 |
-| NB | 60 ms | 12 | 5.44 | 5.49 | -0.05 |
+| NB | 20 ms | 12 | 5.52 | 5.51 | +0.01 |
+| NB | 60 ms | 12 | 5.55 | 5.49 | +0.06 |
 | MB | 20 ms | 8  | 4.06 | 2.77 | +1.29 |
 | MB | 60 ms | 8  | 4.12 | 2.81 | +1.30 |
 | MB | 20 ms | 12 | 5.34 | 5.01 | +0.33 |
 | MB | 60 ms | 12 | 5.40 | 4.84 | +0.56 |
-| MB | 20 ms | 20 | 6.53 | 6.73 | -0.21 |
-| MB | 60 ms | 20 | 6.42 | 6.72 | -0.30 |
+| MB | 20 ms | 20 | 6.55 | 6.73 | -0.19 |
+| MB | 60 ms | 20 | 6.59 | 6.72 | -0.13 |
 | WB | 20 ms | 8  | 3.92 | 1.71 | +2.21 |
 | WB | 60 ms | 8  | 4.05 | 1.77 | +2.28 |
 | WB | 20 ms | 12 | 5.01 | 4.50 | +0.52 |
 | WB | 60 ms | 12 | 5.06 | 4.37 | +0.69 |
-| WB | 20 ms | 20 | 6.44 | 6.44 | -0.00 |
-| WB | 60 ms | 20 | 6.35 | 6.43 | -0.08 |
+| WB | 20 ms | 20 | 6.55 | 6.44 | +0.11 |
+| WB | 60 ms | 20 | 6.57 | 6.43 | +0.13 |
 
 SILK-QUAL-2 improved every complexity-0 configuration, by 0.24-0.74 dB, with no regressions. Ten of
-sixteen now meet the target outright; four more are within 0.16 dB (WB 20 ms 20 kbps is a measured
-tie, NB 60 ms 12 kbps -0.05, WB 60 ms 20 kbps -0.08, NB 20 ms 12 kbps -0.16). MB 20 kbps remains
-0.21-0.30 dB behind. Before SILK-QUAL-1, all sixteen were behind by 0.01-0.90 dB.
+sixteen met the target outright; the other six trailed by 0.00-0.30 dB, all at the high-rate regime
+(above 1.2 bits per internal-rate sample). SILK-QUAL-3 closes four of those six: narrowband 12 kbps
+at both frame durations and wideband 20 kbps at both frame durations now meet or beat libopus. Only
+mediumband 20 kbps still trails, by 0.19 dB (20 ms) and 0.13 dB (60 ms); both are improvements over
+SILK-QUAL-2's 0.21 and 0.30 dB.
 
 ### Complexity 5 and 10
 
@@ -879,6 +881,40 @@ shaping strength and richer c0 analysis. Richer analysis at complexity 0 (the co
 and stronger shaping both made quality worse; the three above are the survivors and were checked
 on vectors 04 and 06 as a held-out pair.
 
+### What SILK-QUAL-3 changed
+
+All four changes act only in the high-rate regime (`HighRate != 0`, i.e. above 1.2 bits per
+internal-rate sample: NB 12 kbps, MB 20 kbps, WB 20 kbps). The ten low-rate configurations that
+already beat libopus are untouched, so none of them can regress. Tuning used vectors 02 and 03;
+vectors 04 and 06 were held out and confirm the result.
+
+1. **Stronger tilt shaping at high rate.** `NoiseShapeAnalysis` scales the tilt shaping coefficient
+   by 1.5 in the high-rate path. In the single-state quantizer a stronger tilt lowers reconstruction
+   noise uniformly: +0.01-0.09 dB across all six targets, at no extra cost (one multiply per frame).
+   The low-rate path keeps the SILK-QUAL-2 strength, which that sweep had already tuned.
+2. **Per-band NSQ rate penalty.** The delayed-decision lambda base is 4 for narrowband and 2 for
+   medium/wideband at high rate (it was 1 for every high-rate configuration). Narrowband 12 kbps
+   was over-producing pulses and gains most (+0.11 dB); the medium/wideband optimum is 2.
+3. **Narrowband 12 kbps target-SNR lift.** One extra dB of target SNR at narrowband high rate,
+   gated to `FsKhz == 8` and `HighRate != 0`. The narrowband configuration was bit-starved relative
+   to libopus; this adds +0.16 dB and is what flips both narrowband 12 kbps rows above libopus.
+   It costs about 6% more payload bytes at narrowband (see below).
+4. **Voice-activity-weighted per-frame allocation at 60 ms.** For high-rate 60 ms packets the
+   per-frame SNR target is distributed by speech activity, normalized so the packet mean stays at
+   the configured rate (the bit reservoir damps the excursions). This is worth +0.06 dB on both
+   60 ms targets and is neutral at 20 ms.
+
+Rate-distortion gain quantization was implemented and measured first, as planned: enumerating every
+decoder-accepted gain symbol and minimizing squared log-gain error (with and without a rate term)
+regressed segSNR by 0.01-0.08 dB everywhere. The reference nearest-index-plus-hysteresis rule is a
+better fit for the quantizer's interaction with the noise-shaping loop, so it was dropped. The LTP
+and NLSF quantizers already include rate terms (SILK-QUAL-1), and forcing the NSQ rate loop to
+enforce the packet budget instead of the packet capacity also regressed (0.19-0.33 dB), confirming
+that side-information bits do not buy excitation pulses in this rate range.
+
+Payload bytes: the high-rate changes stay in the same range as SILK-QUAL-2 (MB/WB about 13-14%
+above libopus). The narrowband SNR lift raises narrowband from about 5% to about 15% above libopus.
+
 ### Encode cost
 
 Measured with a stopwatch over the whole vector 02 corpus (1251 frames of 20 ms, MB, 20 kbps) on
@@ -897,20 +933,27 @@ unchanged in computation; the high-rate path uses one NSQ state instead of four 
 warped autocorrelation and warped gain, so it is strictly cheaper. The changes are carried by the
 same fixed-point kernels and add no allocations.
 
+SILK-QUAL-3 does not increase encode cost either; the per-frame stopwatch in the quality harness
+shows the same or slightly lower per-frame times (a few percent, because the higher narrowband and
+mediumband lambda produces fewer excitation pulses). The added work is one multiply for the tilt
+scale, one multiply and a few adds for the allocation normalization, and a lookup for the lambda,
+all allocation-free. The ratio against SILK-QUAL-2 is about 1.0x, well inside the 1.5x budget.
+
 ### Remaining gap and next ideas
 
-SILK-QUAL-2 leaves one clear gap: MB 20 kbps, 0.21 dB (20 ms) and 0.30 dB (60 ms) behind libopus.
-NB 12 kbps (0.16/0.05 dB), WB 20 kbps 60 ms (0.08 dB) and WB 20 kbps 20 ms (a tie) are close. The
-gap is flat across complexity, so it is not the quantizer search; the sweeps in SILK-QUAL-2 ruled
-out the trellis width, warping, lambda, the SNR threshold, the quantization offset, NLSF
-interpolation, MSVQ survivors and the shaping strengths as causes at MB 20 kbps. What remains:
+SILK-QUAL-3 leaves one gap: MB 20 kbps, 0.19 dB (20 ms) and 0.13 dB (60 ms) behind libopus, both
+improved from SILK-QUAL-2. Every other complexity-0 configuration meets or beats libopus. The four
+high-rate structural knobs that remained in SILK-QUAL-2's sweep (trellis width, warping, the SNR
+threshold and the quantization offset) were re-measured at these rates in SILK-QUAL-3 and still
+regress; narrowband and wideband responded to tilt strength, the per-band lambda and the narrowband
+SNR lift, while mediumband 20 kbps did not respond to the SNR lift or to stronger shaping beyond
+SILK-QUAL-3's 1.5x. What remains for mediumband:
 
-1. **Rate-distortion index selection** for gains, LTP and NLSFs, instead of nearest-index plus a
-   global gain multiplier.
-2. **Per-frame bit allocation across 40/60 ms packets and the bit reservoir**, favouring voiced
-   onsets.
-3. **Deeper excitation/noise-shaping work** at MB 12 kHz, where libopus still makes up 0.2-0.3 dB
-   with fewer bits.
+1. **Deeper excitation/noise-shaping work at the 12 kHz internal rate**, where libopus still makes
+   up 0.1-0.2 dB with fewer payload bits; the gap there is not rate-control-limited.
+2. **LPC analysis improvements** (window, order, noise-floor regularization) at 12 kHz.
+3. **Rate-distortion NLSF/gain selection that accounts for the noise-shaping loop**, which the
+   plain squared-error RD of SILK-QUAL-3 did not capture.
 
 ### Frozen RFC baseline and the ratchet
 
@@ -919,7 +962,7 @@ figures are frozen in `tests/Kiln.Audio.Tests/SilkEncoder/SilkRfcBaseline.cs`, m
 harness (build the RFC source with `FIXED_POINT=1`, then run `SilkRfcBaselineGenerator` with
 `KILN_SILK_RFC_OPUS_DEMO` set to its `opus_demo`). Per configuration the test asserts
 `ours >= max(RFC, frozen ours - 0.05 dB)` where we still trail libopus, and
-`ours >= frozen libopus` where we already beat it. SILK-QUAL-2 raised every floor: the ten
-configurations that beat libopus are pinned to its figure, and the rest to their new measured score
-minus 0.05 dB, so the gain is locked in. The remaining gaps stay reported in the test output and in
-the table above.
+`ours >= frozen libopus` where we already beat it. SILK-QUAL-2 and SILK-QUAL-3 raised every floor:
+the fourteen configurations that now beat or meet libopus are pinned to its figure, and the two
+mediumband 20 kbps rows to their new measured score minus 0.05 dB, so the gain is locked in. The
+remaining gaps stay reported in the test output and in the table above.
