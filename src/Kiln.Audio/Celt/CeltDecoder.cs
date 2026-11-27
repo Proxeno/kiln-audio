@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt;
 
@@ -182,6 +183,7 @@ internal sealed class CeltDecoder
     private BandContext _ctx;
     private bool _phaseInverted;
     private uint _seed;
+    private readonly AudioKernelTier _tier;
     private int _postFilterPeriod;
     private int _postFilterPeriodOld;
     private float _postFilterGainValue;
@@ -193,7 +195,21 @@ internal sealed class CeltDecoder
     /// <param name="channels">Output channel count, 1 or 2.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channels"/> is not 1 or 2.</exception>
     internal CeltDecoder(int channels)
+        : this(channels, AudioKernels.Select())
     {
+    }
+
+    /// <summary>Initializes a CELT decoder on an explicit kernel tier (parity tests).</summary>
+    /// <param name="channels">Output channel count, 1 or 2.</param>
+    /// <param name="tier">The kernel tier; it must be supported by the host.</param>
+    internal CeltDecoder(int channels, AudioKernelTier tier)
+    {
+        if (!AudioKernels.IsSupported(tier))
+        {
+            throw new PlatformNotSupportedException($"The {tier} kernel tier is not supported on this host.");
+        }
+
+        _tier = tier;
         if (channels is not (1 or 2))
         {
             throw new ArgumentOutOfRangeException(nameof(channels), channels, "Channels must be 1 or 2.");
@@ -232,6 +248,33 @@ internal sealed class CeltDecoder
         _postFilterTapSetOld = 0;
     }
 
+    internal void DecodeFrame(
+        ref RangeDecoder dec,
+        int frameBytes,
+        int lm,
+        int startBand,
+        int endBand,
+        int streamChannels,
+        CeltFrameResult result)
+    {
+        // One switch per frame; everything below it is a direct call specialised to the tier.
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                DecodeFrameCore<Avx2FmaKernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                DecodeFrameCore<AdvSimdArm64Kernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                break;
+            case AudioKernelTier.Vector128:
+                DecodeFrameCore<Vector128Kernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                break;
+            default:
+                DecodeFrameCore<ScalarKernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                break;
+        }
+    }
+
     /// <summary>
     /// Decodes one CELT frame from <paramref name="dec"/> in the symbol order of RFC 6716
     /// §4.3, producing normalized band shapes and the decoded energies.
@@ -243,7 +286,7 @@ internal sealed class CeltDecoder
     /// <param name="endBand">One past the last coded band, from the packet bandwidth.</param>
     /// <param name="streamChannels">Number of coded channels, 1 or 2.</param>
     /// <param name="result">Destination for the decoded frame.</param>
-    internal void DecodeFrame(
+    private void DecodeFrameCore<TK>(
         ref RangeDecoder dec,
         int frameBytes,
         int lm,
@@ -251,6 +294,7 @@ internal sealed class CeltDecoder
         int endBand,
         int streamChannels,
         CeltFrameResult result)
+        where TK : struct, ICeltKernels
     {
         ArgumentNullException.ThrowIfNull(result);
         if (lm is < 0 or > 3)
@@ -447,7 +491,7 @@ internal sealed class CeltDecoder
 
         // PVQ band shapes (RFC 6716 §4.3.4).
         stageStart = Perf4Profile.Start();
-        QuantAllBands(
+        QuantAllBands<TK>(
             ref dec,
             lm,
             startBand,
@@ -477,7 +521,7 @@ internal sealed class CeltDecoder
         if (antiCollapse)
         {
             stageStart = Perf4Profile.Start();
-            ApplyAntiCollapse(lm, startBand, endBand, c, n);
+            ApplyAntiCollapse<TK>(lm, startBand, endBand, c, n);
             Perf4Profile.Stop(14, stageStart);
         }
 
@@ -1130,7 +1174,7 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Decodes every band's normalized shape (RFC 6716 §4.3.4).</summary>
-    private void QuantAllBands(
+    private void QuantAllBands<TK>(
         ref RangeDecoder dec,
         int lm,
         int start,
@@ -1144,6 +1188,7 @@ internal sealed class CeltDecoder
         int codedBands,
         int totalBits,
         int balance)
+        where TK : struct, ICeltKernels
     {
         ReadOnlySpan<short> eBands = CeltTables.EBands;
         int m = 1 << lm;
@@ -1271,7 +1316,7 @@ internal sealed class CeltDecoder
             int yCollapse;
             if (dualStereo != 0)
             {
-                xCollapse = QuantBand(
+                xCollapse = QuantBand<TK>(
                     ref dec,
                     x,
                     bandSamples,
@@ -1283,7 +1328,7 @@ internal sealed class CeltDecoder
                     1f,
                     scratch,
                     xMask);
-                yCollapse = QuantBand(
+                yCollapse = QuantBand<TK>(
                     ref dec,
                     y,
                     bandSamples,
@@ -1302,7 +1347,7 @@ internal sealed class CeltDecoder
                 Span<float> lowbandOut = norm.Slice((m * eBands[i]) - normOffset, bandSamples);
                 if (c == 2)
                 {
-                    xCollapse = QuantBandStereo(
+                    xCollapse = QuantBandStereo<TK>(
                         ref dec,
                         x,
                         y,
@@ -1317,7 +1362,7 @@ internal sealed class CeltDecoder
                 }
                 else
                 {
-                    xCollapse = QuantBand(ref dec, x, bandSamples, b, blocks, lowband, lm, lowbandOut, 1f, scratch, xMask | yMask);
+                    xCollapse = QuantBand<TK>(ref dec, x, bandSamples, b, blocks, lowband, lm, lowbandOut, 1f, scratch, xMask | yMask);
                 }
 
                 yCollapse = xCollapse;
@@ -1333,7 +1378,7 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Decodes one band with the mono partitioner (RFC 6716 §4.3.4).</summary>
-    private int QuantBand(
+    private int QuantBand<TK>(
         ref RangeDecoder dec,
         Span<float> x,
         int n,
@@ -1345,14 +1390,15 @@ internal sealed class CeltDecoder
         float gain,
         Span<float> lowbandScratch,
         int fill)
+        where TK : struct, ICeltKernels
     {
         long start24 = Perf4Profile.Start();
-        int result = QuantBandCore(ref dec, x, n, b, blocks, lowband, lm, lowbandOut, gain, lowbandScratch, fill);
+        int result = QuantBandCore<TK>(ref dec, x, n, b, blocks, lowband, lm, lowbandOut, gain, lowbandScratch, fill);
         Perf4Profile.Stop(24, start24);
         return result;
     }
 
-    private int QuantBandCore(
+    private int QuantBandCore<TK>(
         ref RangeDecoder dec,
         Span<float> x,
         int n,
@@ -1364,6 +1410,7 @@ internal sealed class CeltDecoder
         float gain,
         Span<float> lowbandScratch,
         int fill)
+        where TK : struct, ICeltKernels
     {
         int n0 = n;
         int nB = n;
@@ -1376,7 +1423,7 @@ internal sealed class CeltDecoder
         nB /= blocks;
         if (n == 1)
         {
-            return QuantBandN1(ref dec, x, default, lowbandOut);
+            return QuantBandN1<TK>(ref dec, x, default, lowbandOut);
         }
 
         if (tfChange > 0)
@@ -1395,7 +1442,7 @@ internal sealed class CeltDecoder
         {
             if (!lowband.IsEmpty)
             {
-                Haar1(lowband, n >> k, 1 << k);
+                Haar1<TK>(lowband, n >> k, 1 << k);
             }
 
             fill = CeltTables.BitInterleaveTable[fill & 0xF] | (CeltTables.BitInterleaveTable[fill >> 4] << 2);
@@ -1408,7 +1455,7 @@ internal sealed class CeltDecoder
         {
             if (!lowband.IsEmpty)
             {
-                Haar1(lowband, nB, blocks);
+                Haar1<TK>(lowband, nB, blocks);
             }
 
             fill |= fill << blocks;
@@ -1426,7 +1473,7 @@ internal sealed class CeltDecoder
             DeinterleaveHadamard(lowband, nB >> recombine, b0 << recombine, longBlocks);
         }
 
-        int collapseMask = QuantPartition(ref dec, x, n, b, blocks, lowband, lm, gain, fill);
+        int collapseMask = QuantPartition<TK>(ref dec, x, n, b, blocks, lowband, lm, gain, fill);
 
         if (b0 > 1)
         {
@@ -1440,13 +1487,13 @@ internal sealed class CeltDecoder
             blocks >>= 1;
             nB <<= 1;
             collapseMask |= collapseMask >> blocks;
-            Haar1(x, nB, blocks);
+            Haar1<TK>(x, nB, blocks);
         }
 
         for (int k = 0; k < recombine; k++)
         {
             collapseMask = CeltTables.BitDeinterleaveTable[collapseMask];
-            Haar1(x, n0 >> k, 1 << k);
+            Haar1<TK>(x, n0 >> k, 1 << k);
         }
 
         blocks <<= recombine;
@@ -1455,7 +1502,7 @@ internal sealed class CeltDecoder
         {
             long start26 = Perf4Profile.Start();
             float scale = MathF.Sqrt(n0);
-            DecKernels.ScaleCopy(lowbandOut, x[..n0], scale);
+            TK.ScaleCopy(lowbandOut, x[..n0], scale);
             Perf4Profile.Stop(26, start26);
         }
 
@@ -1463,7 +1510,8 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Decodes a one-coefficient band: up to one sign per channel (RFC 6716 §4.3.4).</summary>
-    private int QuantBandN1(ref RangeDecoder dec, Span<float> x, Span<float> y, Span<float> lowbandOut)
+    private int QuantBandN1<TK>(ref RangeDecoder dec, Span<float> x, Span<float> y, Span<float> lowbandOut)
+        where TK : struct, ICeltKernels
     {
         bool hasY = !y.IsEmpty;
         for (int c = 0; c < (hasY ? 2 : 1); c++)
@@ -1488,7 +1536,7 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Recursively splits and decodes a mono partition (RFC 6716 §4.3.4).</summary>
-    private int QuantPartition(
+    private int QuantPartition<TK>(
         ref RangeDecoder dec,
         Span<float> x,
         int n,
@@ -1498,6 +1546,7 @@ internal sealed class CeltDecoder
         int lm,
         float gain,
         int fill)
+        where TK : struct, ICeltKernels
     {
         long start9 = Perf4Profile.Start();
         int b0 = blocks;
@@ -1561,7 +1610,7 @@ internal sealed class CeltDecoder
                 int rebalance = _ctx.RemainingBits;
                 if (mbits >= sbits)
                 {
-                    collapseMask = QuantPartition(
+                    collapseMask = QuantPartition<TK>(
                         ref dec,
                         x.Slice(0, n),
                         n,
@@ -1577,7 +1626,7 @@ internal sealed class CeltDecoder
                         sbits += rebalance - (3 << CeltTables.BitRes);
                     }
 
-                    collapseMask |= QuantPartition(
+                    collapseMask |= QuantPartition<TK>(
                         ref dec,
                         x.Slice(n, n),
                         n,
@@ -1590,7 +1639,7 @@ internal sealed class CeltDecoder
                 }
                 else
                 {
-                    collapseMask = QuantPartition(
+                    collapseMask = QuantPartition<TK>(
                         ref dec,
                         x.Slice(n, n),
                         n,
@@ -1606,7 +1655,7 @@ internal sealed class CeltDecoder
                         mbits += rebalance - (3 << CeltTables.BitRes);
                     }
 
-                    collapseMask |= QuantPartition(
+                    collapseMask |= QuantPartition<TK>(
                         ref dec,
                         x.Slice(0, n),
                         n,
@@ -1644,7 +1693,7 @@ internal sealed class CeltDecoder
         if (pulses != 0)
         {
             int k = CeltTables.GetPulses(pulses);
-            collapseMask = AlgUnquant(ref dec, x, n, k, blocks, gain);
+            collapseMask = AlgUnquant<TK>(ref dec, x, n, k, blocks, gain);
         }
         else
         {
@@ -1680,7 +1729,7 @@ internal sealed class CeltDecoder
                     collapseMask = fill;
                 }
 
-                RenormaliseVector(x, gain);
+                RenormaliseVector<TK>(x, gain);
             }
 
             Perf4Profile.Stop(23, start23);
@@ -1691,7 +1740,7 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Decodes a stereo band, including the in-band angle (RFC 6716 §4.3.4.2).</summary>
-    private int QuantBandStereo(
+    private int QuantBandStereo<TK>(
         ref RangeDecoder dec,
         Span<float> x,
         Span<float> y,
@@ -1703,10 +1752,11 @@ internal sealed class CeltDecoder
         Span<float> lowbandOut,
         Span<float> lowbandScratch,
         int fill)
+        where TK : struct, ICeltKernels
     {
         if (n == 1)
         {
-            return QuantBandN1(ref dec, x, y, lowbandOut);
+            return QuantBandN1<TK>(ref dec, x, y, lowbandOut);
         }
 
         int originalFill = fill;
@@ -1749,7 +1799,7 @@ internal sealed class CeltDecoder
             }
 
             sign = 1 - (2 * sign);
-            collapseMask = QuantBand(
+            collapseMask = QuantBand<TK>(
                 ref dec,
                 x2,
                 n,
@@ -1785,7 +1835,7 @@ internal sealed class CeltDecoder
             int rebalance = _ctx.RemainingBits;
             if (mbits >= sbits)
             {
-                collapseMask = QuantBand(
+                collapseMask = QuantBand<TK>(
                     ref dec,
                     x,
                     n,
@@ -1803,7 +1853,7 @@ internal sealed class CeltDecoder
                     sbits += rebalance - (3 << CeltTables.BitRes);
                 }
 
-                collapseMask |= QuantBand(
+                collapseMask |= QuantBand<TK>(
                     ref dec,
                     y,
                     n,
@@ -1818,7 +1868,7 @@ internal sealed class CeltDecoder
             }
             else
             {
-                collapseMask = QuantBand(
+                collapseMask = QuantBand<TK>(
                     ref dec,
                     y,
                     n,
@@ -1836,7 +1886,7 @@ internal sealed class CeltDecoder
                     mbits += rebalance - (3 << CeltTables.BitRes);
                 }
 
-                collapseMask |= QuantBand(
+                collapseMask |= QuantBand<TK>(
                     ref dec,
                     x,
                     n,
@@ -1850,7 +1900,7 @@ internal sealed class CeltDecoder
                     fill);
             }
 
-            StereoMerge(x, y, mid, n);
+            StereoMerge<TK>(x, y, mid, n);
         }
 
         if (inv != 0)
@@ -2020,7 +2070,8 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Decodes a PVQ vector and produces the normalized shape (RFC 6716 §4.3.4.2).</summary>
-    private int AlgUnquant(ref RangeDecoder dec, Span<float> x, int n, int k, int blocks, float gain)
+    private int AlgUnquant<TK>(ref RangeDecoder dec, Span<float> x, int n, int k, int blocks, float gain)
+        where TK : struct, ICeltKernels
     {
         // RFC 6716 Appendix A, celt/vq.c: decode_pulses(), then Ryy = sum(iy[i]**2). The energy
         // is accumulated while the pulse vector is recovered, so the vector is walked once.
@@ -2033,12 +2084,12 @@ internal sealed class CeltDecoder
         Cwrsi(n, k, index, iy, out float energy, out int mask, blocks);
 
         float g = (1f / MathF.Sqrt(energy)) * gain;
-        DecKernels.ScaleIntToFloat(x, iy, g);
+        TK.ScaleIntToFloat(x, iy, g);
 
         // PERF-7: most leaves are too dense to rotate; skip the call (and its setup) for them.
         if (2 * k < n && _ctx.Spread != SpreadNone)
         {
-            ExpRotation(x, n, -1, blocks, k, _ctx.Spread, _rotationCache);
+            ExpRotation<TK>(x, n, -1, blocks, k, _ctx.Spread, _rotationCache);
         }
 
         Perf4Profile.Stop(10, start10);
@@ -2205,8 +2256,9 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Decodes the second half of the band splitter's angle (RFC 6716 §4.3.4.2).</summary>
-    private static void ExpRotation(
+    private static void ExpRotation<TK>(
         Span<float> x, int length, int direction, int stride, int k, int spread, RotationEntry[] cache)
+        where TK : struct, ICeltKernels
     {
         long start13 = Perf4Profile.Start();
         if (2 * k >= length || spread == SpreadNone)
@@ -2264,17 +2316,17 @@ internal sealed class CeltDecoder
             {
                 if (stride2 != 0)
                 {
-                    ExpRotation1(x.Slice(i * len, len), len, stride2, s, c);
+                    ExpRotation1<TK>(x.Slice(i * len, len), len, stride2, s, c);
                 }
 
-                ExpRotation1(x.Slice(i * len, len), len, 1, c, s);
+                ExpRotation1<TK>(x.Slice(i * len, len), len, 1, c, s);
             }
             else
             {
-                ExpRotation1(x.Slice(i * len, len), len, 1, c, -s);
+                ExpRotation1<TK>(x.Slice(i * len, len), len, 1, c, -s);
                 if (stride2 != 0)
                 {
-                    ExpRotation1(x.Slice(i * len, len), len, stride2, s, -c);
+                    ExpRotation1<TK>(x.Slice(i * len, len), len, stride2, s, -c);
                 }
             }
         }
@@ -2291,108 +2343,23 @@ internal sealed class CeltDecoder
     /// same multiplies and adds in the same order, so the result is bit-identical to the scalar
     /// reference loop.
     /// </remarks>
-    private static void ExpRotation1(Span<float> x, int length, int stride, float c, float s)
+    private static void ExpRotation1<TK>(Span<float> x, int length, int stride, float c, float s)
+        where TK : struct, ICeltKernels
     {
-        if (length <= stride)
-        {
-            return;
-        }
-
-        ref float r = ref MemoryMarshal.GetReference(x);
-        if (x.Length < length)
-        {
-            throw new ArgumentException("The vector is shorter than length.", nameof(x));
-        }
-
-        int i;
-        if (stride == 1)
-        {
-            float carry = r;
-            for (i = 0; i < length - 1; i++)
-            {
-                float x2 = Unsafe.Add(ref r, i + 1);
-                Unsafe.Add(ref r, i) = (c * carry) - (s * x2);
-                carry = (c * x2) + (s * carry);
-            }
-
-            Unsafe.Add(ref r, length - 1) = carry;
-            if (length >= 3)
-            {
-                carry = Unsafe.Add(ref r, length - 2);
-                for (i = length - 3; i >= 0; i--)
-                {
-                    float x1 = Unsafe.Add(ref r, i);
-                    Unsafe.Add(ref r, i + 1) = (c * carry) + (s * x1);
-                    carry = (c * x1) - (s * carry);
-                }
-
-                r = carry;
-            }
-
-            return;
-        }
-
-        i = 0;
-        if (stride >= Vector128<float>.Count && SimdConfig.UseSimd)
-        {
-            Vector128<float> cv = Vector128.Create(c);
-            Vector128<float> sv = Vector128.Create(s);
-            for (; i + Vector128<float>.Count <= length - stride; i += Vector128<float>.Count)
-            {
-                Vector128<float> x1 = Vector128.LoadUnsafe(ref r, (nuint)i);
-                Vector128<float> x2 = Vector128.LoadUnsafe(ref r, (nuint)(i + stride));
-                ((cv * x2) + (sv * x1)).StoreUnsafe(ref r, (nuint)(i + stride));
-                ((cv * x1) - (sv * x2)).StoreUnsafe(ref r, (nuint)i);
-            }
-        }
-
-        for (; i < length - stride; i++)
-        {
-            float x1 = Unsafe.Add(ref r, i);
-            float x2 = Unsafe.Add(ref r, i + stride);
-            Unsafe.Add(ref r, i + stride) = (c * x2) + (s * x1);
-            Unsafe.Add(ref r, i) = (c * x1) - (s * x2);
-        }
-
-        i = length - (2 * stride) - 1;
-        if (stride >= Vector128<float>.Count && SimdConfig.UseSimd)
-        {
-            Vector128<float> cv = Vector128.Create(c);
-            Vector128<float> sv = Vector128.Create(s);
-            for (; i >= Vector128<float>.Count - 1; i -= Vector128<float>.Count)
-            {
-                int b = i - (Vector128<float>.Count - 1);
-                Vector128<float> x1 = Vector128.LoadUnsafe(ref r, (nuint)b);
-                Vector128<float> x2 = Vector128.LoadUnsafe(ref r, (nuint)(b + stride));
-                ((cv * x2) + (sv * x1)).StoreUnsafe(ref r, (nuint)(b + stride));
-                ((cv * x1) - (sv * x2)).StoreUnsafe(ref r, (nuint)b);
-            }
-        }
-
-        for (; i >= 0; i--)
-        {
-            float x1 = Unsafe.Add(ref r, i);
-            float x2 = Unsafe.Add(ref r, i + stride);
-            Unsafe.Add(ref r, i + stride) = (c * x2) + (s * x1);
-            Unsafe.Add(ref r, i) = (c * x1) - (s * x2);
-        }
+        TK.Rotate(x, length, stride, c, s);
     }
 
     /// <summary>
     /// Normalizes a vector to the requested gain (RFC 6716 §4.3.4.2; Appendix A,
     /// celt/vq.c: renormalise_vector).
     /// </summary>
-    private static void RenormaliseVector(Span<float> x, float gain)
+    private static void RenormaliseVector<TK>(Span<float> x, float gain)
+        where TK : struct, ICeltKernels
     {
         long start12 = Perf4Profile.Start();
-        float energy = 1e-15f;
-        for (int i = 0; i < x.Length; i++)
-        {
-            energy += x[i] * x[i];
-        }
-
+        float energy = 1e-15f + TK.SumSquares(x);
         float g = (1f / MathF.Sqrt(energy)) * gain;
-        DecKernels.ScaleInPlace(x, g);
+        TK.ScaleInPlace(x, g);
         Perf4Profile.Stop(12, start12);
     }
 
@@ -2424,15 +2391,10 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Reconstructs the two channels from a mid/side band (RFC 6716 §4.3.4.2).</summary>
-    private static void StereoMerge(Span<float> x, Span<float> y, float mid, int n)
+    private static void StereoMerge<TK>(Span<float> x, Span<float> y, float mid, int n)
+        where TK : struct, ICeltKernels
     {
-        float xp = 0;
-        float side = 0;
-        for (int j = 0; j < n; j++)
-        {
-            xp += y[j] * x[j];
-            side += y[j] * y[j];
-        }
+        TK.StereoDots(x[..n], y[..n], out float xp, out float side);
 
         xp = mid * xp;
         float mid2 = mid;
@@ -2446,11 +2408,12 @@ internal sealed class CeltDecoder
 
         float lgain = 1f / (float)Math.Sqrt(el);
         float rgain = 1f / (float)Math.Sqrt(er);
-        DecKernels.StereoMerge(x, y, mid, lgain, rgain, n);
+        TK.StereoMerge(x, y, mid, lgain, rgain, n);
     }
 
     /// <summary>Applies the anti-collapse noise fill (RFC 6716 §4.3.5).</summary>
-    private void ApplyAntiCollapse(int lm, int start, int end, int c, int frameSamples)
+    private void ApplyAntiCollapse<TK>(int lm, int start, int end, int c, int frameSamples)
+        where TK : struct, ICeltKernels
     {
         ReadOnlySpan<short> eBands = CeltTables.EBands;
         int m = 1 << lm;
@@ -2497,7 +2460,7 @@ internal sealed class CeltDecoder
 
                 if (renormalise)
                 {
-                    RenormaliseVector(_spectrum.AsSpan(baseOffset, n0 << lm), 1f);
+                    RenormaliseVector<TK>(_spectrum.AsSpan(baseOffset, n0 << lm), 1f);
                 }
             }
         }
@@ -2646,19 +2609,10 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Applies the Haar transform used by the time/frequency reshaping (RFC 6716 §4.3.4.5).</summary>
-    private static void Haar1(Span<float> x, int n0, int stride)
+    private static void Haar1<TK>(Span<float> x, int n0, int stride)
+        where TK : struct, ICeltKernels
     {
-        n0 >>= 1;
-        for (int i = 0; i < stride; i++)
-        {
-            for (int j = 0; j < n0; j++)
-            {
-                float tmp1 = 0.70710678f * x[(stride * (2 * j)) + i];
-                float tmp2 = 0.70710678f * x[(stride * ((2 * j) + 1)) + i];
-                x[(stride * (2 * j)) + i] = tmp1 + tmp2;
-                x[(stride * ((2 * j) + 1)) + i] = tmp1 - tmp2;
-            }
-        }
+        TK.Haar(x, n0, stride);
     }
 
     /// <summary>Reorders a Hadamard-transformed band into the frequency layout (RFC 6716 §4.3.4.5).</summary>

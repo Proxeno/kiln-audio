@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt;
 
@@ -328,6 +329,53 @@ internal sealed class Fft
                 twiddleImaginary,
                 inverse,
                 useVector);
+        }
+    }
+
+    /// <summary>
+    /// Runs the transform with the given kernel tier: the fused permutation + leaf level, then
+    /// the combine levels bottom-up. The tier is a type argument, so there is no dispatch inside
+    /// the transform.
+    /// </summary>
+    internal void Transform<TK>(
+        ReadOnlySpan<float> sourceReal,
+        ReadOnlySpan<float> sourceImaginary,
+        Span<float> outputReal,
+        Span<float> outputImaginary,
+        bool inverse)
+        where TK : struct, ICeltKernels
+    {
+        int levels = _radices.Length;
+        if (levels == 0)
+        {
+            outputReal[0] = sourceReal[0];
+            outputImaginary[0] = sourceImaginary[0];
+            return;
+        }
+
+        int last = levels - 1;
+        TK.FftLeaf(
+            _radices[last],
+            sourceReal,
+            sourceImaginary,
+            outputReal,
+            outputImaginary,
+            _nodeOffsets[last],
+            inverse ? _twiddleRealConjugate[last] : _twiddleReal[last],
+            inverse ? _twiddleImaginaryConjugate[last] : _twiddleImaginary[last],
+            inverse);
+
+        for (int level = last - 1; level >= 0; level--)
+        {
+            TK.FftCombine(
+                _radices[level],
+                outputReal,
+                outputImaginary,
+                _nodeOffsets[level],
+                _halves[level],
+                inverse ? _twiddleRealConjugate[level] : _twiddleReal[level],
+                inverse ? _twiddleImaginaryConjugate[level] : _twiddleImaginary[level],
+                inverse);
         }
     }
 

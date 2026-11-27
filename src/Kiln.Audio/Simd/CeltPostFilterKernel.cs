@@ -77,7 +77,26 @@ internal static class CeltPostFilterKernel
         int tapSet1,
         ReadOnlySpan<float> windowSquare,
         int overlap,
+        bool useVector) =>
+        CombFilter<Kernels.PortableOps>(
+            history, frameStart, count, period0, period1, gain0, gain1, tapSet0, tapSet1,
+            windowSquare, overlap, useVector);
+
+    /// <summary>The comb filter with the multiply-add of the given vector tier.</summary>
+    internal static void CombFilter<T>(
+        float[] history,
+        int frameStart,
+        int count,
+        int period0,
+        int period1,
+        float gain0,
+        float gain1,
+        int tapSet0,
+        int tapSet1,
+        ReadOnlySpan<float> windowSquare,
+        int overlap,
         bool useVector)
+        where T : struct, Kernels.IVecOps
     {
         ReadOnlySpan<float> taps0 = CeltTables.PostFilterGains.Slice(tapSet0 * 3, 3);
         ReadOnlySpan<float> taps1 = CeltTables.PostFilterGains.Slice(tapSet1 * 3, 3);
@@ -95,6 +114,12 @@ internal static class CeltPostFilterKernel
         bool use0 = g00 != 0f || g01 != 0f || g02 != 0f;
         bool use1 = g10 != 0f || g11 != 0f || g12 != 0f;
 
+        if (!use0 && !use1)
+        {
+            // Filter off before and after: every sample would be read, left unchanged and written back.
+            return;
+        }
+
         int fadeEnd = Math.Min(overlap, count);
         int index = 0;
 
@@ -106,7 +131,7 @@ internal static class CeltPostFilterKernel
         {
             for (; index + VectorWidth <= fadeEnd; index += VectorWidth)
             {
-                FadeBlock(
+                FadeBlock<T>(
                     history, frameStart + index, index, period0, period1,
                     g00, g01, g02, g10, g11, g12, use0, use1, windowSquare);
             }
@@ -123,17 +148,17 @@ internal static class CeltPostFilterKernel
         {
             for (; index + VectorWidth <= count; index += VectorWidth)
             {
-                SteadyBlock(history, frameStart + index, period1, g10, g11, g12);
+                SteadyBlock<T>(history, frameStart + index, period1, g10, g11, g12);
             }
         }
 
-        for (; index < count; index++)
+        for (; use1 && index < count; index++)
         {
             SteadySample(history, frameStart + index, period1, g10, g11, g12, use1);
         }
     }
 
-    private static void FadeBlock(
+    private static void FadeBlock<T>(
         float[] history,
         int position,
         int fadeIndex,
@@ -148,6 +173,7 @@ internal static class CeltPostFilterKernel
         bool use0,
         bool use1,
         ReadOnlySpan<float> windowSquare)
+        where T : struct, Kernels.IVecOps
     {
         Vector128<float> value = Load(history, position);
 
@@ -156,20 +182,14 @@ internal static class CeltPostFilterKernel
 
         if (use0)
         {
-            Vector128<float> sum0 =
-                (Vector128.Create(g00) * Load(history, position - period0))
-                + (Vector128.Create(g01) * (Load(history, position - period0 - 1) + Load(history, position - period0 + 1)))
-                + (Vector128.Create(g02) * (Load(history, position - period0 - 2) + Load(history, position - period0 + 2)));
-            value += weight * sum0;
+            Vector128<float> sum0 = Taps<T>(history, position, period0, g00, g01, g02);
+            value = T.MulAdd(value, weight, sum0);
         }
 
         if (use1)
         {
-            Vector128<float> sum1 =
-                (Vector128.Create(g10) * Load(history, position - period1))
-                + (Vector128.Create(g11) * (Load(history, position - period1 - 1) + Load(history, position - period1 + 1)))
-                + (Vector128.Create(g12) * (Load(history, position - period1 - 2) + Load(history, position - period1 + 2)));
-            value += fade * sum1;
+            Vector128<float> sum1 = Taps<T>(history, position, period1, g10, g11, g12);
+            value = T.MulAdd(value, fade, sum1);
         }
 
         Store(history, position, value);
@@ -213,23 +233,26 @@ internal static class CeltPostFilterKernel
         history[position] = value;
     }
 
-    private static void SteadyBlock(
+    private static void SteadyBlock<T>(
         float[] history,
         int position,
         int period,
         float g10,
         float g11,
         float g12)
+        where T : struct, Kernels.IVecOps
     {
-        var g10v = Vector128.Create(g10);
-        var g11v = Vector128.Create(g11);
-        var g12v = Vector128.Create(g12);
         Vector128<float> value = Load(history, position);
-        value +=
-            (g10v * Load(history, position - period))
-            + (g11v * (Load(history, position - period - 1) + Load(history, position - period + 1)))
-            + (g12v * (Load(history, position - period - 2) + Load(history, position - period + 2)));
+        value += Taps<T>(history, position, period, g10, g11, g12);
         Store(history, position, value);
+    }
+
+    private static Vector128<float> Taps<T>(float[] history, int position, int period, float g0, float g1, float g2)
+        where T : struct, Kernels.IVecOps
+    {
+        Vector128<float> sum = Vector128.Create(g0) * Load(history, position - period);
+        sum = T.MulAdd(sum, Vector128.Create(g1), Load(history, position - period - 1) + Load(history, position - period + 1));
+        return T.MulAdd(sum, Vector128.Create(g2), Load(history, position - period - 2) + Load(history, position - period + 2));
     }
 
     private static void SteadySample(

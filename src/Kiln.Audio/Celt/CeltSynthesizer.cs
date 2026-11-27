@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt;
 
@@ -43,10 +44,20 @@ internal sealed partial class CeltSynthesizer
 {
     private const int Overlap = CeltWindow.DefaultOverlap;
     private const int HistorySize = 2048;
+
+    // The history carries Overlap extra samples after the rolling window: the inverse MDCT writes
+    // its whole windowed output (frame plus trailing overlap) straight into the frame's slot.
+    private const int HistoryAllocation = HistorySize + Overlap;
     private const int MaxFrameSamples = CeltTables.MaxFrameSamples;
 
     private readonly int _outputChannels;
     private readonly int _downsample;
+    private readonly AudioKernelTier _tier;
+
+    // True while both output channels hold identical state (a mono stream decoded to stereo since
+    // the last reset): channel 1 is then not synthesized, its output is a copy of channel 0 and
+    // its stored state is stale until LeaveIdentical().
+    private bool _identical;
     private readonly Mdct _shortMdct;
     private readonly Mdct[] _mdct = new Mdct[4];
     private readonly float[] _freq = new float[2 * MaxFrameSamples];
@@ -67,7 +78,22 @@ internal sealed partial class CeltSynthesizer
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException">A parameter is outside its legal range.</exception>
     internal CeltSynthesizer(int outputChannels, int downsample = 1)
+        : this(outputChannels, downsample, AudioKernels.Select())
     {
+    }
+
+    /// <summary>Initializes a synthesizer on an explicit kernel tier (parity tests).</summary>
+    /// <param name="outputChannels">Output channels, 1 or 2.</param>
+    /// <param name="downsample">The 48 kHz-to-API-rate factor.</param>
+    /// <param name="tier">The kernel tier; it must be supported by the host.</param>
+    internal CeltSynthesizer(int outputChannels, int downsample, AudioKernelTier tier)
+    {
+        if (!AudioKernels.IsSupported(tier))
+        {
+            throw new PlatformNotSupportedException($"The {tier} kernel tier is not supported on this host.");
+        }
+
+        _tier = tier;
         if (outputChannels is not (1 or 2))
         {
             throw new ArgumentOutOfRangeException(
@@ -83,6 +109,7 @@ internal sealed partial class CeltSynthesizer
         _downsample = downsample;
 
         _outputChannels = outputChannels;
+        _identical = outputChannels == 2;
         _shortMdct = new Mdct(CeltTables.ShortBlockSamples);
         for (int lm = 0; lm < _mdct.Length; lm++)
         {
@@ -98,9 +125,12 @@ internal sealed partial class CeltSynthesizer
         for (int channel = 0; channel < 2; channel++)
         {
             _rawOverlap[channel] = new float[Overlap];
-            _history[channel] = new float[HistorySize];
+            _history[channel] = new float[HistoryAllocation];
         }
     }
+
+    /// <summary>Gets the kernel tier this synthesizer was built on.</summary>
+    internal AudioKernelTier Tier => _tier;
 
     /// <summary>Gets the output channel count this synthesizer produces.</summary>
     internal int OutputChannels => _outputChannels;
@@ -115,6 +145,7 @@ internal sealed partial class CeltSynthesizer
         }
 
         Array.Clear(_deemphasis);
+        _identical = _outputChannels == 2;
         Array.Clear(_freq);
         Array.Clear(_block);
         Array.Clear(_imdct);
@@ -142,6 +173,7 @@ internal sealed partial class CeltSynthesizer
             throw new ArgumentOutOfRangeException(nameof(startBand), startBand, "Start band must be 0 or 17.");
         }
 
+        LeaveIdentical();
         PlcDecodeLost(lm, startBand, pcmOut);
     }
 
@@ -173,25 +205,81 @@ internal sealed partial class CeltSynthesizer
                 $"The PCM destination must hold {samples * channels} samples.", nameof(pcmOut));
         }
 
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                SynthesizeCore<Avx2FmaKernels>(frame, samples, pcmOut);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                SynthesizeCore<AdvSimdArm64Kernels>(frame, samples, pcmOut);
+                break;
+            case AudioKernelTier.Vector128:
+                SynthesizeCore<Vector128Kernels>(frame, samples, pcmOut);
+                break;
+            default:
+                SynthesizeCore<ScalarKernels>(frame, samples, pcmOut);
+                break;
+        }
+    }
+
+    /// <summary>Makes channel 1 a real copy of channel 0 again so the two can diverge.</summary>
+    private void LeaveIdentical()
+    {
+        if (!_identical)
+        {
+            return;
+        }
+
+        _history[0].CopyTo(_history[1], 0);
+        _rawOverlap[0].CopyTo(_rawOverlap[1], 0);
+        _deemphasis[1] = _deemphasis[0];
+        _identical = false;
+    }
+
+    private void SynthesizeCore<TK>(CeltFrameResult frame, int samples, Span<float> pcmOut)
+        where TK : struct, ICeltKernels
+    {
+        int streamChannels = frame.StreamChannels;
+        int channels = _outputChannels;
+        if (_identical && streamChannels == 2)
+        {
+            LeaveIdentical();
+        }
+
+        // A mono stream on a stereo output runs the synthesis once and duplicates the PCM.
+        bool duplicate = _identical;
+        int synthesised = duplicate ? 1 : channels;
+
         long profileStart = Perf4Profile.Start();
         long stageStart = Perf4Profile.Start();
-        Denormalise(frame, samples, streamChannels, channels);
+        Denormalise<TK>(frame, samples, streamChannels, channels, duplicate);
         Perf4Profile.Stop(17, stageStart);
 
-        for (int channel = 0; channel < channels; channel++)
+        for (int channel = 0; channel < synthesised; channel++)
         {
             stageStart = Perf4Profile.Start();
-            BuildTimeSignal(frame, samples, channel);
+            BuildTimeSignal<TK>(frame, samples, channel);
             Perf4Profile.Stop(18, stageStart);
 
             stageStart = Perf4Profile.Start();
-            ApplyPostFilter(frame, samples, channel);
+            ApplyPostFilter<TK>(frame, samples, channel);
             Perf4Profile.Stop(19, stageStart);
-
-            stageStart = Perf4Profile.Start();
-            Deemphasise(samples, channel, pcmOut, channels);
-            Perf4Profile.Stop(20, stageStart);
         }
+
+        stageStart = Perf4Profile.Start();
+        const float inv = 1f / CeltTables.SignalScale;
+        int baseIndex = HistorySize - samples;
+        TK.Deemphasis(
+            _history[0].AsSpan(baseIndex, samples),
+            _history[channels == 2 && !duplicate ? 1 : 0].AsSpan(baseIndex, samples),
+            pcmOut,
+            samples,
+            channels,
+            duplicate,
+            ref _deemphasis[0],
+            ref _deemphasis[1],
+            inv);
+        Perf4Profile.Stop(20, stageStart);
 
         stageStart = Perf4Profile.Start();
         CapturePlcState(frame);
@@ -200,7 +288,8 @@ internal sealed partial class CeltSynthesizer
     }
 
     /// <summary>Denormalizes the normalized bands and maps the stream channels to the output channels.</summary>
-    private void Denormalise(CeltFrameResult frame, int samples, int streamChannels, int channels)
+    private void Denormalise<TK>(CeltFrameResult frame, int samples, int streamChannels, int channels, bool duplicate)
+        where TK : struct, ICeltKernels
     {
         // The coded stream may have more channels than the output (a stereo stream decoded to
         // mono): the working span covers the larger of the two so both coded channels fit before
@@ -216,7 +305,8 @@ internal sealed partial class CeltSynthesizer
         // everything inside it, so clearing the whole working buffer first would be wasted work.
         int firstCoded = m * eBands[frame.StartBand];
         int lastCoded = m * eBands[frame.EndBand];
-        for (int channel = 0; channel < workingChannels; channel++)
+        int clearChannels = duplicate ? 1 : workingChannels;
+        for (int channel = 0; channel < clearChannels; channel++)
         {
             int offset = channel * samples;
             freq.Slice(offset, firstCoded).Clear();
@@ -241,7 +331,7 @@ internal sealed partial class CeltSynthesizer
                 float gain = (float)Math.Exp(0.6931471805599453094 * logEnergy);
                 int start = m * eBands[i];
                 int end = m * eBands[i + 1];
-                DecKernels.ScaleCopy(
+                TK.ScaleCopy(
                     freq.Slice(offset + start, end - start),
                     frame.Spectrum.AsSpan(offset + start, end - start),
                     gain);
@@ -262,27 +352,29 @@ internal sealed partial class CeltSynthesizer
 
         if (channels == 2 && streamChannels == 1)
         {
-            freq.Slice(0, samples).CopyTo(freq.Slice(samples, samples));
+            if (!duplicate)
+            {
+                freq.Slice(0, samples).CopyTo(freq.Slice(samples, samples));
+            }
         }
         else if (channels == 1 && streamChannels == 2)
         {
-            for (int j = 0; j < samples; j++)
-            {
-                freq[j] = 0.5f * (freq[j] + freq[samples + j]);
-            }
+            TK.Average(freq.Slice(0, samples), freq.Slice(samples, samples));
         }
     }
 
-    /// <summary>Runs the inverse MDCT for one channel and does the overlap-add with the previous frame.</summary>
-    private void BuildTimeSignal(CeltFrameResult frame, int samples, int channel)
+    /// <summary>Runs the inverse MDCT for one channel straight into the history and overlap-adds the previous frame.</summary>
+    private void BuildTimeSignal<TK>(CeltFrameResult frame, int samples, int channel)
+        where TK : struct, ICeltKernels
     {
         ReadOnlySpan<float> spectrum = _freq.AsSpan(channel * samples, samples);
         float[] overlap = _rawOverlap[channel];
 
-        // Shift the rolling history first; the frame is then written straight into its tail.
+        // Shift the rolling history first; the frame (and the trailing overlap, which lands in the
+        // allocation margin) is then written straight into its tail.
         float[] history = _history[channel];
         Array.Copy(history, samples, history, 0, HistorySize - samples);
-        Span<float> raw = history.AsSpan(HistorySize - samples, samples);
+        Span<float> raw = history.AsSpan(HistorySize - samples, samples + Overlap);
 
         // PERF-6: the inverse transforms are left unscaled (the 2/N factor and the N/2 the
         // reference multiplies by straight afterwards cancel).
@@ -301,57 +393,26 @@ internal sealed partial class CeltSynthesizer
             int blocks = frame.ShortBlocks;
             for (int b = 0; b < blocks; b++)
             {
-                _shortMdct.InverseUnscaled(spectrum[b..], _imdct, stride: blocks);
+                _shortMdct.InverseUnscaled<TK>(spectrum[b..], _imdct, stride: blocks);
                 int offset = b * CeltTables.ShortBlockSamples;
-                AddInPlace(block.Slice(offset, _shortMdct.Length), _imdct);
+                TK.AddInPlace(block.Slice(offset, _shortMdct.Length), _imdct);
             }
 
-            for (int j = 0; j < Overlap; j++)
-            {
-                raw[j] = block[j] + overlap[j];
-                overlap[j] = block[samples + j];
-            }
-
-            block.Slice(Overlap, samples - Overlap).CopyTo(raw[Overlap..]);
+            block.CopyTo(raw);
         }
         else
         {
             // The long-block inverse covers the whole frame exactly once, so the windowed output
-            // is written straight into the overlap-add.
-            _mdct[frame.Lm].InverseUnscaled(spectrum, _imdct);
-            for (int j = 0; j < Overlap; j++)
-            {
-                raw[j] = _imdct[j] + overlap[j];
-                overlap[j] = _imdct[samples + j];
-            }
-
-            _imdct.AsSpan(Overlap, samples - Overlap).CopyTo(raw[Overlap..]);
-        }
-    }
-
-    private static void AddInPlace(Span<float> destination, ReadOnlySpan<float> source)
-    {
-        int count = destination.Length;
-        int i = 0;
-        if (Vector128.IsHardwareAccelerated && SimdConfig.UseSimd && source.Length >= count)
-        {
-            ref float d = ref MemoryMarshal.GetReference(destination);
-            ref float s = ref MemoryMarshal.GetReference(source);
-            for (; i + 4 <= count; i += 4)
-            {
-                (Vector128.LoadUnsafe(ref d, (nuint)i) + Vector128.LoadUnsafe(ref s, (nuint)i))
-                    .StoreUnsafe(ref d, (nuint)i);
-            }
+            // is written directly into the frame's history slot.
+            _mdct[frame.Lm].InverseUnscaled<TK>(spectrum, raw);
         }
 
-        for (; i < count; i++)
-        {
-            destination[i] += source[i];
-        }
+        TK.OverlapAddSave(raw, overlap, samples, Overlap);
     }
 
     /// <summary>Applies the §4.3.7.1 post-filter, cross-fading the parameter sets in place.</summary>
-    private void ApplyPostFilter(CeltFrameResult frame, int samples, int channel)
+    private void ApplyPostFilter<TK>(CeltFrameResult frame, int samples, int channel)
+        where TK : struct, ICeltKernels
     {
         float[] history = _history[channel];
         int baseIndex = HistorySize - samples;
@@ -363,7 +424,7 @@ internal sealed partial class CeltSynthesizer
         int currentPeriod = frame.PostFilterPitch;
 
         // First overlap: cross-fade the older pair into the previous frame's parameters.
-        CombFilter(
+        TK.CombFilter(
             history,
             baseIndex,
             Overlap,
@@ -372,12 +433,14 @@ internal sealed partial class CeltSynthesizer
             frame.PostFilterGainOld,
             frame.PostFilterGainPrevious,
             frame.PostFilterTapSetOld,
-            frame.PostFilterTapSetPrevious);
+            frame.PostFilterTapSetPrevious,
+            _windowSquare,
+            Overlap);
 
         if (frame.Lm != 0)
         {
             // Rest of the frame: cross-fade the previous parameters into this frame's.
-            CombFilter(
+            TK.CombFilter(
                 history,
                 baseIndex + Overlap,
                 samples - Overlap,
@@ -386,7 +449,9 @@ internal sealed partial class CeltSynthesizer
                 frame.PostFilterGainPrevious,
                 frame.PostFilterGain,
                 frame.PostFilterTapSetPrevious,
-                frame.PostFilterTapSet);
+                frame.PostFilterTapSet,
+                _windowSquare,
+                Overlap);
         }
     }
 
@@ -400,70 +465,44 @@ internal sealed partial class CeltSynthesizer
         float gain0,
         float gain1,
         int tapSet0,
-        int tapSet1) =>
-        CeltPostFilterKernel.CombFilter(
-            history,
-            frameStart,
-            count,
-            period0,
-            period1,
-            gain0,
-            gain1,
-            tapSet0,
-            tapSet1,
-            _windowSquare,
-            Overlap);
+        int tapSet1)
+    {
+        switch (_tier)
+        {
+            case AudioKernelTier.Avx2Fma:
+                Avx2FmaKernels.CombFilter(history, frameStart, count, period0, period1, gain0, gain1, tapSet0, tapSet1, _windowSquare, Overlap);
+                break;
+            case AudioKernelTier.AdvSimdArm64:
+                AdvSimdArm64Kernels.CombFilter(history, frameStart, count, period0, period1, gain0, gain1, tapSet0, tapSet1, _windowSquare, Overlap);
+                break;
+            case AudioKernelTier.Vector128:
+                Vector128Kernels.CombFilter(history, frameStart, count, period0, period1, gain0, gain1, tapSet0, tapSet1, _windowSquare, Overlap);
+                break;
+            default:
+                ScalarKernels.CombFilter(history, frameStart, count, period0, period1, gain0, gain1, tapSet0, tapSet1, _windowSquare, Overlap);
+                break;
+        }
+    }
 
-    /// <summary>Applies the §4.3.7.2 de-emphasis filter and writes the interleaved output.</summary>
-    /// <remarks>
-    /// PERF-5: the filter is <c>y[j] = x[j] + m</c>, <c>m = a * y[j]</c>. The serial chain is one
-    /// multiply and one add per sample. Four samples are handled per step instead: the
-    /// state-independent partial sums <c>P</c> (the response to the four inputs alone) are off the
-    /// critical path, and the state only enters as <c>a^i * m</c>, so the loop-carried chain is a
-    /// single multiply-add per four samples. The result differs from the sample-by-sample loop only
-    /// by float reassociation.
-    /// </remarks>
+    /// <summary>
+    /// De-emphasis of a single channel into the interleaved output. Only the concealment path uses
+    /// this (it runs channel by channel); the normal path uses the tier's two-channel kernel.
+    /// </summary>
     private void Deemphasise(int samples, int channel, Span<float> pcmOut, int channels)
     {
         float[] history = _history[channel];
         int baseIndex = HistorySize - samples;
         float memory = _deemphasis[channel];
-        const float a = CeltTables.DeemphasisCoefficient;
-        const float a2 = a * a;
-        const float a3 = a2 * a;
-        const float a4 = a2 * a2;
         const float inv = 1f / CeltTables.SignalScale;
         if (pcmOut.Length < ((samples - 1) * channels) + channel + 1)
         {
             throw new ArgumentException("The PCM destination is too short.", nameof(pcmOut));
         }
 
-        ref float src = ref history[baseIndex];
-        ref float dst = ref MemoryMarshal.GetReference(pcmOut);
-        int j = 0;
-        int outIndex = channel;
-        for (; j + 4 <= samples; j += 4)
+        for (int j = 0; j < samples; j++)
         {
-            float x0 = Unsafe.Add(ref src, j);
-            float x1 = Unsafe.Add(ref src, j + 1);
-            float x2 = Unsafe.Add(ref src, j + 2);
-            float x3 = Unsafe.Add(ref src, j + 3);
-            float p1 = x1 + (a * x0);
-            float p2 = x2 + (a * p1);
-            float p3 = x3 + (a * p2);
-            Unsafe.Add(ref dst, outIndex) = (x0 + memory) * inv;
-            Unsafe.Add(ref dst, outIndex + channels) = (p1 + (a * memory)) * inv;
-            Unsafe.Add(ref dst, outIndex + (2 * channels)) = (p2 + (a2 * memory)) * inv;
-            Unsafe.Add(ref dst, outIndex + (3 * channels)) = (p3 + (a3 * memory)) * inv;
-            memory = (a * p3) + (a4 * memory);
-            outIndex += 4 * channels;
-        }
-
-        for (; j < samples; j++)
-        {
-            float value = DeemphasiseSample(Unsafe.Add(ref src, j), ref memory);
-            Unsafe.Add(ref dst, outIndex) = value * inv;
-            outIndex += channels;
+            float value = DeemphasiseSample(history[baseIndex + j], ref memory);
+            pcmOut[(j * channels) + channel] = value * inv;
         }
 
         _deemphasis[channel] = memory;
