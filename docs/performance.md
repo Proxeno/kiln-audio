@@ -495,8 +495,9 @@ Static tables are built once at type initialization; the decode and synthesis pa
 
 ### Remaining gaps
 
-1. **CELT PVQ is the wall.** `AlgUnquant`/`Cwrsi` plus the spread rotation are ~60-70 % of CELT
-   frequency-domain decode on all three vectors. The unrank is a serial index decomposition with
+1. **CELT PVQ is the wall.** `AlgUnquant`/`Cwrsi` plus the spread rotation are three quarters or
+   more of CELT frequency-domain decode on all three vectors (the leaf timers overcount by one
+   nesting level, but the top-level `pvq-bands` share is 76-94 %). The unrank is a serial index decomposition with
    two table reads and a monotone `k` walk per coefficient; the rotation for stride 1 is a strict
    recurrence (each sample reads the one just written) and cannot be vectorized without changing
    the float result. Closing the remaining 1.32-1.40 needs a different codeword-read strategy, not
