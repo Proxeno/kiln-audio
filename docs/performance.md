@@ -1233,3 +1233,58 @@ The CELT synthesis stage roughly halves (vector 01: 1.75 to 0.99 us, 07: 1.82 to
 Float output changed only by FMA and reassociation: the conformance vectors, final-range and PLC
 tests pass unchanged and `KernelTierParityTests` bounds every tier against `ScalarKernels` at
 2e-6 of the signal RMS.
+
+## SIMD-3: encoder kernel sets (SILK + CELT analysis)
+
+SIMD-3 extends the SIMD-1 kernel-set design to the encoder. The same tier structs (`ScalarKernels`,
+`Vector128Kernels`, `AdvSimdArm64Kernels`, `Avx2FmaKernels`) now also implement `ISilkEncoderKernels`
+(exact 16-bit integer kernels) and `IEncoderKernels` (CELT analysis). `SilkEncoderCore` and `CeltEncoder`
+read `AudioKernels.Select()` once in their constructors and switch once per frame into a generic body
+(`EncodeFrameCore<TK>`, `EncodePayloadCore<TK>`); there is no dispatch inside a frame. No `Vector256` or
+`Vector<T>` is used; arm64 uses `AdvSimd` widening multiply-accumulate directly (`ArmIntOps`); the x64 tier
+uses 128-bit `pmaddwd` (`X86IntOps`, not runnable on the arm64 build machine, covered by the same parity
+tests on x64 CI).
+
+### Profile (us per 20 ms frame, `micro enc run ... profile`, `KILN_ENC_PROFILE` build)
+
+| Stage | SILK WB 20k cx0 | SILK WB 20k cx5 | CELT st 64k cx0 | CELT st 64k cx5 |
+| --- | --- | --- | --- | --- |
+| resample/VAD/wrap or pre-emphasis | 8.9 | 8.9 | 1.2 | 1.1 |
+| pitch analysis / prefilter | 11.0 | 12.8 | 2.2 | 18.6 |
+| noise-shape analysis / transient | 4.3 | 7.6 | 0.0 | 5.4 |
+| find-pred (Burg, LTP, NLSF) / MDCT | 16.2 | 24.3 | 4.1 | 4.0 |
+| prefilter / TF + spread decision | 2.5 | 3.7 | 0.0 | 7.9 |
+| NSQ delayed decision / quant all bands | **92.0** | **103.4** | **20.2** | **24.3** |
+| entropy / rest | 11.9 | 11.9 | 2.4 | 3.5 |
+
+The SILK delayed-decision NSQ (60-63%) and CELT quant-all-bands (38-67%) dominate. Hybrid was not profiled.
+
+### What moved
+
+- `InnerProd`, `InnerProd64`, `CorrLags` (four lags per pass, target loaded once), `LpcAnalysisFilter`
+  (transposed form, eight samples per pass) feed pitch analysis (stage 1 and 3 correlations, the whitening
+  filter), `Autocorr`, Burg's first row, the LTP correlation matrix and vector, and the residual-energy filters.
+  All are exact integer arithmetic with the reference wrap-around, so every tier is **bit-identical** to scalar
+  (`SilkKernelTierParityTests`: kernels incl. -32768 extremes, and whole SILK encodes byte-identical per tier).
+- `IEncoderKernels.XcorrLags`: the CELT prefilter's coarse pitch search, four lags per pass with the exact
+  accumulation structure of the single-lag dot (unfused on every vector tier), so encoder output is unchanged.
+- `EncProf` (`[Conditional("KILN_ENC_PROFILE")]`) stage marks, and `micro enc` in the benchmark harness.
+
+### Measurements (best of 7, whole 320 s corpus, CBR, M5 Max; libopus pinned to the same mode)
+
+| Config | libopus | Kiln before | Kiln after | Ratio before | Ratio after |
+| --- | --- | --- | --- | --- | --- |
+| CELT stereo 64k cx0 | 18.29 | 29.94 | 30.03 | 1.64 | 1.64 |
+| CELT stereo 64k cx5 | 47.06 | 64.35 | 66.34 | 1.37 | 1.41 (noise) |
+| SILK WB mono 20k cx0 | 44.50 | 146.85 | 140.33 | 3.30 | 3.15 |
+| SILK WB mono 20k cx5 | 135.59 | 173.56 | 165.19 | 1.28 | 1.22 |
+| Hybrid FB mono 32k cx0 | 31.44 | not measured | 134.37 | n/a | 4.27 |
+| Hybrid FB mono 32k cx5 | 69.65 | not measured | 169.54 | n/a | 2.43 |
+
+### Remaining gap
+
+Not done in this lane: the NSQ delayed-decision loop (per-sample `LpcPrediction`, the serial warped shaping chain
+and `CopyState`; the right design is lanes = states), the CELT pulse coder (O(n*k) `Icwrs`, replace with the
+table rank), encoder spread rotation and Haar through `TK.Rotate`/`TK.Haar`, forward MDCT on the tier FFT with a
+vector fold and post-write, transient/TF/spread vector passes, the strided short-block IMDCT pre-rotation, and
+Burg's inner loops and `SumSqrShift`. The 3x SILK cx0 gap is mostly the deliberate four-state trellis.

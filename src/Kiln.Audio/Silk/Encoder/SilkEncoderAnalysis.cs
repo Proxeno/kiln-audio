@@ -2,6 +2,7 @@
 
 using System;
 using Kiln.Audio.Silk;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Silk.Encoder;
 
@@ -25,7 +26,7 @@ internal static class SilkEncoderAnalysis
     // ---------------------------------------------------------------------------------------
 
     /// <summary>Computes the LPC coefficients with the modified Burg recursion.</summary>
-    internal static void BurgModified(
+    internal static void BurgModified<TK>(
         out int residualEnergy,
         out int residualEnergyQ,
         Span<int> coefficientsQ16,
@@ -34,6 +35,7 @@ internal static class SilkEncoderAnalysis
         int subframeLength,
         int subframeCount,
         int order)
+        where TK : struct, ISilkEncoderKernels
     {
         const int maxFrameSize = 384;
         _ = maxFrameSize;
@@ -80,7 +82,7 @@ internal static class SilkEncoderAnalysis
                 int start = s * subframeLength;
                 for (int n = 1; n < order + 1; n++)
                 {
-                    firstRow[n - 1] += (int)(SilkEncoderMath.InnerProd64(
+                    firstRow[n - 1] += (int)(TK.InnerProd64(
                         x[start..], x[(start + n)..], subframeLength - n) >> rightShifts);
                 }
             }
@@ -92,7 +94,7 @@ internal static class SilkEncoderAnalysis
                 int start = s * subframeLength;
                 for (int n = 1; n < order + 1; n++)
                 {
-                    firstRow[n - 1] += SilkEncoderMath.InnerProd(
+                    firstRow[n - 1] += TK.InnerProd(
                         x[start..], x[(start + n)..], subframeLength - n) << -rightShifts;
                 }
             }
@@ -256,7 +258,7 @@ internal static class SilkEncoderAnalysis
                 for (int s = 0; s < subframeCount; s++)
                 {
                     int start = s * subframeLength;
-                    c0 -= (int)(SilkEncoderMath.InnerProd64(x[start..], x[start..], order) >> rightShifts);
+                    c0 -= (int)(TK.InnerProd64(x[start..], x[start..], order) >> rightShifts);
                 }
             }
             else
@@ -264,7 +266,7 @@ internal static class SilkEncoderAnalysis
                 for (int s = 0; s < subframeCount; s++)
                 {
                     int start = s * subframeLength;
-                    c0 -= SilkEncoderMath.InnerProd(x[start..], x[start..], order) << -rightShifts;
+                    c0 -= TK.InnerProd(x[start..], x[start..], order) << -rightShifts;
                 }
             }
 
@@ -293,11 +295,12 @@ internal static class SilkEncoderAnalysis
     // ---------------------------------------------------------------------------------------
 
     /// <summary>Finds the frame's NLSFs and chooses the interpolation factor.</summary>
-    internal static void FindLpc(
+    internal static void FindLpc<TK>(
         SilkEncoderState encoder,
         Span<short> nlsfQ15,
         ReadOnlySpan<short> x,
         int minInverseGainQ30)
+        where TK : struct, ISilkEncoderKernels
     {
         int order = encoder.PredictLpcOrder;
         int subframeLength = encoder.SubframeLength + order;
@@ -310,7 +313,7 @@ internal static class SilkEncoderAnalysis
         Span<short> lpcResidual = stackalloc short[SilkEncoderMath.MaxLpcOrder + (2 * SilkEncoderMath.MaxSubFrameLength) + SilkEncoderMath.MaxLpcOrder];
         Span<short> windowed = lpcResidual;
 
-        BurgModified(
+        BurgModified<TK>(
             out int residualEnergy,
             out int residualEnergyQ,
             coefficientsQ16,
@@ -322,7 +325,7 @@ internal static class SilkEncoderAnalysis
 
         if (encoder.UseInterpolatedNlsfs == 1 && encoder.FirstFrameAfterReset == 0 && encoder.SubframeCount == 4)
         {
-            BurgModified(
+            BurgModified<TK>(
                 out int temporaryEnergy,
                 out int temporaryEnergyQ,
                 temporaryQ16,
@@ -352,7 +355,7 @@ internal static class SilkEncoderAnalysis
             {
                 SilkEncoderMath.Interpolate(nlsf0Q15, encoder.PrevNlsfQ15, nlsfQ15, k, order);
                 SilkNlsf.ConvertToLpc(temporaryQ12, nlsf0Q15, order);
-                SilkEncoderMath.LpcAnalysisFilter(
+                TK.LpcAnalysisFilter(
                     lpcResidual, x, temporaryQ12, 2 * subframeLength, order);
 
                 SilkEncoderMath.SumSqrShift(
@@ -413,12 +416,13 @@ internal static class SilkEncoderAnalysis
     // ---------------------------------------------------------------------------------------
 
     /// <summary>Computes the noise shaping coefficients and initial gains.</summary>
-    internal static void NoiseShapeAnalysis(
+    internal static void NoiseShapeAnalysis<TK>(
         SilkEncoderState encoder,
         SilkEncoderControl control,
         ReadOnlySpan<short> pitchResidual,
         ReadOnlySpan<short> xBuffer,
         int frameOffset)
+        where TK : struct, ISilkEncoderKernels
     {
         int order = encoder.ShapingLpcOrder;
         int subframeLength = encoder.SubframeLength;
@@ -523,7 +527,7 @@ internal static class SilkEncoderAnalysis
             }
             else
             {
-                SilkEncoderMath.Autocorr(out scale, autocorrelation, windowed[..encoder.ShapeWinLength], encoder.ShapeWinLength, order + 1);
+                SilkEncoderMath.Autocorr<TK>(out scale, autocorrelation, windowed[..encoder.ShapeWinLength], encoder.ShapeWinLength, order + 1);
             }
 
             autocorrelation[0] = unchecked(autocorrelation[0] + Math.Max(
@@ -676,13 +680,14 @@ internal static class SilkEncoderAnalysis
     // ---------------------------------------------------------------------------------------
 
     /// <summary>Finds and quantizes the LTP coefficients of a voiced frame.</summary>
-    internal static void FindLtp(
+    internal static void FindLtp<TK>(
         SilkEncoderState encoder,
         SilkEncoderControl control,
         ReadOnlySpan<short> residual,
         ReadOnlySpan<int> lags,
         ReadOnlySpan<int> weightsQ15,
         out int ltPredCodGainQ7)
+        where TK : struct, ISilkEncoderKernels
     {
         const int order = SilkEncoderMath.LtpOrder;
         int subframeLength = encoder.SubframeLength;
@@ -715,10 +720,10 @@ internal static class SilkEncoderAnalysis
             }
 
             correlationShifts[k] = rrShifts;
-            CorrMatrix(
+            CorrMatrix<TK>(
                 residual[lagIndex..], subframeLength, order, LtpCorrelationHeadRoom,
                 correlationMatrix, ref correlationShifts[k]);
-            CorrVector(
+            CorrVector<TK>(
                 residual[lagIndex..], residual[rIndex..], subframeLength, order, correlationVector,
                 correlationShifts[k]);
 
@@ -1233,13 +1238,14 @@ internal static class SilkEncoderAnalysis
     // ---------------------------------------------------------------------------------------
 
     /// <summary>Runs the LPC/LTP analysis, NLSF quantization and residual energy measurement.</summary>
-    internal static void FindPredictionCoefficients(
+    internal static void FindPredictionCoefficients<TK>(
         SilkEncoderState encoder,
         SilkEncoderControl control,
         ReadOnlySpan<short> residual,
         ReadOnlySpan<short> xBuffer,
         int frameOffset,
         int conditionalCoding)
+        where TK : struct, ISilkEncoderKernels
     {
         int subframeCount = encoder.SubframeCount;
         int subframeLength = encoder.SubframeLength;
@@ -1268,7 +1274,7 @@ internal static class SilkEncoderAnalysis
 
         if (encoder.Indices.SignalType == 2)
         {
-            FindLtp(encoder, control, residual, control.PitchL, weightsQ15, out int ltPredCodGainQ7);
+            FindLtp<TK>(encoder, control, residual, control.PitchL, weightsQ15, out int ltPredCodGainQ7);
             control.LtPredCodGainQ7 = ltPredCodGainQ7;
             LtpScaleCtrl(encoder, control, conditionalCoding);
 
@@ -1320,11 +1326,11 @@ internal static class SilkEncoderAnalysis
                 14);
         }
 
-        FindLpc(encoder, nlsfQ15, lpcInPre, minInverseGainQ30);
+        FindLpc<TK>(encoder, nlsfQ15, lpcInPre, minInverseGainQ30);
         SilkNlsfEncoder.ProcessNlsfs(
             encoder, control.PredCoefQ12[0], control.PredCoefQ12[1], nlsfQ15);
 
-        ResidualEnergy(
+        ResidualEnergy<TK>(
             control.ResNrg, control.ResNrgQ, lpcInPre, control.PredCoefQ12, localGains,
             subframeLength, subframeCount, order);
 
@@ -1332,7 +1338,7 @@ internal static class SilkEncoderAnalysis
     }
 
     /// <summary>Computes the residual energy per subframe (Appendix A, <c>silk_residual_energy_FIX</c>).</summary>
-    internal static void ResidualEnergy(
+    internal static void ResidualEnergy<TK>(
         Span<int> energies,
         Span<int> energyQ,
         ReadOnlySpan<short> x,
@@ -1341,13 +1347,14 @@ internal static class SilkEncoderAnalysis
         int subframeLength,
         int subframeCount,
         int order)
+        where TK : struct, ISilkEncoderKernels
     {
         int offset = order + subframeLength;
         Span<short> lpcResidual = stackalloc short[(SilkEncoderMath.MaxFrameLength + (4 * SilkEncoderMath.MaxLpcOrder)) / 2 + 64];
         int xOffset = 0;
         for (int i = 0; i < subframeCount >> 1; i++)
         {
-            SilkEncoderMath.LpcAnalysisFilter(
+            TK.LpcAnalysisFilter(
                 lpcResidual, x[xOffset..], coefficientsQ12[i], (4 >> 1) * offset, order);
 
             int residualOffset = order;
@@ -1529,33 +1536,33 @@ internal static class SilkEncoderAnalysis
     // Correlation matrix helpers and LDL solve (silk/fixed/corrMatrix_FIX.c, solve_LS_FIX.c)
     // ---------------------------------------------------------------------------------------
 
-    private static void CorrVector(
+    private static void CorrVector<TK>(
         ReadOnlySpan<short> x, ReadOnlySpan<short> target, int length, int order, Span<int> output, int rightShifts)
+        where TK : struct, ISilkEncoderKernels
     {
+        if (rightShifts <= 0)
+        {
+            TK.CorrLags(target, x, order - 1, order, length, output);
+            return;
+        }
+
         int pointer = order - 1;
         for (int lag = 0; lag < order; lag++)
         {
-            if (rightShifts > 0)
+            int inner = 0;
+            for (int i = 0; i < length; i++)
             {
-                int inner = 0;
-                for (int i = 0; i < length; i++)
-                {
-                    inner += (x[pointer + i] * target[i]) >> rightShifts;
-                }
-
-                output[lag] = inner;
-            }
-            else
-            {
-                output[lag] = SilkEncoderMath.InnerProd(x[pointer..], target, length);
+                inner += (x[pointer + i] * target[i]) >> rightShifts;
             }
 
+            output[lag] = inner;
             pointer--;
         }
     }
 
-    private static void CorrMatrix(
+    private static void CorrMatrix<TK>(
         ReadOnlySpan<short> x, int length, int order, int headRoom, Span<int> matrix, ref int rightShifts)
+        where TK : struct, ISilkEncoderKernels
     {
         SilkEncoderMath.SumSqrShift(out int energy, out int localShifts, x[..(length + order - 1)]);
         int headRoomShifts = Math.Max(headRoom - SilkEncoderMath.Clz32(energy), 0);
@@ -1608,9 +1615,11 @@ internal static class SilkEncoderAnalysis
         }
         else
         {
+            Span<int> lagEnergies = stackalloc int[order];
+            TK.CorrLags(x[pointer1..], x, pointer2, order - 1, length, lagEnergies);
             for (int lag = 1; lag < order; lag++)
             {
-                energy = SilkEncoderMath.InnerProd(x[pointer1..], x[pointer2..], length);
+                energy = lagEnergies[lag - 1];
                 matrix[(lag * order) + 0] = energy;
                 matrix[lag] = energy;
                 for (int j = 1; j < order - lag; j++)
