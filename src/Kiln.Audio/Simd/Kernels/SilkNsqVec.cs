@@ -204,11 +204,26 @@ internal static class SilkNsqVec<TOps>
 
             // Short-term prediction, one multiply-accumulate per tap for all states.
             int lpcBase = LpcLength - 1 + i;
+            // Four independent accumulators break the serial dependency; modular addition is associative, so the sum is exact.
             Vector128<int> lpcAcc = predInit;
-            for (int j = 0; j < predOrder; j++)
+            Vector128<int> lpcAcc1 = Vector128<int>.Zero;
+            Vector128<int> lpcAcc2 = Vector128<int>.Zero;
+            Vector128<int> lpcAcc3 = Vector128<int>.Zero;
+            int tap = 0;
+            for (; tap <= predOrder - 4; tap += 4)
             {
-                lpcAcc = TOps.Smlawb(lpcAcc, Ld(lpc, lpcBase - j), predP[j]);
+                lpcAcc = TOps.Smlawb(lpcAcc, Ld(lpc, lpcBase - tap), predP[tap]);
+                lpcAcc1 = TOps.Smlawb(lpcAcc1, Ld(lpc, lpcBase - tap - 1), predP[tap + 1]);
+                lpcAcc2 = TOps.Smlawb(lpcAcc2, Ld(lpc, lpcBase - tap - 2), predP[tap + 2]);
+                lpcAcc3 = TOps.Smlawb(lpcAcc3, Ld(lpc, lpcBase - tap - 3), predP[tap + 3]);
             }
+
+            for (; tap < predOrder; tap++)
+            {
+                lpcAcc = TOps.Smlawb(lpcAcc, Ld(lpc, lpcBase - tap), predP[tap]);
+            }
+
+            lpcAcc = (lpcAcc + lpcAcc1) + (lpcAcc2 + lpcAcc3);
 
             Vector128<int> lpcPred = Vector128.ShiftLeft(lpcAcc, 4);
 

@@ -1288,3 +1288,32 @@ and `CopyState`; the right design is lanes = states), the CELT pulse coder (O(n*
 table rank), encoder spread rotation and Haar through `TK.Rotate`/`TK.Haar`, forward MDCT on the tier FFT with a
 vector fold and post-write, transient/TF/spread vector passes, the strided short-block IMDCT pre-rotation, and
 Burg's inner loops and `SumSqrShift`. The 3x SILK cx0 gap is mostly the deliberate four-state trellis.
+
+## ENC-NSQ-1: SILK encoder NSQ + analysis hot paths
+
+The delayed-decision quantizer (`SilkNsqDelayedDecision`) now runs one SIMD lane per trellis state
+(`SilkNsqVec<TOps>`, state-major SoA histories; the winner search and state replacement stay scalar). The
+SMLAWB is exact on arm64 via `sqdmulh` with the coefficient pre-shifted by 15, and a 16-bit split elsewhere, so
+every tier is bit-identical to the scalar reference. `CopyLane` copies only the live history instead of the whole
+state. The gain scaling and Burg's rows/correlations are on the kernel tiers too. The LPC accumulation uses four
+independent accumulators (no measurable change, kept because it is exact).
+
+Proof of identical output: `SilkNsqByteHashTests` (26 golden byte hashes recorded from the 130f5f3 baseline
+encoder, all tiers) and `SilkNsqLaneParityTests` (against a verbatim copy of the old class).
+
+| Config (us/frame, best of 7) | libopus | before | after | ratio before | ratio after |
+| --- | --- | --- | --- | --- | --- |
+| SILK WB mono 20k cx0 | 44.5 | 137.5 | 103.0 | 3.09 | 2.31 |
+| SILK WB mono 20k cx5 | 135.8 | 156.0 | 121.6 | 1.15 | 0.90 |
+| Hybrid FB mono 32k cx0 | 31.7 | 131.5 | 101.2 | 4.15 | 3.19 |
+| Hybrid FB mono 32k cx5 | 70.0 | 157.4 | 131.7 | 2.25 | 1.88 |
+
+NSQ stage (WB 20k): cx0 92.0 -> 59.0 us/frame, cx5 103.3 -> 71.3 us/frame (the stage includes every CBR
+rate-loop iteration).
+
+### Remaining gap
+
+WB 20k is high-rate (one trellis state), so cx0 cost is per-sample work, not trellis width: Kiln runs the warped
+shaping and delayed-decision path where libopus runs its plain greedy quantizer. A single-state fast path that is
+bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
+are what is left for cx0 and hybrid.
