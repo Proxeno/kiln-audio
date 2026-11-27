@@ -47,4 +47,8 @@ internal readonly partial struct Vector128Kernels : ISilkKernels
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Resample(ReadOnlySpan<float> history, ReadOnlySpan<float> bank, ReadOnlySpan<int> bankOffset, ReadOnlySpan<int> bankLength, int newest, int phase, int stepSamples, int stepPhase, int up, int count, Span<short> output) =>
         SilkVec<PortableSilkOps>.Resample(history, bank, bankOffset, bankLength, newest, phase, stepSamples, stepPhase, up, count, output);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int ResampleUp(ReadOnlySpan<float> history, ReadOnlySpan<float> bankT, int up, int length, int newest, int inputs, Span<short> output) =>
+        SilkVec<PortableSilkOps>.ResampleUp(history, bankT, up, length, newest, inputs, output);
 }

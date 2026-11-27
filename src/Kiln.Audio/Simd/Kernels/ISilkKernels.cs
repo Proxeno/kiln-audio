@@ -82,6 +82,23 @@ internal interface ISilkKernels
         ReadOnlySpan<short> left, ReadOnlySpan<short> right, Span<float> destination, int count, float scale);
 
     /// <summary>
+    /// The integer-ratio upsampler (output rate is <paramref name="up"/> times the input rate, 3, 4
+    /// or 6) over time lanes: every input sample yields <paramref name="up"/> outputs, one per
+    /// phase, and four consecutive input samples are processed per vector. The coefficients are
+    /// laid out <c>[tap][phase padded to 4 or 8]</c> (<c>bankT</c>). Returns the number of input
+    /// samples processed, a multiple of four; the caller finishes the rest with
+    /// <see cref="Resample"/>.
+    /// </summary>
+    static abstract int ResampleUp(
+        ReadOnlySpan<float> history,
+        ReadOnlySpan<float> bankT,
+        int up,
+        int length,
+        int newest,
+        int inputs,
+        Span<short> output);
+
+    /// <summary>
     /// Evaluates <paramref name="count"/> polyphase outputs: output <c>n</c> is the dot product of
     /// <c>bank[bankOffset[phase] ..]</c> (<c>bankLength[phase]</c> floats) with the history ending at
     /// <c>newest</c>, rounded to nearest even and saturated to 16 bits.
@@ -153,6 +170,18 @@ internal interface ISilkOps
 
     /// <summary>Computes <c>acc + (a * b)</c>, fused where the tier has it.</summary>
     static abstract Vector128<float> MulAdd(Vector128<float> acc, Vector128<float> a, Vector128<float> b);
+
+    /// <summary>Computes <c>acc + (x * c[0])</c>.</summary>
+    static abstract Vector128<float> MulAddLane0(Vector128<float> acc, Vector128<float> x, Vector128<float> c);
+
+    /// <summary>Computes <c>acc + (x * c[1])</c>.</summary>
+    static abstract Vector128<float> MulAddLane1(Vector128<float> acc, Vector128<float> x, Vector128<float> c);
+
+    /// <summary>Computes <c>acc + (x * c[2])</c>.</summary>
+    static abstract Vector128<float> MulAddLane2(Vector128<float> acc, Vector128<float> x, Vector128<float> c);
+
+    /// <summary>Computes <c>acc + (x * c[3])</c>.</summary>
+    static abstract Vector128<float> MulAddLane3(Vector128<float> acc, Vector128<float> x, Vector128<float> c);
 
     /// <summary>Returns <c>[a0 + a1, a2 + a3, b0 + b1, b2 + b3]</c>.</summary>
     static abstract Vector128<float> PairwiseAdd32(Vector128<float> a, Vector128<float> b);

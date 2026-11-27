@@ -187,4 +187,43 @@ internal static class SilkScalar
             }
         }
     }
+
+    /// <summary>The phase-padded width of the transposed coefficient layout for an upsampling factor.</summary>
+    internal static int UpPad(int up) => up == 6 ? 8 : 4;
+
+    internal static void ValidateResampleUp(
+        ReadOnlySpan<float> history, ReadOnlySpan<float> bankT, int up, int length, int newest, int inputs, Span<short> output)
+    {
+        if (up is not (3 or 4 or 6) || length <= 0 || (length & 3) != 0 || inputs < 0
+            || bankT.Length < length * UpPad(up) || output.Length < inputs * up
+            || (inputs > 0 && (newest - length + 1 < 0 || newest + inputs > history.Length)))
+        {
+            throw new ArgumentException("The upsampler block geometry is invalid.");
+        }
+    }
+
+    /// <summary>The scalar reference of <see cref="ISilkKernels.ResampleUp"/>.</summary>
+    internal static int ResampleUp(
+        ReadOnlySpan<float> history, ReadOnlySpan<float> bankT, int up, int length, int newest, int inputs, Span<short> output)
+    {
+        ValidateResampleUp(history, bankT, up, length, newest, inputs, output);
+        int pad = UpPad(up);
+        int done = inputs & ~3;
+        for (int j = 0; j < done; j++)
+        {
+            for (int p = 0; p < up; p++)
+            {
+                float sum = 0f;
+                for (int k = 0; k < length; k++)
+                {
+                    sum += history[newest + j - length + 1 + k] * bankT[(k * pad) + p];
+                }
+
+                float rounded = MathF.Round(sum);
+                output[(j * up) + p] = rounded > short.MaxValue ? short.MaxValue : rounded < short.MinValue ? short.MinValue : (short)rounded;
+            }
+        }
+
+        return done;
+    }
 }

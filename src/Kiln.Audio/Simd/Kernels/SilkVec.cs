@@ -620,4 +620,253 @@ internal static class SilkVec<T>
 
         return Vector128.Sum(a0 + a1);
     }
+
+    // ---- Integer-ratio upsampler over time lanes ----
+
+    /// <summary>Upsamples by 3, 4 or 6 with four input samples per vector, sharing every coefficient load across phases.</summary>
+    public static int ResampleUp(
+        ReadOnlySpan<float> history, ReadOnlySpan<float> bankT, int up, int length, int newest, int inputs, Span<short> output)
+    {
+        SilkScalar.ValidateResampleUp(history, bankT, up, length, newest, inputs, output);
+        ref float h = ref MemoryMarshal.GetReference(history);
+        ref float c = ref MemoryMarshal.GetReference(bankT);
+        ref short o = ref MemoryMarshal.GetReference(output);
+        int done = inputs & ~3;
+        int j = 0;
+        if (up == 6)
+        {
+            for (; j + 8 <= done; j += 8)
+            {
+                Up6Pair(ref Unsafe.Add(ref h, newest + j - length + 1), ref c, length, ref Unsafe.Add(ref o, j * 6));
+            }
+
+            for (; j < done; j += 4)
+            {
+                Up6Single(ref Unsafe.Add(ref h, newest + j - length + 1), ref c, length, ref Unsafe.Add(ref o, j * 6));
+            }
+        }
+        else if (up == 4)
+        {
+            for (; j + 8 <= done; j += 8)
+            {
+                Up4Pair(ref Unsafe.Add(ref h, newest + j - length + 1), ref c, length, ref Unsafe.Add(ref o, j * 4));
+            }
+
+            for (; j < done; j += 4)
+            {
+                Up4Single(ref Unsafe.Add(ref h, newest + j - length + 1), ref c, length, ref Unsafe.Add(ref o, j * 4));
+            }
+        }
+        else
+        {
+            for (; j + 8 <= done; j += 8)
+            {
+                Up3Pair(ref Unsafe.Add(ref h, newest + j - length + 1), ref c, length, ref Unsafe.Add(ref o, j * 3));
+            }
+
+            for (; j < done; j += 4)
+            {
+                Up3Single(ref Unsafe.Add(ref h, newest + j - length + 1), ref c, length, ref Unsafe.Add(ref o, j * 3));
+            }
+        }
+
+        return done;
+    }
+
+    private static void Up6Pair(ref float x, ref float c, int length, ref short o)
+    {
+        Vector128<float> a0 = default, a1 = default, a2 = default, a3 = default, a4 = default, a5 = default;
+        Vector128<float> b0 = default, b1 = default, b2 = default, b3 = default, b4 = default, b5 = default;
+        for (int k = 0; k < length; k++)
+        {
+            Vector128<float> xa = Vector128.LoadUnsafe(ref x, (nuint)k);
+            Vector128<float> xb = Vector128.LoadUnsafe(ref x, (nuint)(k + 4));
+            Vector128<float> c0 = Vector128.LoadUnsafe(ref c, (nuint)(8 * k));
+            Vector128<float> c1 = Vector128.LoadUnsafe(ref c, (nuint)((8 * k) + 4));
+            a0 = T.MulAddLane0(a0, xa, c0);
+            b0 = T.MulAddLane0(b0, xb, c0);
+            a1 = T.MulAddLane1(a1, xa, c0);
+            b1 = T.MulAddLane1(b1, xb, c0);
+            a2 = T.MulAddLane2(a2, xa, c0);
+            b2 = T.MulAddLane2(b2, xb, c0);
+            a3 = T.MulAddLane3(a3, xa, c0);
+            b3 = T.MulAddLane3(b3, xb, c0);
+            a4 = T.MulAddLane0(a4, xa, c1);
+            b4 = T.MulAddLane0(b4, xb, c1);
+            a5 = T.MulAddLane1(a5, xa, c1);
+            b5 = T.MulAddLane1(b5, xb, c1);
+        }
+
+        Store6(a0, a1, a2, a3, a4, a5, ref o);
+        Store6(b0, b1, b2, b3, b4, b5, ref Unsafe.Add(ref o, 24));
+    }
+
+    private static void Up6Single(ref float x, ref float c, int length, ref short o)
+    {
+        Vector128<float> a0 = default, a1 = default, a2 = default, a3 = default, a4 = default, a5 = default;
+        for (int k = 0; k < length; k++)
+        {
+            Vector128<float> xa = Vector128.LoadUnsafe(ref x, (nuint)k);
+            Vector128<float> c0 = Vector128.LoadUnsafe(ref c, (nuint)(8 * k));
+            Vector128<float> c1 = Vector128.LoadUnsafe(ref c, (nuint)((8 * k) + 4));
+            a0 = T.MulAddLane0(a0, xa, c0);
+            a1 = T.MulAddLane1(a1, xa, c0);
+            a2 = T.MulAddLane2(a2, xa, c0);
+            a3 = T.MulAddLane3(a3, xa, c0);
+            a4 = T.MulAddLane0(a4, xa, c1);
+            a5 = T.MulAddLane1(a5, xa, c1);
+        }
+
+        Store6(a0, a1, a2, a3, a4, a5, ref o);
+    }
+
+    private static void Up4Pair(ref float x, ref float c, int length, ref short o)
+    {
+        Vector128<float> a0 = default, a1 = default, a2 = default, a3 = default;
+        Vector128<float> b0 = default, b1 = default, b2 = default, b3 = default;
+        for (int k = 0; k < length; k++)
+        {
+            Vector128<float> xa = Vector128.LoadUnsafe(ref x, (nuint)k);
+            Vector128<float> xb = Vector128.LoadUnsafe(ref x, (nuint)(k + 4));
+            Vector128<float> c0 = Vector128.LoadUnsafe(ref c, (nuint)(4 * k));
+            a0 = T.MulAddLane0(a0, xa, c0);
+            b0 = T.MulAddLane0(b0, xb, c0);
+            a1 = T.MulAddLane1(a1, xa, c0);
+            b1 = T.MulAddLane1(b1, xb, c0);
+            a2 = T.MulAddLane2(a2, xa, c0);
+            b2 = T.MulAddLane2(b2, xb, c0);
+            a3 = T.MulAddLane3(a3, xa, c0);
+            b3 = T.MulAddLane3(b3, xb, c0);
+        }
+
+        Store4(a0, a1, a2, a3, ref o);
+        Store4(b0, b1, b2, b3, ref Unsafe.Add(ref o, 16));
+    }
+
+    private static void Up4Single(ref float x, ref float c, int length, ref short o)
+    {
+        Vector128<float> a0 = default, a1 = default, a2 = default, a3 = default;
+        for (int k = 0; k < length; k++)
+        {
+            Vector128<float> xa = Vector128.LoadUnsafe(ref x, (nuint)k);
+            Vector128<float> c0 = Vector128.LoadUnsafe(ref c, (nuint)(4 * k));
+            a0 = T.MulAddLane0(a0, xa, c0);
+            a1 = T.MulAddLane1(a1, xa, c0);
+            a2 = T.MulAddLane2(a2, xa, c0);
+            a3 = T.MulAddLane3(a3, xa, c0);
+        }
+
+        Store4(a0, a1, a2, a3, ref o);
+    }
+
+    private static void Up3Pair(ref float x, ref float c, int length, ref short o)
+    {
+        Vector128<float> a0 = default, a1 = default, a2 = default;
+        Vector128<float> b0 = default, b1 = default, b2 = default;
+        for (int k = 0; k < length; k++)
+        {
+            Vector128<float> xa = Vector128.LoadUnsafe(ref x, (nuint)k);
+            Vector128<float> xb = Vector128.LoadUnsafe(ref x, (nuint)(k + 4));
+            Vector128<float> c0 = Vector128.LoadUnsafe(ref c, (nuint)(4 * k));
+            a0 = T.MulAddLane0(a0, xa, c0);
+            b0 = T.MulAddLane0(b0, xb, c0);
+            a1 = T.MulAddLane1(a1, xa, c0);
+            b1 = T.MulAddLane1(b1, xb, c0);
+            a2 = T.MulAddLane2(a2, xa, c0);
+            b2 = T.MulAddLane2(b2, xb, c0);
+        }
+
+        Store3(a0, a1, a2, ref o);
+        Store3(b0, b1, b2, ref Unsafe.Add(ref o, 12));
+    }
+
+    private static void Up3Single(ref float x, ref float c, int length, ref short o)
+    {
+        Vector128<float> a0 = default, a1 = default, a2 = default;
+        for (int k = 0; k < length; k++)
+        {
+            Vector128<float> xa = Vector128.LoadUnsafe(ref x, (nuint)k);
+            Vector128<float> c0 = Vector128.LoadUnsafe(ref c, (nuint)(4 * k));
+            a0 = T.MulAddLane0(a0, xa, c0);
+            a1 = T.MulAddLane1(a1, xa, c0);
+            a2 = T.MulAddLane2(a2, xa, c0);
+        }
+
+        Store3(a0, a1, a2, ref o);
+    }
+
+    /// <summary>Four consecutive input samples times six phases: transposes to time-major, rounds, saturates, stores 24 shorts.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Store6(
+        Vector128<float> p0, Vector128<float> p1, Vector128<float> p2, Vector128<float> p3, Vector128<float> p4, Vector128<float> p5, ref short o)
+    {
+        Vector128<float> z01l = T.ZipLow32(p0, p1);
+        Vector128<float> z01h = T.ZipHigh32(p0, p1);
+        Vector128<float> z23l = T.ZipLow32(p2, p3);
+        Vector128<float> z23h = T.ZipHigh32(p2, p3);
+        Vector128<float> z45l = T.ZipLow32(p4, p5);
+        Vector128<float> z45h = T.ZipHigh32(p4, p5);
+
+        // time j: [p0 p1 p2 p3] then [p4 p5].
+        Vector128<int> t0 = T.RoundToInt(Vector128.Create(z01l.GetLower(), z23l.GetLower()));
+        Vector128<int> t1 = T.RoundToInt(Vector128.Create(z01l.GetUpper(), z23l.GetUpper()));
+        Vector128<int> t2 = T.RoundToInt(Vector128.Create(z01h.GetLower(), z23h.GetLower()));
+        Vector128<int> t3 = T.RoundToInt(Vector128.Create(z01h.GetUpper(), z23h.GetUpper()));
+        Vector128<int> q0 = T.RoundToInt(Vector128.Create(z45l.GetLower(), z45l.GetLower()));
+        Vector128<int> q1 = T.RoundToInt(Vector128.Create(z45l.GetUpper(), z45l.GetUpper()));
+        Vector128<int> q2 = T.RoundToInt(Vector128.Create(z45h.GetLower(), z45h.GetLower()));
+        Vector128<int> q3 = T.RoundToInt(Vector128.Create(z45h.GetUpper(), z45h.GetUpper()));
+        Put6(T.NarrowSat(t0, q0), ref o);
+        Put6(T.NarrowSat(t1, q1), ref Unsafe.Add(ref o, 6));
+        Put6(T.NarrowSat(t2, q2), ref Unsafe.Add(ref o, 12));
+        Put6(T.NarrowSat(t3, q3), ref Unsafe.Add(ref o, 18));
+    }
+
+    /// <summary>Stores shorts 0..5 of a vector (a 64-bit and a 32-bit store).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Put6(Vector128<short> v, ref short o)
+    {
+        v.GetLower().StoreUnsafe(ref o);
+        Unsafe.WriteUnaligned(ref Unsafe.As<short, byte>(ref Unsafe.Add(ref o, 4)), v.AsInt32().GetElement(2));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Store4(Vector128<float> p0, Vector128<float> p1, Vector128<float> p2, Vector128<float> p3, ref short o)
+    {
+        Vector128<float> z01l = T.ZipLow32(p0, p1);
+        Vector128<float> z01h = T.ZipHigh32(p0, p1);
+        Vector128<float> z23l = T.ZipLow32(p2, p3);
+        Vector128<float> z23h = T.ZipHigh32(p2, p3);
+        Vector128<int> t0 = T.RoundToInt(Vector128.Create(z01l.GetLower(), z23l.GetLower()));
+        Vector128<int> t1 = T.RoundToInt(Vector128.Create(z01l.GetUpper(), z23l.GetUpper()));
+        Vector128<int> t2 = T.RoundToInt(Vector128.Create(z01h.GetLower(), z23h.GetLower()));
+        Vector128<int> t3 = T.RoundToInt(Vector128.Create(z01h.GetUpper(), z23h.GetUpper()));
+        T.NarrowSat(t0, t1).StoreUnsafe(ref o);
+        T.NarrowSat(t2, t3).StoreUnsafe(ref Unsafe.Add(ref o, 8));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Store3(Vector128<float> p0, Vector128<float> p1, Vector128<float> p2, ref short o)
+    {
+        Vector128<float> z01l = T.ZipLow32(p0, p1);
+        Vector128<float> z01h = T.ZipHigh32(p0, p1);
+        Vector128<float> z2l = T.ZipLow32(p2, p2);
+        Vector128<float> z2h = T.ZipHigh32(p2, p2);
+        Vector128<int> t0 = T.RoundToInt(Vector128.Create(z01l.GetLower(), z2l.GetLower()));
+        Vector128<int> t1 = T.RoundToInt(Vector128.Create(z01l.GetUpper(), z2l.GetUpper()));
+        Vector128<int> t2 = T.RoundToInt(Vector128.Create(z01h.GetLower(), z2h.GetLower()));
+        Vector128<int> t3 = T.RoundToInt(Vector128.Create(z01h.GetUpper(), z2h.GetUpper()));
+        Put3(T.NarrowSat(t0, t0), ref o);
+        Put3(T.NarrowSat(t1, t1), ref Unsafe.Add(ref o, 3));
+        Put3(T.NarrowSat(t2, t2), ref Unsafe.Add(ref o, 6));
+        Put3(T.NarrowSat(t3, t3), ref Unsafe.Add(ref o, 9));
+    }
+
+    /// <summary>Stores shorts 0..2 of a vector (a 32-bit and a 16-bit store).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Put3(Vector128<short> v, ref short o)
+    {
+        Unsafe.WriteUnaligned(ref Unsafe.As<short, byte>(ref o), v.AsInt32().GetElement(0));
+        Unsafe.Add(ref o, 2) = v.GetElement(2);
+    }
 }

@@ -108,6 +108,22 @@ internal readonly struct PortableSilkOps : ISilkOps
         PortableOps.UnzipEven(a, b) + PortableOps.UnzipOdd(a, b);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane0(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        acc + (x * Vector128.Shuffle(c, Vector128.Create(0, 0, 0, 0)));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane1(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        acc + (x * Vector128.Shuffle(c, Vector128.Create(1, 1, 1, 1)));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane2(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        acc + (x * Vector128.Shuffle(c, Vector128.Create(2, 2, 2, 2)));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane3(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        acc + (x * Vector128.Shuffle(c, Vector128.Create(3, 3, 3, 3)));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<int> RoundToInt(Vector128<float> value) =>
         Vector128.ConvertToInt32(Vector128.Round(value, MidpointRounding.ToEven));
 }
@@ -184,6 +200,22 @@ internal readonly struct ArmSilkOps : ISilkOps
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<float> PairwiseAdd32(Vector128<float> a, Vector128<float> b) => AdvSimd.Arm64.AddPairwise(a, b);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane0(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 0);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane1(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 1);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane2(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 2);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane3(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        AdvSimd.FusedMultiplyAddBySelectedScalar(acc, x, c, 3);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<int> RoundToInt(Vector128<float> value) => AdvSimd.ConvertToInt32RoundToEven(value);
@@ -277,6 +309,22 @@ internal readonly struct X86SilkOps : ISilkOps
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<float> PairwiseAdd32(Vector128<float> a, Vector128<float> b) => Sse3.HorizontalAdd(a, b);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane0(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        Fma.MultiplyAdd(x, Sse.Shuffle(c, c, 0x00), acc);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane1(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        Fma.MultiplyAdd(x, Sse.Shuffle(c, c, 0x55), acc);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane2(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        Fma.MultiplyAdd(x, Sse.Shuffle(c, c, 0xAA), acc);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector128<float> MulAddLane3(Vector128<float> acc, Vector128<float> x, Vector128<float> c) =>
+        Fma.MultiplyAdd(x, Sse.Shuffle(c, c, 0xFF), acc);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Vector128<int> RoundToInt(Vector128<float> value) => Sse2.ConvertToVector128Int32(value);

@@ -57,6 +57,11 @@ internal sealed class SilkResampler
 
     private readonly AudioKernelTier _tier;
 
+    // Transposed coefficients [tap][phase] for the integer-ratio upsampler (down == 1, up 3, 4 or 6);
+    // empty, with _upLength 0, when the ratio does not qualify.
+    private readonly float[] _bankT = [];
+    private readonly int _upLength;
+
     private readonly int[] _phaseLength;
     private readonly int[] _phaseOffset;
     private readonly double[] _coefficients;
@@ -173,6 +178,20 @@ internal sealed class SilkResampler
             for (int tap = 0; tap < length; tap++)
             {
                 _bank[_bankOffset[phase] + padded - 1 - tap] = (float)_coefficients[_phaseOffset[phase] + tap];
+            }
+        }
+
+        if (_down == 1 && _up is 3 or 4 or 6 && Array.TrueForAll(_bankLength, length => length == _bankLength[0]))
+        {
+            int pad = _up == 6 ? 8 : 4;
+            _upLength = _bankLength[0];
+            _bankT = new float[_upLength * pad];
+            for (int phase = 0; phase < _up; phase++)
+            {
+                for (int tap = 0; tap < _upLength; tap++)
+                {
+                    _bankT[(tap * pad) + phase] = _bank[_bankOffset[phase] + tap];
+                }
             }
         }
 
@@ -299,8 +318,28 @@ internal sealed class SilkResampler
         int phase = (int)(index - (newestAbsolute * _up));
         int newest = history + (int)(newestAbsolute - consumedBefore);
 
-        TK.Resample(
-            _buffer, _bank, _bankOffset, _bankLength, newest, phase, _down / _up, _down % _up, _up, count, output);
+        int fast = 0;
+        if (_upLength > 0 && phase == 0 && count == input.Length * _up)
+        {
+            fast = TK.ResampleUp(_buffer, _bankT, _up, _upLength, newest, input.Length, output);
+        }
+
+        int done = fast * _up;
+        if (done < count)
+        {
+            TK.Resample(
+                _buffer,
+                _bank,
+                _bankOffset,
+                _bankLength,
+                newest + fast,
+                phase,
+                _down / _up,
+                _down % _up,
+                _up,
+                count - done,
+                output[done..]);
+        }
 
         // Carry the newest samples as the next block's history.
         buffer.Slice(input.Length, history).CopyTo(buffer);

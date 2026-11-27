@@ -398,6 +398,58 @@ public class SilkKernelTierParityTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(Tiers))]
+    public void Upsampler_kernel_matches_scalar_within_one_step(int tier) => With((AudioKernelTier)tier, new ResampleUpBody());
+
+    private sealed class ResampleUpBody : ITierBody
+    {
+        public void Run<TK>()
+            where TK : struct, ISilkKernels
+        {
+            var rng = new Random(8);
+            foreach (int up in new[] { 3, 4, 6 })
+            {
+                int pad = up == 6 ? 8 : 4;
+                foreach (int length in new[] { 8, 24, 88 })
+                {
+                    var bankT = new float[length * pad];
+                    for (int i = 0; i < bankT.Length; i++)
+                    {
+                        bankT[i] = (float)((rng.NextDouble() - 0.4) * 0.2);
+                    }
+
+                    var history = new float[length + 400];
+                    for (int i = 0; i < history.Length; i++)
+                    {
+                        history[i] = rng.Next(-32768, 32768);
+                    }
+
+                    for (int i = 60; i < 90; i++)
+                    {
+                        history[i] = i % 2 == 0 ? 32767 : -32768;
+                    }
+
+                    foreach (int inputs in new[] { 0, 3, 4, 8, 12, 20, 37, 160 })
+                    {
+                        int newest = length + 5;
+                        var expected = new short[inputs * up];
+                        var actual = new short[inputs * up];
+                        int expectedDone = ScalarKernels.ResampleUp(history, bankT, up, length, newest, inputs, expected);
+                        int actualDone = TK.ResampleUp(history, bankT, up, length, newest, inputs, actual);
+                        Assert.Equal(expectedDone, actualDone);
+                        for (int i = 0; i < expectedDone * up; i++)
+                        {
+                            Assert.True(
+                                Math.Abs(expected[i] - actual[i]) <= 1,
+                                $"up {up} length {length} inputs {inputs} sample {i}: {expected[i]} vs {actual[i]}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private sealed class ResampleBody : ITierBody
     {
         public void Run<TK>()
