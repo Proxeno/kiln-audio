@@ -295,20 +295,18 @@ internal sealed partial class SilkSynthesis
         {
             randSeed = SilkFixedPoint.Rand(randSeed);
             int excitation = SilkFixedPoint.Lshift(frame.Pulses[i], 14);
-            if (excitation > 0)
-            {
-                excitation -= 80 << 4;
-            }
-            else if (excitation < 0)
-            {
-                excitation += 80 << 4;
-            }
+
+            // Branch-free sign handling: sign(x) = (x >> 31) | ((uint)(-x) >> 31) is -1, 0 or 1,
+            // so the 80<<4 offset is subtracted for a positive pulse, added for a negative one and
+            // left alone for a zero one, exactly as the three-way branch did.
+            int sign = (excitation >> 31) | (int)((uint)(-excitation) >> 31);
+            excitation = unchecked(excitation - (sign * (80 << 4)));
 
             excitation = SilkFixedPoint.Add(excitation, SilkFixedPoint.Lshift(quantizationOffsetQ10, 4));
-            if (randSeed < 0)
-            {
-                excitation = -excitation;
-            }
+
+            // Negate when the random sign bit is set: (x ^ -1) - (-1) == -x, with no branch.
+            int negate = randSeed >> 31;
+            excitation = unchecked((excitation ^ negate) - negate);
 
             state.ExcQ14[i] = excitation;
             randSeed = SilkFixedPoint.Add(randSeed, frame.Pulses[i]);
