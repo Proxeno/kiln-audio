@@ -609,6 +609,35 @@ gain), explicit-stack theta recursion and closed-form N=3/4 unranking (the leaf 
 the two range-decoder divides, the data-dependent unrank branches and `1/sqrt`; none of these is
 removed by restructuring). Remaining gap on 01/07 is about 0.9 us/frame decode-side; 11 is 3 % over.
 
+## PERF-8: division-free range decode (measured, no gain, not merged as code)
+
+Same-window measurement on the M5 Max (`micro decode`, and `scripts/bench-libopus-inproc.sh` in the
+same lock window). Ratio is Kiln (decode + synthesis + int16) over libopus 1.5.2 in-process.
+
+| Vector | Baseline decode | Reciprocal + rsqrt table decode | Ratio (both) |
+| --- | --- | --- | --- |
+| 01 | 5.78 us | 5.82 / 5.81 us | 1.14 |
+| 07 | 3.06 us | 3.07 / 3.07 us | 1.13 |
+| 11 | 14.33 us | 14.62 / 14.49 us | 1.02 |
+
+Tried, bit-exact, and measured as a pair:
+
+- `Decode`: `rng / ft` for `2 <= ft <= 256` (every `DecodeUInt` chunk and small theta totals)
+  replaced by `high64(rng * (floor((2^64-1)/ft) + 1))`. Exact for every 32-bit dividend
+  (`n*d < 2^64` keeps the rounding excess under the `1/d` gap); tested exhaustively below 2^20 and on
+  both sides of every multiple near 2^32 for all 255 divisors.
+- `1 / sqrt(energy)` in `AlgUnquant` replaced by a 2048-entry table built with the same expression
+  (bit-identical).
+
+Result: no measurable change (within 1 % noise, 11 slightly worse). The 32-bit integer divide and
+the float sqrt/divide are cheap on this core, so the per-leaf chain is not latency-bound on them.
+The code was therefore not kept. Not tried, by analysis: a float-estimate `val / ext` (needs
+`frecpe` plus two Newton steps, about 25 cycles, no better than the divide) and
+`ReciprocalSqrtEstimate` (same cost as `sqrt` + `div`). The remaining 0.6-0.9 us/frame on 01/07 is
+therefore not in the divides; the next step needs a cycle-level profile (Instruments) of
+`QuantBand`/`Cwrsi` branch mispredicts rather than more arithmetic substitution. The target of 1.0
+is not met on 01/07; vector 11 is within 2 %.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
