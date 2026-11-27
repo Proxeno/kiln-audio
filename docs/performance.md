@@ -777,26 +777,26 @@ we beat libopus.
 | Band | Frame | kbps | ours | libopus | gap |
 | ---- | ----- | ---- | ---- | ------- | --- |
 | NB | 20 ms | 8  | 4.01 | 3.60 | +0.41 |
-| NB | 60 ms | 8  | 4.10 | 3.64 | +0.45 |
-| NB | 20 ms | 12 | 5.36 | 5.51 | -0.15 |
+| NB | 60 ms | 8  | 4.10 | 3.64 | +0.46 |
+| NB | 20 ms | 12 | 5.35 | 5.51 | -0.16 |
 | NB | 60 ms | 12 | 5.44 | 5.49 | -0.05 |
 | MB | 20 ms | 8  | 4.06 | 2.77 | +1.29 |
-| MB | 60 ms | 8  | 4.12 | 2.81 | +1.31 |
-| MB | 20 ms | 12 | 5.33 | 5.01 | +0.33 |
-| MB | 60 ms | 12 | 5.41 | 4.84 | +0.57 |
-| MB | 20 ms | 20 | 6.52 | 6.73 | -0.21 |
-| MB | 60 ms | 20 | 6.41 | 6.72 | -0.31 |
+| MB | 60 ms | 8  | 4.12 | 2.81 | +1.30 |
+| MB | 20 ms | 12 | 5.34 | 5.01 | +0.33 |
+| MB | 60 ms | 12 | 5.40 | 4.84 | +0.56 |
+| MB | 20 ms | 20 | 6.53 | 6.73 | -0.21 |
+| MB | 60 ms | 20 | 6.42 | 6.72 | -0.30 |
 | WB | 20 ms | 8  | 3.92 | 1.71 | +2.21 |
-| WB | 60 ms | 8  | 4.04 | 1.77 | +2.27 |
-| WB | 20 ms | 12 | 5.03 | 4.50 | +0.53 |
+| WB | 60 ms | 8  | 4.05 | 1.77 | +2.28 |
+| WB | 20 ms | 12 | 5.01 | 4.50 | +0.52 |
 | WB | 60 ms | 12 | 5.06 | 4.37 | +0.69 |
 | WB | 20 ms | 20 | 6.44 | 6.44 | -0.00 |
 | WB | 60 ms | 20 | 6.35 | 6.43 | -0.08 |
 
 SILK-QUAL-2 improved every complexity-0 configuration, by 0.24-0.74 dB, with no regressions. Ten of
-sixteen now meet the target outright; four more are within 0.15 dB (WB 20 ms 20 kbps is a measured
-tie, NB 60 ms 12 kbps -0.05, WB 60 ms 20 kbps -0.08, NB 20 ms 12 kbps -0.15). MB 20 kbps remains
-0.21-0.31 dB behind. Before SILK-QUAL-1, all sixteen were behind by 0.01-0.90 dB.
+sixteen now meet the target outright; four more are within 0.16 dB (WB 20 ms 20 kbps is a measured
+tie, NB 60 ms 12 kbps -0.05, WB 60 ms 20 kbps -0.08, NB 20 ms 12 kbps -0.16). MB 20 kbps remains
+0.21-0.30 dB behind. Before SILK-QUAL-1, all sixteen were behind by 0.01-0.90 dB.
 
 ### Complexity 5 and 10
 
@@ -871,8 +871,8 @@ same fixed-point kernels and add no allocations.
 
 ### Remaining gap and next ideas
 
-SILK-QUAL-2 leaves one clear gap: MB 20 kbps, 0.21 dB (20 ms) and 0.31 dB (60 ms) behind libopus.
-NB 12 kbps (0.15/0.05 dB), WB 20 kbps 60 ms (0.08 dB) and WB 20 kbps 20 ms (a tie) are close. The
+SILK-QUAL-2 leaves one clear gap: MB 20 kbps, 0.21 dB (20 ms) and 0.30 dB (60 ms) behind libopus.
+NB 12 kbps (0.16/0.05 dB), WB 20 kbps 60 ms (0.08 dB) and WB 20 kbps 20 ms (a tie) are close. The
 gap is flat across complexity, so it is not the quantizer search; the sweeps in SILK-QUAL-2 ruled
 out the trellis width, warping, lambda, the SNR threshold, the quantization offset, NLSF
 interpolation, MSVQ survivors and the shaping strengths as causes at MB 20 kbps. What remains:
