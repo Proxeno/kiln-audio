@@ -2118,8 +2118,14 @@ internal sealed class CeltDecoder
         int factor = CeltTables.SpreadFactor[spread - 1];
         float gain = (float)length / (float)(length + (factor * k));
         float theta = 0.5f * (gain * gain);
-        float c = (float)Math.Cos(0.5f * Math.PI * theta);
-        float s = (float)Math.Cos(0.5f * Math.PI * (1f - theta));
+
+        // PERF-4: cos(pi/2 * theta) and cos(pi/2 * (1 - theta)) are the cosine and sine of the
+        // same angle, so one SinCos replaces two range reductions. The difference from the two
+        // separate calls is a last-bit rounding of the argument, far below the CELT tolerance.
+        double angle = 0.5 * Math.PI * theta;
+        (double sin, double cos) = Math.SinCos(angle);
+        float c = (float)cos;
+        float s = (float)sin;
         int stride2 = 0;
         if (length >= 8 * stride)
         {
