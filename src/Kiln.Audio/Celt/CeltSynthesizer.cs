@@ -1,5 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt;
@@ -401,15 +403,55 @@ internal sealed partial class CeltSynthesizer
             Overlap);
 
     /// <summary>Applies the §4.3.7.2 de-emphasis filter and writes the interleaved output.</summary>
+    /// <remarks>
+    /// PERF-5: the filter is <c>y[j] = x[j] + m</c>, <c>m = a * y[j]</c>. The serial chain is one
+    /// multiply and one add per sample. Four samples are handled per step instead: the
+    /// state-independent partial sums <c>P</c> (the response to the four inputs alone) are off the
+    /// critical path, and the state only enters as <c>a^i * m</c>, so the loop-carried chain is a
+    /// single multiply-add per four samples. The result differs from the sample-by-sample loop only
+    /// by float reassociation.
+    /// </remarks>
     private void Deemphasise(int samples, int channel, Span<float> pcmOut, int channels)
     {
         float[] history = _history[channel];
         int baseIndex = HistorySize - samples;
         float memory = _deemphasis[channel];
-        for (int j = 0; j < samples; j++)
+        const float a = CeltTables.DeemphasisCoefficient;
+        const float a2 = a * a;
+        const float a3 = a2 * a;
+        const float a4 = a2 * a2;
+        const float inv = 1f / CeltTables.SignalScale;
+        if (pcmOut.Length < ((samples - 1) * channels) + channel + 1)
         {
-            float value = DeemphasiseSample(history[baseIndex + j], ref memory);
-            pcmOut[(j * channels) + channel] = value * (1f / CeltTables.SignalScale);
+            throw new ArgumentException("The PCM destination is too short.", nameof(pcmOut));
+        }
+
+        ref float src = ref history[baseIndex];
+        ref float dst = ref MemoryMarshal.GetReference(pcmOut);
+        int j = 0;
+        int outIndex = channel;
+        for (; j + 4 <= samples; j += 4)
+        {
+            float x0 = Unsafe.Add(ref src, j);
+            float x1 = Unsafe.Add(ref src, j + 1);
+            float x2 = Unsafe.Add(ref src, j + 2);
+            float x3 = Unsafe.Add(ref src, j + 3);
+            float p1 = x1 + (a * x0);
+            float p2 = x2 + (a * p1);
+            float p3 = x3 + (a * p2);
+            Unsafe.Add(ref dst, outIndex) = (x0 + memory) * inv;
+            Unsafe.Add(ref dst, outIndex + channels) = (p1 + (a * memory)) * inv;
+            Unsafe.Add(ref dst, outIndex + (2 * channels)) = (p2 + (a2 * memory)) * inv;
+            Unsafe.Add(ref dst, outIndex + (3 * channels)) = (p3 + (a3 * memory)) * inv;
+            memory = (a * p3) + (a4 * memory);
+            outIndex += 4 * channels;
+        }
+
+        for (; j < samples; j++)
+        {
+            float value = DeemphasiseSample(Unsafe.Add(ref src, j), ref memory);
+            Unsafe.Add(ref dst, outIndex) = value * inv;
+            outIndex += channels;
         }
 
         _deemphasis[channel] = memory;

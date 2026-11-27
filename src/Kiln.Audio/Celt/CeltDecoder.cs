@@ -2,6 +2,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Kiln.Audio.Entropy;
 using Kiln.Audio.Simd;
 
@@ -2193,23 +2194,98 @@ internal sealed class CeltDecoder
     }
 
     /// <summary>Applies one pass of the spread rotation (RFC 6716 §4.3.4.3).</summary>
+    /// <remarks>
+    /// PERF-5: the forward and backward sweeps are recurrences with distance <c>stride</c>. For
+    /// stride 1 the carried value stays in a register instead of being stored and reloaded (a
+    /// store-forwarding round trip per sample). For stride &gt;= 4 four consecutive iterations are
+    /// independent, so they run as one <see cref="Vector128{T}"/> step. Every path performs the
+    /// same multiplies and adds in the same order, so the result is bit-identical to the scalar
+    /// reference loop.
+    /// </remarks>
     private static void ExpRotation1(Span<float> x, int length, int stride, float c, float s)
     {
-        int i;
-        for (i = 0; i < length - stride; i++)
+        if (length <= stride)
         {
-            float x1 = x[i];
-            float x2 = x[i + stride];
-            x[i + stride] = (c * x2) + (s * x1);
-            x[i] = (c * x1) - (s * x2);
+            return;
         }
 
-        for (i = length - (2 * stride) - 1; i >= 0; i--)
+        ref float r = ref MemoryMarshal.GetReference(x);
+        if (x.Length < length)
         {
-            float x1 = x[i];
-            float x2 = x[i + stride];
-            x[i + stride] = (c * x2) + (s * x1);
-            x[i] = (c * x1) - (s * x2);
+            throw new ArgumentException("The vector is shorter than length.", nameof(x));
+        }
+
+        int i;
+        if (stride == 1)
+        {
+            float carry = r;
+            for (i = 0; i < length - 1; i++)
+            {
+                float x2 = Unsafe.Add(ref r, i + 1);
+                Unsafe.Add(ref r, i) = (c * carry) - (s * x2);
+                carry = (c * x2) + (s * carry);
+            }
+
+            Unsafe.Add(ref r, length - 1) = carry;
+            if (length >= 3)
+            {
+                carry = Unsafe.Add(ref r, length - 2);
+                for (i = length - 3; i >= 0; i--)
+                {
+                    float x1 = Unsafe.Add(ref r, i);
+                    Unsafe.Add(ref r, i + 1) = (c * carry) + (s * x1);
+                    carry = (c * x1) - (s * carry);
+                }
+
+                r = carry;
+            }
+
+            return;
+        }
+
+        i = 0;
+        if (stride >= Vector128<float>.Count && SimdConfig.UseSimd)
+        {
+            Vector128<float> cv = Vector128.Create(c);
+            Vector128<float> sv = Vector128.Create(s);
+            for (; i + Vector128<float>.Count <= length - stride; i += Vector128<float>.Count)
+            {
+                Vector128<float> x1 = Vector128.LoadUnsafe(ref r, (nuint)i);
+                Vector128<float> x2 = Vector128.LoadUnsafe(ref r, (nuint)(i + stride));
+                ((cv * x2) + (sv * x1)).StoreUnsafe(ref r, (nuint)(i + stride));
+                ((cv * x1) - (sv * x2)).StoreUnsafe(ref r, (nuint)i);
+            }
+        }
+
+        for (; i < length - stride; i++)
+        {
+            float x1 = Unsafe.Add(ref r, i);
+            float x2 = Unsafe.Add(ref r, i + stride);
+            Unsafe.Add(ref r, i + stride) = (c * x2) + (s * x1);
+            Unsafe.Add(ref r, i) = (c * x1) - (s * x2);
+        }
+
+        i = length - (2 * stride) - 1;
+        if (stride >= Vector128<float>.Count && SimdConfig.UseSimd)
+        {
+            Vector128<float> cv = Vector128.Create(c);
+            Vector128<float> sv = Vector128.Create(s);
+            for (; i >= Vector128<float>.Count - 1; i -= Vector128<float>.Count)
+            {
+                int b = i - (Vector128<float>.Count - 1);
+                Vector128<float> x1 = Vector128.LoadUnsafe(ref r, (nuint)b);
+                Vector128<float> x2 = Vector128.LoadUnsafe(ref r, (nuint)(b + stride));
+                ((cv * x2) + (sv * x1)).StoreUnsafe(ref r, (nuint)(b + stride));
+                ((cv * x1) - (sv * x2)).StoreUnsafe(ref r, (nuint)b);
+            }
+        }
+
+        for (; i >= 0; i--)
+        {
+            float x1 = Unsafe.Add(ref r, i);
+            float x2 = Unsafe.Add(ref r, i + stride);
+            Unsafe.Add(ref r, i + stride) = (c * x2) + (s * x1);
+            Unsafe.Add(ref r, i) = (c * x1) - (s * x2);
         }
     }
 
