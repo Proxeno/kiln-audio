@@ -3,18 +3,25 @@
 using Kiln.Audio.Celt;
 using Kiln.Audio.Celt.Encoder;
 using Kiln.Audio.Encoder;
+using Kiln.Audio.Silk.Encoder;
 
 namespace Kiln.Audio;
 
-/// <summary>Opus (RFC 6716) encoder for the CELT-only case.</summary>
+/// <summary>Opus (RFC 6716) encoder.</summary>
 /// <remarks>
 /// <para>
-/// This version supports the CELT family: mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5,
-/// 10, 20, 40 or 60 ms frames, constant or variable bitrate, and the pitch pre-filter. A 40 or
-/// 60 ms frame is encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as
-/// the reference handles CELT durations above 20 ms. All three <see cref="OpusApplication"/> values
-/// currently map onto the same CELT settings. SILK, hybrid, in-band FEC and DTX are not
-/// implemented and are rejected with <see cref="NotSupportedException"/>.
+/// <see cref="OpusApplication.Voip"/> selects the SILK-only encoder when the input is mono and
+/// the frame is 10, 20, 40 or 60 ms, at <see cref="OpusEncoderOptions.Bandwidth"/> narrowband,
+/// mediumband or wideband. Every other <see cref="OpusApplication.Voip"/> configuration (stereo,
+/// 2.5 or 5 ms, or a super-wideband/fullband bandwidth hint) falls back to the CELT encoder, as
+/// it did before SILK landed; the mode policy will become automatic in a later change.
+/// </para>
+/// <para>
+/// The CELT encoder supports mono or stereo, 8, 12, 16, 24 or 48 kHz input, 2.5, 5, 10, 20, 40 or
+/// 60 ms frames, constant or variable bitrate, and the pitch pre-filter. A 40 or 60 ms frame is
+/// encoded as two or three 20 ms frames in one code 1 or code 3 packet, exactly as the reference
+/// handles CELT durations above 20 ms. Hybrid mode, stereo SILK, in-band FEC, DTX and automatic
+/// mode switching are not implemented and are rejected with <see cref="NotSupportedException"/>.
 /// </para>
 /// <para>
 /// <see cref="Encode(ReadOnlySpan{short}, Span{byte})"/> writes one complete Opus packet: the TOC
@@ -24,7 +31,10 @@ namespace Kiln.Audio;
 /// </remarks>
 public sealed class OpusEncoder : IDisposable
 {
-    private readonly CeltEncoder _encoder;
+    private readonly CeltEncoder? _encoder;
+    private readonly SilkEncoderCore? _silk;
+    private readonly int _silkFrameSamples;
+    private readonly byte _silkToc;
     private readonly OpusFrameDuration _tocDuration;
     private readonly int _subFrameSamples;
     private readonly int _subFrameCount;
@@ -54,6 +64,67 @@ public sealed class OpusEncoder : IDisposable
         }
 
         Options = options;
+
+        // SILK owns mono Voip at SILK frame durations and a SILK bandwidth. Anything else that
+        // asks for Voip keeps the pre-SILK behaviour and encodes with CELT, so existing callers
+        // (stereo, 2.5/5 ms) are not broken. A later change makes the mode policy automatic.
+        OpusBandwidth? requestedBandwidth = options.Bandwidth;
+        bool silkBandwidth = requestedBandwidth is null
+            or OpusBandwidth.Narrowband or OpusBandwidth.Mediumband or OpusBandwidth.Wideband;
+        bool useSilk = options.Application == OpusApplication.Voip
+            && options.Channels == 1
+            && silkBandwidth
+            && options.FrameDuration is OpusFrameDuration.Ms10 or OpusFrameDuration.Ms20
+                or OpusFrameDuration.Ms40 or OpusFrameDuration.Ms60;
+
+        if (useSilk)
+        {
+            OpusBandwidth bandwidth = requestedBandwidth ?? OpusBandwidth.Wideband;
+            int internalRate = bandwidth switch
+            {
+                OpusBandwidth.Narrowband => 8000,
+                OpusBandwidth.Mediumband => 12000,
+                OpusBandwidth.Wideband => 16000,
+                _ => 16000,
+            };
+
+            int frameDurationMs = options.FrameDuration switch
+            {
+                OpusFrameDuration.Ms10 => 10,
+                OpusFrameDuration.Ms20 => 20,
+                OpusFrameDuration.Ms40 => 40,
+                OpusFrameDuration.Ms60 => 60,
+                _ => throw new NotSupportedException("Unsupported SILK frame duration."),
+            };
+
+            _silk = new SilkEncoderCore(
+                options.SampleRate,
+                internalRate,
+                frameDurationMs,
+                options.BitrateBps,
+                options.Complexity,
+                options.UseCbr);
+            _silkFrameSamples = options.SampleRate * frameDurationMs / 1000;
+            _conversionBuffer = new short[_silkFrameSamples];
+            _subFrameData = [];
+
+            // RFC 6716 §3.1, Table 2: SILK-only configs 0..11, in (bandwidth, duration) order.
+            int bandwidthIndex = bandwidth switch
+            {
+                OpusBandwidth.Narrowband => 0,
+                OpusBandwidth.Mediumband => 1,
+                _ => 2,
+            };
+            int durationIndex = options.FrameDuration switch
+            {
+                OpusFrameDuration.Ms10 => 0,
+                OpusFrameDuration.Ms20 => 1,
+                OpusFrameDuration.Ms40 => 2,
+                _ => 3,
+            };
+            _silkToc = (byte)(((bandwidthIndex * 4) + durationIndex) << 3);
+            return;
+        }
 
         // CELT packets are at most 20 ms; 40 and 60 ms are split into 20 ms frames (RFC 6716
         // §3.2.5, Appendix A opus_encoder.c). The packet TOC therefore advertises 20 ms.
@@ -90,7 +161,7 @@ public sealed class OpusEncoder : IDisposable
     /// Gets the range-coder final value of the most recently encoded frame. For a packet stream,
     /// this is the value a conformant decoder must report after decoding the packet.
     /// </summary>
-    public uint FinalRange => _encoder.FinalRange;
+    public uint FinalRange => _silk?.FinalRange ?? (_encoder?.FinalRange ?? 0);
 
     /// <summary>Encodes one frame of interleaved 16-bit PCM into an Opus packet.</summary>
     /// <param name="pcm">
@@ -108,6 +179,27 @@ public sealed class OpusEncoder : IDisposable
     public int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_silk is not null)
+        {
+            if (pcm.Length != _silkFrameSamples)
+            {
+                throw new ArgumentException(
+                    FormattableString.Invariant(
+                        $"The frame must contain exactly {_silkFrameSamples} samples; got {pcm.Length}."),
+                    nameof(pcm));
+            }
+
+            if (packet.Length < 2)
+            {
+                throw new ArgumentException(
+                    FormattableString.Invariant($"The packet buffer must hold at least 2 bytes; got {packet.Length}."),
+                    nameof(packet));
+            }
+
+            packet[0] = _silkToc;
+            return _silk.Encode(pcm, packet[1..]) + 1;
+        }
+
         if (pcm.Length != _inputFrameSamples)
         {
             throw new ArgumentException(
@@ -116,7 +208,7 @@ public sealed class OpusEncoder : IDisposable
                 nameof(pcm));
         }
 
-        int frameBytes = _encoder.FrameBytes;
+        int frameBytes = _encoder!.FrameBytes;
         int minimumPacket = Options.UseVbr
             ? 2 + (_subFrameCount * 2)
             : (_subFrameCount == 1 ? frameBytes + 1 : (frameBytes * _subFrameCount) + 1 + _subFrameCount);
@@ -159,11 +251,11 @@ public sealed class OpusEncoder : IDisposable
     /// <returns>Number of bytes written to <paramref name="packet"/>.</returns>
     public int Encode(ReadOnlySpan<float> pcm, Span<byte> packet)
     {
-        if (pcm.Length != _inputFrameSamples)
+        if (pcm.Length != _conversionBuffer.Length)
         {
             throw new ArgumentException(
                 FormattableString.Invariant(
-                    $"The frame must contain exactly {_inputFrameSamples} interleaved samples; got {pcm.Length}."),
+                    $"The frame must contain exactly {_conversionBuffer.Length} interleaved samples; got {pcm.Length}."),
                 nameof(pcm));
         }
 

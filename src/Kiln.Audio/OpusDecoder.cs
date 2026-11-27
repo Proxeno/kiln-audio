@@ -56,6 +56,27 @@ public sealed class OpusDecoder : IDisposable
     /// </summary>
     public uint FinalRange => _core.FinalRange;
 
+    /// <summary>
+    /// Gets whether the last <see cref="Decode(ReadOnlySpan{byte},Span{short},bool)"/> or
+    /// <see cref="DecodeLoss"/> call recovered the lost interval from in-band FEC (LBRR) data,
+    /// concealed it, or did not ask for FEC at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="OpusFecOutcome.NotRequested"/> is set by a decode without <c>decodeFec</c> and
+    /// by <see cref="DecodeLoss"/>. <see cref="OpusFecOutcome.Recovered"/> means the packet's
+    /// first SILK frame carried LBRR data and it was decoded; <see cref="OpusFecOutcome.Concealed"/>
+    /// means the packet had no LBRR for the lost interval and packet loss concealment was used.
+    /// In a hybrid packet the CELT layer has no in-band FEC, so it is concealed even when
+    /// <see cref="OpusFecOutcome.Recovered"/> is reported. A packet holding several frames reports
+    /// its first frame.
+    /// </para>
+    /// <para>
+    /// <see cref="OpusPacket.HasLbrr"/> predicts this value for a packet without decoding it.
+    /// </para>
+    /// </remarks>
+    public OpusFecOutcome LastFecOutcome => _core.LastFecOutcome;
+
     /// <summary>Decodes one Opus packet to interleaved 16-bit PCM.</summary>
     /// <param name="packet">The Opus packet, starting at its TOC byte.</param>
     /// <param name="pcm">
@@ -67,9 +88,32 @@ public sealed class OpusDecoder : IDisposable
     /// The output has the frame size of <paramref name="packet"/> itself, which is not
     /// necessarily the size of the lost frame; an interval without LBRR falls back to packet
     /// loss concealment. CELT-only and hybrid packets have no SILK LBRR for the CELT layer, so
-    /// their CELT contribution is concealed as well.
+    /// their CELT contribution is concealed as well. Set <see cref="LastFecOutcome"/> on the
+    /// same decoder reports whether the LBRR data was present, and
+    /// <see cref="OpusPacket.HasLbrr"/> answers that for a packet without decoding it.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// Any byte string is valid input. A packet that violates RFC 6716 §3 framing throws
+    /// <see cref="InvalidDataException"/> before the decoder state changes, so the next call
+    /// starts from the same state as if the packet had never arrived.
+    /// </para>
+    /// <para>
+    /// The resilience contract, which the fuzz suite asserts at every sample rate and channel
+    /// count, is:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>the return value is exactly the packet's frame count times its frame
+    /// duration at the API rate, as listed in RFC 6716 §2, Table 2; an empty packet returns the
+    /// concealment length of <see cref="DecodeLoss(Span{short})"/> instead;</description></item>
+    /// <item><description>the only exception types are the three documented below — never
+    /// <see cref="IndexOutOfRangeException"/>, <see cref="NullReferenceException"/>,
+    /// <see cref="OverflowException"/> or <see cref="DivideByZeroException"/>;</description></item>
+    /// <item><description>a call completes without an unbounded loop;</description></item>
+    /// <item><description>a valid packet allocates no managed memory.</description></item>
+    /// </list>
+    /// </remarks>
     /// <exception cref="ObjectDisposedException">The decoder has been disposed.</exception>
     /// <exception cref="InvalidDataException">The packet violates RFC 6716 §3 framing.</exception>
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short for the packet.</exception>
@@ -105,9 +149,22 @@ public sealed class OpusDecoder : IDisposable
     /// <param name="decodeFec">
     /// Decode the in-band FEC (LBRR) data of this packet to recover the frame that preceded it.
     /// The output has the frame size of <paramref name="packet"/> itself; an interval without
-    /// LBRR falls back to packet loss concealment.
+    /// LBRR falls back to packet loss concealment. <see cref="LastFecOutcome"/> reports which of
+    /// the two happened.
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// The same input and exception contract as
+    /// <see cref="Decode(ReadOnlySpan{byte}, Span{short}, bool)"/> applies, with one addition:
+    /// every written sample is finite. A malformed packet that is rejected as
+    /// <see cref="InvalidDataException"/> leaves the decoder state unchanged.
+    /// </para>
+    /// <para>
+    /// The float overload reports a short destination as <see cref="ArgumentException"/>, like the
+    /// 16-bit overload, rather than writing past the end of the span.
+    /// </para>
+    /// </remarks>
     /// <exception cref="ObjectDisposedException">The decoder has been disposed.</exception>
     /// <exception cref="InvalidDataException">The packet violates RFC 6716 §3 framing.</exception>
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short for the packet.</exception>
@@ -124,9 +181,16 @@ public sealed class OpusDecoder : IDisposable
     /// </param>
     /// <returns>Number of samples per channel written to <paramref name="pcm"/>.</returns>
     /// <remarks>
+    /// <para>
     /// The concealed duration is the frame duration of the last successfully decoded packet, or
     /// 2.5 ms if nothing has been decoded yet. CELT-only streams use the CELT <c>DecodeLost</c>
-    /// hook; SILK and hybrid streams repeat the last frame with a decay. See the class remarks.
+    /// hook; SILK and hybrid streams conceal the last frame with a decay. See the class remarks.
+    /// </para>
+    /// <para>
+    /// Concealment accepts no packet bytes, so the only possible outcomes are the documented
+    /// exceptions below. It never throws for a decoder that has not been disposed, writes exactly
+    /// the returned number of samples, and allocates nothing.
+    /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The decoder has been disposed.</exception>
     /// <exception cref="ArgumentException"><paramref name="pcm"/> is too short.</exception>
