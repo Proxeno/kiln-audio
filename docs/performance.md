@@ -378,6 +378,141 @@ showing up. No vector reaches the ≤ 1.0 target.
 3. **`Vector256` is emulated on the arm64 target**, so the existing `Vector128` radix butterflies
    stay; the measured FFT does not benefit from a 256-bit path here.
 
+## PERF-4: CELT bitstream decode and SILK WB synthesis
+
+PERF-4 profiles the CELT frequency-domain decoder at stage granularity, then attacks the stages it
+measured as dominant. The changes are bit-exact where the path is integer (final range, PVQ
+indices, SILK output) and stay far inside the CELT float tolerance everywhere else.
+
+**Profiling method.** `Perf4Profile` (in `CeltDecoder.cs`) and `SilkPerf4Profile` (in
+`SilkSynthesis.cs`) are compiled in only when `KILN_PERF4_PROFILE` is defined; in a normal build
+`Enabled` is the constant `false` and every timing block folds away, so the shipped code carries
+no instrumentation. Build and run with
+
+```bash
+dotnet build -c Release -p:DefineConstants=KILN_PERF4_PROFILE
+dotnet bench/Kiln.Audio.Benchmarks/bin/Release/net10.0/Kiln.Audio.Benchmarks.dll micro perf4
+```
+
+`Perf4ProfileMeasure` (`bench/Kiln.Audio.Benchmarks/Perf4Profile.cs`) runs the three CELT and
+three SILK comparison vectors and prints microseconds per frame per stage. The timers overlap: a
+stage that contains another (the partition recursion contains PVQ and the angle decode) is
+reported once per nesting level, so its column overcounts. The top-level columns are the reliable
+comparison; the leaf columns show shares.
+
+### Stage profile (instrumented, µs per frame)
+
+The instrumentation itself costs roughly 1-3 µs/frame at these call counts, so the table is for
+attribution, not for absolute totals.
+
+| Stage | 01 | 07 | 11 |
+| --- | --- | --- | --- |
+| flags (silence/post-filter/transient/intra) | 0.019 | 0.023 | 0.043 |
+| coarse energy (Laplace) | 0.509 | 0.327 | 0.403 |
+| time/frequency | 0.078 | 0.068 | 0.082 |
+| dynamic allocation | 0.082 | 0.070 | 0.093 |
+| allocation (of which interpolation) | 0.539 (0.266) | 0.477 (0.252) | 0.554 (0.277) |
+| fine energy | 0.098 | 0.048 | 0.108 |
+| **PVQ band shapes (top level)** | **6.581** | **3.146** | **19.128** |
+| ├ pulse vector decode (`AlgUnquant`) | 4.168 | 1.644 | 12.465 |
+| ├ spread rotation | 1.297 | 0.377 | 4.904 |
+| ├ angle (`ComputeTheta`) | 0.531 | 0.219 | 1.610 |
+| └ renormalise / anti-collapse | 0.039 | 0.096 | 0.150 |
+| synthesis: denormalise | 0.189 | 0.173 | 0.268 |
+| synthesis: inverse MDCT | 1.621 | 1.758 | 5.191 |
+| synthesis: post-filter | 0.213 | 0.254 | 0.767 |
+| synthesis: de-emphasis | 0.621 | 0.640 | 2.294 |
+| **synthesis total** | **2.737** | **2.918** | **8.611** |
+
+CELT decode is PVQ-bound: the pulse-vector unrank, its spread rotation and the partition
+bookkeeping around them account for most of the frequency-domain time on every vector. Allocation
+— the stage PERF-2/3 expected to dominate — is under 0.6 µs/frame. On the synthesis side the
+inverse MDCT (owned by another lane) and the serial de-emphasis recursion are the floor.
+
+SILK decode is excitation-bitstream-bound, and SILK synthesis splits between LPC, the excitation
+reconstruction, NLSF→LPC and LTP rewhitening:
+
+| Stage | 02 | 03 | 04 |
+| --- | --- | --- | --- |
+| decode: excitation (pulses, LSBs, signs) | 2.813 | 3.326 | 3.281 |
+| decode: NLSF | 0.220 | 0.206 | 0.279 |
+| decode: gains / LTP / other | 0.386 | 0.367 | 0.373 |
+| **synthesis: LPC** | 0.573 | 0.937 | 1.261 |
+| synthesis: excitation reconstruction | 0.457 | 0.722 | 0.939 |
+| synthesis: NLSF→LPC | 0.396 | 0.401 | 0.742 |
+| synthesis: LTP (rewhitening + filter) | 0.375 | 0.481 | 0.685 |
+| synthesis: stereo unmix | 0.178 | 0.269 | 0.421 |
+
+### Decode ratios (same-window)
+
+`... micro decode` (tier-1 warmed) and `scripts/bench-libopus-inproc.sh`, built and run back to
+back under the machine-wide lock. Kiln total is decode + synthesis + int16.
+
+| Vector | libopus µs/frame | Kiln µs/frame | Ratio | PERF-3 ratio |
+| --- | --- | --- | --- | --- |
+| 01 | 6.734 | 9.22 | 1.37 | 1.39 |
+| 07 | 4.444 | 6.22 | 1.40 | 1.43 |
+| 11 | 19.423 | 25.58 | 1.32 | 1.32 |
+| 02 | 4.651 | 5.29 | 1.14 | 1.20 |
+| 03 | 5.854 | 6.71 | 1.15 | 1.18 |
+| 04 | 6.372 | 7.25 | 1.14 | 1.40 |
+
+SILK moves substantially: the division-free symbol decode and the dependency-broken order-16 LPC
+loop cut vector 04 from 1.40 to 1.14 and the NB/MB vectors to 1.14-1.15. CELT is unchanged within
+noise because its time is in PVQ work that this lane only trimmed at the edges. **No vector meets
+the ≤ 1.0 target.**
+
+### Changes
+
+- **Division-free SILK symbol decode.** `RangeDecoder.DecodePdf` decodes a 256-total probability
+  table by inverting the search condition: instead of computing `fs = 256 - (val/(rng/256) + 1)`
+  and scanning for `fs < fh[k]`, it compares `val` against `(256 - fh[k]) * (rng/256)`. That is
+  the same symbol and the same state update (bit-exact), but a multiply per candidate replaces
+  one hardware divide per symbol. Every SILK PDF symbol — pulse counts, locations, LSBs, signs,
+  gains, NLSF, LTP — now takes this path; the excitation decode alone is thousands of symbols per
+  frame.
+- **`TellFrac` table.** The three Q15 squaring steps only depend on the 16-bit range mantissa, so
+  a 32 KiB table replaces them; the general loop remains as the fallback for a non-normalized
+  range (which a valid stream never reaches).
+- **Allocation table.** `c * width * BandAllocation[q][band] << lm >> 2` depends only on
+  `(lm, channels, q, band)`, so a 7 KiB `AllocScaled` table replaces the multiply/shift pair in
+  the bisection and the final pair of vectors. The per-band balance divisor is dispatched to
+  constant divisions instead of a variable divide.
+- **PVQ.** `Cwrsi` accumulates the collapse mask during the unranking walk (a per-block counter
+  and bit shift) instead of a second pass over the pulse vector, and halves `V(N-1,K)+V(N,K)` with
+  a shift.
+- **Spread rotation.** `cos(a)` and `cos(pi/2 - a)` are the cosine and sine of one angle, so a
+  single `Math.SinCos` replaces two `Math.Cos` calls. The argument rounding differs in the last
+  bit, which is far inside the CELT tolerance.
+- **SILK order-16 LPC synthesis.** The synthesis is latency-bound because each output needs the
+  previous one. Only the `c[0]` tap reads the newest output; the other fifteen taps read history
+  at least two samples old. They are summed in `Vector128<int>` lanes and reduced once per sample,
+  then the single `c[0]` `Smulwb` is added, so an out-of-order core can overlap the dot product
+  with the feedback chain. The order-10 and generic paths reduce their lanes once per sample too.
+  Integer addition is associative modulo 2^32, so the output is bit-exact.
+- **NLSF selector.** The stage-2 PDF selector strings are converted once to 0-based PDF indices,
+  removing a string index and a character load per NLSF coefficient.
+
+Static tables are built once at type initialization; the decode and synthesis paths still allocate
+0 B per frame.
+
+### Remaining gaps
+
+1. **CELT PVQ is the wall.** `AlgUnquant`/`Cwrsi` plus the spread rotation are ~60-70 % of CELT
+   frequency-domain decode on all three vectors. The unrank is a serial index decomposition with
+   two table reads and a monotone `k` walk per coefficient; the rotation for stride 1 is a strict
+   recurrence (each sample reads the one just written) and cannot be vectorized without changing
+   the float result. Closing the remaining 1.32-1.40 needs a different codeword-read strategy, not
+   another micro-optimization.
+2. **CELT synthesis is at the MDCT/de-emphasis floor.** The inverse MDCT is 1.6-5.2 µs/frame
+   (`Mdct.cs`, another lane) and de-emphasis 0.6-2.3 µs/frame; de-emphasis is a one-pole recursion
+   the reference also runs scalar. The post-filter is already a vectorized kernel.
+3. **SILK still misses 1.0 by ~0.9 µs/frame on WB (04).** Synthesis is now 3.62 µs/frame (was
+   5.41 in PERF-3). The remaining candidates are vectorizing the LTP rewhitening FIR across output
+   samples (it is independent per sample and bit-exact integer), and the serial excitation LCG.
+   Decode is dominated by the excitation symbol stream, which has no obvious redundancy left.
+4. **Zero allocations hold**, and the profiler is compiled out of Release builds.
+
 ## Encoder (CELT-only, 48 kHz mono)
 
 This section records the ENC-PERF-1 measurements for the CELT-only restricted-low-delay encoder:
