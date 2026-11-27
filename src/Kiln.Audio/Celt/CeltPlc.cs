@@ -1,5 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
+using Kiln.Audio.Simd.Kernels;
+
 namespace Kiln.Audio.Celt;
 
 /// <summary>
@@ -351,10 +353,10 @@ internal sealed partial class CeltSynthesizer
 
         _plcSeed = seed;
 
-        Denormalise(frame, n, streamChannels, channels);
+        Denormalise<ScalarKernels>(frame, n, streamChannels, channels, duplicate: false);
         for (int channel = 0; channel < channels; channel++)
         {
-            BuildTimeSignal(frame, n, channel);
+            BuildTimeSignal<ScalarKernels>(frame, n, channel);
             Deemphasise(n, channel, pcmOut, channels);
         }
     }

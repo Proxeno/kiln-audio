@@ -716,41 +716,13 @@ internal sealed class CeltPrefilter
     /// <summary>Vectorized dot product with a scalar fallback; exposed for the parity test.</summary>
     internal static float DotProduct(ReadOnlySpan<float> a, ReadOnlySpan<float> b, bool useVector)
     {
-        if (!useVector || a.Length < Vector128<float>.Count)
+        // The kernel lives in the Vector128 tier: the encoder takes no 256-bit or Vector<T> path.
+        // The caller's flag stays authoritative so KILN_AUDIO_DISABLE_SIMD gives a scalar run.
+        if (!useVector || !SimdConfig.UseSimd || a.Length < 4 || !System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated)
         {
             return DotScalar(a, b);
         }
 
-        int i = 0;
-        Vector128<float> sum128 = Vector128<float>.Zero;
-        if (Vector256.IsHardwareAccelerated && a.Length >= Vector256<float>.Count)
-        {
-            Vector256<float> sum256 = Vector256<float>.Zero;
-            int limit = a.Length - (a.Length % Vector256<float>.Count);
-            for (; i < limit; i += Vector256<float>.Count)
-            {
-                Vector256<float> left = Vector256.Create(
-                    a[i], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]);
-                Vector256<float> right = Vector256.Create(
-                    b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
-                sum256 += left * right;
-            }
-
-            sum128 += sum256.GetLower() + sum256.GetUpper();
-        }
-
-        for (; i + Vector128<float>.Count <= a.Length; i += Vector128<float>.Count)
-        {
-            sum128 += Vector128.Create(a[i], a[i + 1], a[i + 2], a[i + 3])
-                * Vector128.Create(b[i], b[i + 1], b[i + 2], b[i + 3]);
-        }
-
-        float sum = Vector128.Sum(sum128);
-        for (; i < a.Length; i++)
-        {
-            sum += a[i] * b[i];
-        }
-
-        return sum;
+        return Kiln.Audio.Simd.Kernels.Vector128Kernels.Dot(a, b);
     }
 }

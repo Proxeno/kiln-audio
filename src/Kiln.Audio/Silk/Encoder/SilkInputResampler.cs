@@ -180,27 +180,18 @@ internal sealed class SilkInputResampler
 
     private static float Dot(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        int n = a.Length;
-        int i = 0;
-        float total = 0;
-        if (Vector.IsHardwareAccelerated && n >= Vector<float>.Count)
+        if (!Kiln.Audio.Simd.SimdConfig.UseSimd || a.Length < 4 || !System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated)
         {
-            var acc = Vector<float>.Zero;
-            int step = Vector<float>.Count;
-            for (; i <= n - step; i += step)
+            float total = 0;
+            for (int i = 0; i < a.Length; i++)
             {
-                acc += new Vector<float>(a.Slice(i, step)) * new Vector<float>(b.Slice(i, step));
+                total += a[i] * b[i];
             }
 
-            total = Vector.Sum(acc);
+            return total;
         }
 
-        for (; i < n; i++)
-        {
-            total += a[i] * b[i];
-        }
-
-        return total;
+        return Kiln.Audio.Simd.Kernels.Vector128Kernels.Dot(a, b);
     }
 
     private static long FloorDivide(long numerator, int denominator)
