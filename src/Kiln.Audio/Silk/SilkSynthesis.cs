@@ -1,6 +1,7 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 
 using System;
+using System.Runtime.CompilerServices;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Silk;
@@ -109,6 +110,15 @@ internal sealed partial class SilkSynthesis
     private int _frameLength;
     private int _ltpMemoryLength;
 
+    /// <summary>
+    /// Gets the internal rate the packet-loss concealment is configured for, or 0 when the
+    /// synthesizer has no history yet.
+    /// </summary>
+    internal int RateHz => _rateHz;
+
+    /// <summary>Gets the channel count the packet-loss concealment is configured for.</summary>
+    internal int Channels => _channels;
+
     /// <summary>Creates a synthesizer in its reset state.</summary>
     public SilkSynthesis() => Reset();
 
@@ -161,6 +171,7 @@ internal sealed partial class SilkSynthesis
     public void Synthesize(SilkFrameResult frame, Span<short> pcmOut)
     {
         ArgumentNullException.ThrowIfNull(frame);
+        long profileStart = SilkPerf4Profile.Start();
         ConfigureForFrame(frame);
 
         int silkFrames = frame.SilkFrameCount;
@@ -206,7 +217,9 @@ internal sealed partial class SilkSynthesis
             int frameOffset = f * _frameLength * _channels;
             if (_channels == 2)
             {
+                long stereoStart = SilkPerf4Profile.Start();
                 StereoUnmix(mid, frameOffset, pcmOut);
+                SilkPerf4Profile.Stop(9, stereoStart);
             }
             else
             {
@@ -222,11 +235,14 @@ internal sealed partial class SilkSynthesis
 
             _previousDecodeOnlyMiddle = _channels == 2 && mid.IsMidOnly;
         }
+
+        SilkPerf4Profile.Stop(12, profileStart);
     }
 
     /// <summary>Reconstructs one channel's SILK frame (RFC 6716 §4.2.7.9, <c>silk_decode_core</c>).</summary>
     private void SynthesizeChannel(ChannelState state, SilkChannelFrame frame, Span<short> output)
     {
+        long channelStart = SilkPerf4Profile.Start();
         int order = _lpcOrder;
         int subframeLength = _subframeLength;
         int subframes = _subframeCount;
@@ -241,7 +257,11 @@ internal sealed partial class SilkSynthesis
 
         // RFC 6716 §4.2.7.5: reconstruct the NLSFs and both LPC coefficient sets. PredCoef[1] is
         // the current frame; PredCoef[0] is the interpolated first half (decode_parameters.c).
+        long sliceStart = SilkPerf4Profile.Start();
         SilkNlsf.Decode(bandwidthIndex, frame.NlsfStage1Index, frame.NlsfStage2Index, _nlsfQ15);
+        SilkPerf4Profile.Stop(1, sliceStart);
+
+        sliceStart = SilkPerf4Profile.Start();
         Span<short> predCoef = state.PredCoefQ12;
         Span<short> currentCoef = predCoef[MaxLpcOrder..(MaxLpcOrder + order)];
         Span<short> interpolatedCoef = predCoef[..order];
@@ -265,6 +285,7 @@ internal sealed partial class SilkSynthesis
         }
 
         _nlsfQ15.AsSpan(0, order).CopyTo(state.PrevNlsfQ15);
+        SilkPerf4Profile.Stop(2, sliceStart);
 
         // RFC 6716 §4.2.7.6: LTP parameters, zero for unvoiced frames.
         if (voiced)
@@ -290,29 +311,30 @@ internal sealed partial class SilkSynthesis
         int ltpScaleQ14 = voiced ? frame.LtpScalingQ14 : 0;
 
         // RFC 6716 §4.2.7.8.6: reconstruct the excitation, Q14.
+        sliceStart = SilkPerf4Profile.Start();
         int randSeed = frame.Seed;
         for (int i = 0; i < frameLength; i++)
         {
             randSeed = SilkFixedPoint.Rand(randSeed);
             int excitation = SilkFixedPoint.Lshift(frame.Pulses[i], 14);
-            if (excitation > 0)
-            {
-                excitation -= 80 << 4;
-            }
-            else if (excitation < 0)
-            {
-                excitation += 80 << 4;
-            }
+
+            // Branch-free sign handling: sign(x) = (x >> 31) | ((uint)(-x) >> 31) is -1, 0 or 1,
+            // so the 80<<4 offset is subtracted for a positive pulse, added for a negative one and
+            // left alone for a zero one, exactly as the three-way branch did.
+            int sign = (excitation >> 31) | (int)((uint)(-excitation) >> 31);
+            excitation = unchecked(excitation - (sign * (80 << 4)));
 
             excitation = SilkFixedPoint.Add(excitation, SilkFixedPoint.Lshift(quantizationOffsetQ10, 4));
-            if (randSeed < 0)
-            {
-                excitation = -excitation;
-            }
+
+            // Negate when the random sign bit is set: (x ^ -1) - (-1) == -x, with no branch.
+            int negate = randSeed >> 31;
+            excitation = unchecked((excitation ^ negate) - negate);
 
             state.ExcQ14[i] = excitation;
             randSeed = SilkFixedPoint.Add(randSeed, frame.Pulses[i]);
         }
+
+        SilkPerf4Profile.Stop(3, sliceStart);
 
         // RFC 6716 §4.2.7.9: LTP and LPC synthesis.
         Span<int> sLpcQ14 = state.SLpcQ14;
@@ -322,6 +344,7 @@ internal sealed partial class SilkSynthesis
 
         for (int k = 0; k < subframes; k++)
         {
+            sliceStart = SilkPerf4Profile.Start();
             int gainQ16 = frame.GainQ16[k];
             int gainQ10 = SilkFixedPoint.Rshift(gainQ16, 6);
             int inverseGainQ31 = SilkFixedPoint.Inverse32VarQ(gainQ16, 47);
@@ -340,10 +363,12 @@ internal sealed partial class SilkSynthesis
             }
 
             state.PrevGainQ16 = gainQ16;
+            SilkPerf4Profile.Stop(7, sliceStart);
 
             Span<short> aQ12 = predCoef.Slice((k >> 1) * MaxLpcOrder, order);
             Span<int> residualQ14 = state.ResQ14;
 
+            sliceStart = SilkPerf4Profile.Start();
             if (voiced)
             {
                 int lag = state.PitchL[k];
@@ -390,6 +415,7 @@ internal sealed partial class SilkSynthesis
 
                 int predictionLag = ltpBufferIndex - lag + (LtpOrder / 2);
                 int ltpCoef = k * LtpOrder;
+                long ltpStart = SilkPerf4Profile.Start();
                 DecSilkLtp.Synthesize(
                     state.SLtpQ15,
                     predictionLag,
@@ -398,6 +424,7 @@ internal sealed partial class SilkSynthesis
                     state.ExcQ14.AsSpan(excitationOffset, subframeLength),
                     residualQ14,
                     subframeLength);
+                SilkPerf4Profile.Stop(5, ltpStart);
                 ltpBufferIndex += subframeLength;
             }
             else
@@ -405,7 +432,10 @@ internal sealed partial class SilkSynthesis
                 state.ExcQ14.AsSpan(excitationOffset, subframeLength).CopyTo(residualQ14);
             }
 
+            SilkPerf4Profile.Stop(4, sliceStart);
+
             // Short-term LPC synthesis (RFC 6716 §4.2.7.9.2).
+            sliceStart = SilkPerf4Profile.Start();
             SilkLpcKernel.Synthesize(
                 sLpcQ14,
                 aQ12,
@@ -414,6 +444,7 @@ internal sealed partial class SilkSynthesis
                 order,
                 subframeLength,
                 output.Slice(k * subframeLength));
+            SilkPerf4Profile.Stop(6, sliceStart);
 
             sLpcQ14[subframeLength..(subframeLength + MaxLpcOrder)].CopyTo(sLpcQ14);
             excitationOffset += subframeLength;
@@ -427,6 +458,7 @@ internal sealed partial class SilkSynthesis
         output.CopyTo(state.OutBuf.AsSpan(moveLength));
 
         state.FirstFrameAfterReset = false;
+        SilkPerf4Profile.Stop(11, channelStart);
     }
 
     /// <summary>Converts mid/side to left/right (RFC 6716 §4.2.8, <c>silk_stereo_MS_to_LR</c>).</summary>
@@ -519,5 +551,91 @@ internal sealed partial class SilkSynthesis
         }
 
         output.AsSpan(outputOffset, order).Clear();
+    }
+}
+
+/// <summary>
+/// PERF-4: stage timing for the SILK synthesis path.
+/// </summary>
+/// <remarks>
+/// Compiled in only when <c>KILN_PERF4_PROFILE</c> is defined; in a normal build the constant
+/// <see cref="Enabled"/> folds every block away.
+/// </remarks>
+internal static class SilkPerf4Profile
+{
+#if KILN_PERF4_PROFILE
+    /// <summary>Whether the timing blocks are compiled in.</summary>
+    internal const bool Enabled = true;
+#else
+    /// <summary>Whether the timing blocks are compiled in.</summary>
+    internal const bool Enabled = false;
+#endif
+
+    /// <summary>Number of accumulators.</summary>
+    internal const int SlotCount = 22;
+
+    /// <summary>Stage names, in slot order.</summary>
+    internal static string[] Names => Counters.Names;
+
+    /// <summary>Accumulated stopwatch ticks per slot.</summary>
+    internal static long[] Ticks => Counters.Ticks;
+
+    /// <summary>Number of samples accumulated per slot.</summary>
+    internal static long[] Calls => Counters.Calls;
+
+    /// <summary>Starts a stage timer, or returns zero when instrumentation is off.</summary>
+    /// <returns>The starting timestamp.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static long Start()
+    {
+#if KILN_PERF4_PROFILE
+        return System.Diagnostics.Stopwatch.GetTimestamp();
+#else
+        return 0;
+#endif
+    }
+
+    /// <summary>Adds the elapsed time since <paramref name="start"/> to a slot.</summary>
+    /// <param name="slot">The slot index.</param>
+    /// <param name="start">The timestamp from <see cref="Start"/>.</param>
+    internal static void Stop(int slot, long start)
+    {
+#if KILN_PERF4_PROFILE
+        Counters.Ticks[slot] += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+        Counters.Calls[slot]++;
+#endif
+    }
+
+    /// <summary>Clears every accumulator.</summary>
+    internal static void Reset()
+    {
+#if KILN_PERF4_PROFILE
+        Counters.Reset();
+#endif
+    }
+
+    /// <summary>The storage touched only by a profiling build.</summary>
+    private static class Counters
+    {
+        /// <summary>Stage names, in slot order.</summary>
+        internal static readonly string[] Names =
+        [
+            "reserved", "nlsf-decode", "nlsf-to-lpc", "excitation", "ltp-block", "ltp-synth",
+            "lpc-synth", "gain-adjust", "state-copy", "stereo", "reserved", "channel", "frame",
+            "decode", "silkhdr", "lbrr", "regular", "gains-ec", "nlsf-ec", "ltp-ec",
+            "exc-ec", "decode-other",
+        ];
+
+        /// <summary>Accumulated stopwatch ticks per slot.</summary>
+        internal static readonly long[] Ticks = new long[SlotCount];
+
+        /// <summary>Number of samples accumulated per slot.</summary>
+        internal static readonly long[] Calls = new long[SlotCount];
+
+        internal static void Reset()
+        {
+            Ticks.AsSpan().Clear();
+            Calls.AsSpan().Clear();
+        }
     }
 }

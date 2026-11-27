@@ -126,6 +126,48 @@ internal sealed class SilkEncoderCore
     /// <returns>The number of payload bytes written; the final range is in <see cref="FinalRange"/>.</returns>
     internal int Encode(ReadOnlySpan<short> pcm, Span<byte> packet)
     {
+        var rangeEncoder = new RangeEncoder(_rangeBuffer);
+        int payloadBits = EncodeInto(ref rangeEncoder, pcm, Math.Min(packet.Length + 1, 1276));
+        int payloadBytes = (payloadBits + 7) >> 3;
+        if (payloadBytes > packet.Length || payloadBytes > _rangeBuffer.Length)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The packet buffer must hold at least {payloadBytes + 1} bytes; got {packet.Length + 1}."),
+                nameof(packet));
+        }
+
+        // SILK writes no raw bits, so the range-coded bytes already occupy the front of the
+        // buffer; the frame is simply the first `written` bytes after finalization.
+        FinalRange = rangeEncoder.Rng;
+        rangeEncoder.Done();
+        int written = rangeEncoder.RangeBytes;
+        if (written > packet.Length)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The packet buffer must hold at least {written + 1} bytes; got {packet.Length + 1}."),
+                nameof(packet));
+        }
+
+        _rangeBuffer.AsSpan(0, written).CopyTo(packet);
+        return written;
+    }
+
+    /// <summary>
+    /// Runs the SILK encoder for one Opus frame into a caller-owned range encoder, without
+    /// finalizing it. This is the hook hybrid frames use: the SILK symbols come first and the
+    /// CELT layer continues in the same coder (RFC 6716 §4.5.2).
+    /// </summary>
+    /// <param name="rangeEncoder">
+    /// The frame's range encoder. It must be fresh (no symbols written) or contain only symbols
+    /// as the decoder will see them before this frame.
+    /// </param>
+    /// <param name="pcm">Mono input at the API rate for exactly one Opus frame.</param>
+    /// <param name="maxDataBytes">The frame's byte capacity, including the TOC byte.</param>
+    /// <returns>The number of payload bits written; the final range is not updated.</returns>
+    internal int EncodeInto(ref RangeEncoder rangeEncoder, ReadOnlySpan<short> pcm, int maxDataBytes)
+    {
         ApplyInputHighPass(pcm);
         _resampler.Process(_hpBuffer.AsSpan(0, pcm.Length), _resampled);
 
@@ -152,7 +194,6 @@ internal sealed class SilkEncoderCore
             }
         }
 
-        var rangeEncoder = new RangeEncoder(_rangeBuffer);
         for (int f = 0; f < _silkFrames; f++)
         {
             rangeEncoder.EncodeBitLogp(_vadSignalType[f] != 0 ? 1 : 0, 1);
@@ -166,7 +207,7 @@ internal sealed class SilkEncoderCore
         // budget as maxBits would force the gain loop to inflate every gain.
         int frameRate = 48000 / (48 * _durationMs);
         int bitrate = _bitrateBps;
-        int maxDataBytes = Math.Min(packet.Length + 1, 1276);
+        maxDataBytes = Math.Min(maxDataBytes, 1276);
         if (_useCbr)
         {
             int cbrBytes = Math.Min((bitrate + (4 * frameRate)) / (8 * frameRate), maxDataBytes);
@@ -225,31 +266,8 @@ internal sealed class SilkEncoderCore
         }
 
         int payloadBits = rangeEncoder.Tell();
-        int payloadBytes = (payloadBits + 7) >> 3;
-        if (payloadBytes > packet.Length || payloadBytes > _rangeBuffer.Length)
-        {
-            throw new ArgumentException(
-                FormattableString.Invariant(
-                    $"The packet buffer must hold at least {payloadBytes + 1} bytes; got {packet.Length + 1}."),
-                nameof(packet));
-        }
-
-        // SILK writes no raw bits, so the range-coded bytes already occupy the front of the
-        // buffer; the frame is simply the first `written` bytes after finalization.
-        FinalRange = rangeEncoder.Rng;
-        rangeEncoder.Done();
-        int written = rangeEncoder.RangeBytes;
-        if (written > packet.Length)
-        {
-            throw new ArgumentException(
-                FormattableString.Invariant(
-                    $"The packet buffer must hold at least {written + 1} bytes; got {packet.Length + 1}."),
-                nameof(packet));
-        }
-
-        _rangeBuffer.AsSpan(0, written).CopyTo(packet);
-        _bitsExceeded = Math.Clamp(_bitsExceeded + (written * 8) - packetBits, 0, 10000);
-        return written;
+        _bitsExceeded = Math.Clamp(_bitsExceeded + (((payloadBits + 7) >> 3) * 8) - packetBits, 0, 10000);
+        return payloadBits;
     }
 
     /// <summary>

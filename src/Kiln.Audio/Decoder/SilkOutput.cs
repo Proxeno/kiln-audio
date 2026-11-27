@@ -134,6 +134,16 @@ internal sealed class SilkOutput
     internal int DecodeLost(int frameDurationMs, Span<float> pcm)
     {
         int outputSamples = _apiRate * frameDurationMs / 1000;
+
+        // The synthesizer's geometry follows the rate of the last synthesized frame. After a mode
+        // transition those can differ from the last decoded packet's rate, and concealing with the
+        // stale rate asks the PLC for a differently sized frame. Follow the synthesis rate.
+        if (_synthesis.RateHz != 0)
+        {
+            _internalRate = _synthesis.RateHz;
+            _internalChannels = _synthesis.Channels;
+        }
+
         if (_internalRate == 0 || _internalChannels == 0)
         {
             pcm[..(outputSamples * _apiChannels)].Clear();
