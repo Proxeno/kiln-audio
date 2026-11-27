@@ -202,13 +202,14 @@ internal static class CeltEncoderKernels
     /// <param name="tmp">Scratch of at least <c>frameSamples + overlap</c> samples.</param>
     /// <param name="bins">Scratch of at least <c>(frameSamples + overlap) / (overlap / 2)</c> samples.</param>
     /// <returns>True when the reference detector declares the frame transient.</returns>
-    internal static bool AnalyzeTransient(
+    internal static bool AnalyzeTransient<TK>(
         ReadOnlySpan<float> input,
         int channels,
         int frameSamples,
         int overlap,
         Span<float> tmp,
         Span<float> bins)
+        where TK : struct, Kiln.Audio.Simd.Kernels.IEncoderKernels
     {
         int len = frameSamples + overlap;
         int block = overlap / 2;
@@ -218,15 +219,10 @@ internal static class CeltEncoderKernels
         bool isTransient = false;
 
         // The reference adds the channels together before the high-pass filter.
-        for (int i = 0; i < len; i++)
+        input.Slice(0, len).CopyTo(tmp);
+        for (int c = 1; c < channels; c++)
         {
-            float sum = 0f;
-            for (int c = 0; c < channels; c++)
-            {
-                sum += input[(c * len) + i];
-            }
-
-            tmp[i] = sum;
+            TK.AddInPlace(tmp.Slice(0, len), input.Slice(c * len, len));
         }
 
         // High-pass filter: (1 - 2*z^-1 + z^-2) / (1 - z^-1 + .5*z^-2).
@@ -245,22 +241,7 @@ internal static class CeltEncoderKernels
             tmp[i] = 0f;
         }
 
-        for (int i = 0; i < binCount; i++)
-        {
-            float maxAbs = 0f;
-            int offset = i * block;
-            for (int j = 0; j < block; j++)
-            {
-                float value = tmp[offset + j];
-                float magnitude = value < 0f ? -value : value;
-                if (magnitude > maxAbs)
-                {
-                    maxAbs = magnitude;
-                }
-            }
-
-            bins[i] = maxAbs;
-        }
+        TK.BlockMaxAbs(tmp, block, bins, binCount);
 
         for (int i = 0; i < binCount; i++)
         {

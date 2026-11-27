@@ -133,6 +133,13 @@ internal static class EncPvqKernel
             Vector128<float> xyv = Vector128.Create(xy);
             Vector128<float> yyv = Vector128.Create(yy);
 
+            // ENC-CELT-1: a group of lanes can only move the running best if at least one lane beats the
+            // current best, so every group is first tested with one vector compare against the *current*
+            // best (the same two multiplies as the scalar test). Groups with no winner are skipped; a group
+            // with a winner is walked lane by lane in index order, so the result is exactly the scalar
+            // search's (ties keep the earliest index, the running cross-multiply sees the same values).
+            Vector128<float> bestNumV = Vector128.Create(bestNum);
+            Vector128<float> bestDenV = Vector128.Create(bestDen);
             int j = 0;
             for (; j + 4 <= n; j += 4)
             {
@@ -142,43 +149,26 @@ internal static class EncPvqKernel
                 rxy *= rxy;
                 Vector128<float> ryy = yyv + vy;
 
-                // Walk the lanes in index order, exactly like the scalar loop, so ties keep the
-                // earliest index and the running cross-multiply sees the same values.
-                float num = rxy.GetElement(0);
-                float den = ryy.GetElement(0);
-                if (bestDen * num > den * bestNum)
+                Vector128<float> win = Vector128.GreaterThan(bestDenV * rxy, ryy * bestNumV);
+                if (win == Vector128<float>.Zero)
                 {
-                    bestDen = den;
-                    bestNum = num;
-                    bestId = j;
+                    continue;
                 }
 
-                num = rxy.GetElement(1);
-                den = ryy.GetElement(1);
-                if (bestDen * num > den * bestNum)
+                for (int lane = 0; lane < 4; lane++)
                 {
-                    bestDen = den;
-                    bestNum = num;
-                    bestId = j + 1;
+                    float num = rxy.GetElement(lane);
+                    float den = ryy.GetElement(lane);
+                    if (bestDen * num > den * bestNum)
+                    {
+                        bestDen = den;
+                        bestNum = num;
+                        bestId = j + lane;
+                    }
                 }
 
-                num = rxy.GetElement(2);
-                den = ryy.GetElement(2);
-                if (bestDen * num > den * bestNum)
-                {
-                    bestDen = den;
-                    bestNum = num;
-                    bestId = j + 2;
-                }
-
-                num = rxy.GetElement(3);
-                den = ryy.GetElement(3);
-                if (bestDen * num > den * bestNum)
-                {
-                    bestDen = den;
-                    bestNum = num;
-                    bestId = j + 3;
-                }
+                bestNumV = Vector128.Create(bestNum);
+                bestDenV = Vector128.Create(bestDen);
             }
 
             for (; j < n; j++)

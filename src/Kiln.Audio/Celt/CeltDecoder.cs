@@ -2752,22 +2752,22 @@ internal sealed class CeltDecoder
     /// several table reads per bin, and a single-array row offset avoids the two-dimensional
     /// array's multiply-and-two-bounds-check per access.
     /// </remarks>
-    private static readonly uint[] PvqTable = BuildPvqTable();
+    internal static readonly uint[] PvqTable = BuildPvqTable();
 
     /// <summary>
     /// One <c>(remaining, k)</c> cell of the CWRS walk: <c>Zero</c> is <c>S(N, K)</c> (the sum of
     /// <c>V(N-1, t)</c> for <c>t &lt; K</c>) and <c>Below</c> is <c>V(N-1, K)</c>.
     /// </summary>
-    private struct PvqEntry
+    internal struct PvqEntry
     {
         public uint Zero;
         public uint Below;
     }
 
-    private static readonly PvqEntry[] PvqCwrs = BuildPvqCwrs();
+    internal static readonly PvqEntry[] PvqCwrs = BuildPvqCwrs();
 
     private const int PvqMaxN = 177;
-    private const int PvqMaxK = 129;
+    internal const int PvqMaxK = 129;
 
     /// <summary>
     /// The per-band allocation in Q3 bits, precomputed for every <c>(LM, channels, vector)</c>.

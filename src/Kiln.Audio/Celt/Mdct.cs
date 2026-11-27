@@ -164,6 +164,84 @@ internal sealed class Mdct
     public void Forward(ReadOnlySpan<float> input, Span<float> coefficients, int stride = 1) =>
         ForwardCore(input, coefficients, stride, SimdConfig.UseSimd);
 
+    /// <summary>
+    /// ENC-CELT-1: the forward transform with the encoder's kernel tier: vectorized middle fold, the tier FFT and a
+    /// zipped post-rotation write. Same arithmetic as <see cref="Forward"/> apart from the tier FFT's fused butterflies.
+    /// </summary>
+    /// <typeparam name="TK">The encoder kernel tier.</typeparam>
+    /// <param name="input">The current frame followed by <see cref="Overlap"/> lookahead samples.</param>
+    /// <param name="coefficients">Receives the coefficients; coefficient <c>k</c> goes to <c>k * stride</c>.</param>
+    /// <param name="stride">Distance in samples between consecutive coefficients.</param>
+    internal void Forward<TK>(ReadOnlySpan<float> input, Span<float> coefficients, int stride = 1)
+        where TK : struct, Kiln.Audio.Simd.Kernels.IEncoderKernels
+    {
+        ValidateStride(stride);
+        ValidateInput(input);
+        long required = (((long)_coefficientCount - 1) * stride) + 1;
+        if (coefficients.Length < required)
+        {
+            throw new ArgumentException(
+                "The coefficient buffer is too short for the requested stride.", nameof(coefficients));
+        }
+
+        int count = _coefficientCount;
+        int half = _half;
+        int preHalf = _overlap / 2;
+        int preQuarter = _overlap / 4;
+        float[] window = _window;
+        float[] foldReal = _foldReal;
+        float[] foldImaginary = _foldImaginary;
+
+        int source1 = preHalf;
+        int source2 = count - 1 + preHalf;
+        int window1 = preHalf;
+        int window2 = preHalf - 1;
+        for (int i = 0; i < preQuarter; i++)
+        {
+            foldReal[i] =
+                (window[window2] * input[source1 + count]) + (window[window1] * input[source2]);
+            foldImaginary[i] =
+                (window[window1] * input[source1]) - (window[window2] * input[source2 - count]);
+            source1 += 2;
+            source2 -= 2;
+            window1 += 2;
+            window2 -= 2;
+        }
+
+        TK.MdctFoldMiddle(input, source1, source2, foldReal, foldImaginary, preQuarter, half - preQuarter);
+        int middle = half - (2 * preQuarter);
+        source1 += 2 * middle;
+        source2 -= 2 * middle;
+
+        window1 = 0;
+        window2 = _overlap - 1;
+        for (int i = half - preQuarter; i < half; i++)
+        {
+            foldReal[i] =
+                (-window[window1] * input[source1 - count]) + (window[window2] * input[source2]);
+            foldImaginary[i] =
+                (window[window2] * input[source1]) + (window[window1] * input[source2 + count]);
+            source1 += 2;
+            source2 -= 2;
+            window1 += 2;
+            window2 -= 2;
+        }
+
+        MdctKernels.RotateForwardPre(foldReal, foldImaginary, _rotCos, _rotSin, half, useVector: true);
+
+        _fft.Transform<TK>(foldReal, foldImaginary, _spectrumReal, _spectrumImaginary, inverse: false);
+
+        if (stride == 1 && (half & 7) == 0)
+        {
+            TK.MdctPostContiguous(coefficients, _spectrumReal, _spectrumImaginary, _rotCos, _rotSin, count);
+        }
+        else
+        {
+            MdctKernels.WriteForwardPost(
+                coefficients, _spectrumReal, _spectrumImaginary, _rotCos, _rotSin, count, stride, useVector: true);
+        }
+    }
+
     /// <summary>Forward transform on the scalar path, used by the parity tests.</summary>
     /// <param name="input">The windowed input.</param>
     /// <param name="coefficients">Receives the coefficients.</param>
