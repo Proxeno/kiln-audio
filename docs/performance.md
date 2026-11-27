@@ -1445,3 +1445,44 @@ WB 20k is high-rate (one trellis state), so cx0 cost is per-sample work, not tre
 shaping and delayed-decision path where libopus runs its plain greedy quantizer. A single-state fast path that is
 bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
 are what is left for cx0 and hybrid.
+
+## FEC-QUAL-1: restoring in-band FEC quality
+
+SILK-QUAL-3 (#43, #46) lifted main-path SNR but lowered what a decoder recovers from LBRR. On the
+`Enc2FecEndToEndTests` stream (CreateSpeech seed 20261127; Voip, 16 kHz mono, WB, 32 kbps, 20 ms, complexity 5,
+`UseInbandFec`, `PacketLossPercent` 10; 14 drops at frames 8, 16, ... 112, each recovered from the next packet with
+`decodeFec`) the mean FEC SNR went from 3.93 to 3.34 dB and the aggregate from 5.54 to 4.80 dB. The decoder is
+byte-identical across that range; the encoder is the cause.
+
+Root cause: the 1.5x high-rate tilt boost. An LBRR frame re-quantizes the regular frame's parameters at a gain
+several steps coarser, from the same prefiltered signal and the same NSQ tilt. The boost was tuned for the
+fine main-path quantizer, and at the coarse LBRR rate it costs waveform match (tilt back to 1.0x alone gives
+4.28 / 6.03 dB). The lambda retune (base 4 to 2) was not the cause (reverting it alone: 3.27 / 4.74).
+The weighted 60 ms allocation does not apply at 20 ms and 10 ms frames.
+
+Fix (LBRR frames only, high-rate regime only; the main-path bitstream is untouched and non-FEC output is
+byte-identical, so no byte-hash golden changes):
+
+- The noise-shaping analysis keeps a second tilt smoother at the reference strength (`TiltSmthLbrrQ16`,
+  `TiltLbrrQ14`), and a second prefilter state (`PrefiltLbrr`) runs every frame when LBRR is enabled at high
+  rate. The LBRR NSQ run reads that prefilter output and that tilt, which restores the pre-QUAL-3 LBRR shaping.
+  Using the reference tilt in the NSQ alone, without the matching prefilter, is much worse (1.71 / 1.20 dB).
+- The LBRR quantizer adds 150 (Q10) to the main lambda at high rate: the copy is several gain steps coarser, so
+  it wants a stronger rate penalty. Swept over 50..250 at tilt 1.0x/0.75x/0.5x; 150 with the reference tilt was
+  the best aggregate (the sweep is noisy at about 0.3 dB over a 14-frame stream, so the floors below keep slack).
+
+| Commit / state | LBRR packets | recovered | mean FEC SNR | aggregate FEC SNR |
+| --- | --- | --- | --- | --- |
+| d20bc6f (before SILK-QUAL-3) | 84/120 | 9/14 | 3.93 dB | 5.54 dB |
+| 4d2617c (after SILK-QUAL-3) | 84/120 | 9/14 | 3.34 dB | 4.80 dB |
+| FEC-QUAL-1 | 84/120 | 9/14 | 4.27 dB | 5.84 dB |
+
+`Enc2FecEndToEndTests.Multi_drop_stream_fec_snr_and_lbrr_coverage_hold_the_floor` ratchets this: mean >= 3.88 dB,
+aggregate >= 5.49 dB (the d20bc6f values less 0.05 dB), at least 84 LBRR packets and 9 recovered drops.
+
+LBRR coverage: 84 of 120 packets carry LBRR, and 5 of the 14 drops are unrecoverable because the next packet has
+no LBRR. This is the activity gate working as designed, not a gap: a frame is redundantly coded only when its
+speech activity exceeds 0.3 (Q8 77, `silk_LBRR_encode_FIX`), and the test signal's amplitude envelope
+(0.55 + 0.45 sin(2 pi 2.3 t)) spends about 30% of its cycle near its trough, so those frames read as low
+activity. The rate gate (`silk_setup_LBRR`) passes at 32 kbps and 10% loss. The same count on both commits
+confirms the gate is not affected by SILK-QUAL-3.

@@ -42,6 +42,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private readonly byte[] _rangeLowerBytes = new byte[MaxPacketBytes];
     private int _rangeLowerCount;
     private readonly int[] _xfwQ3 = new int[SilkEncoderMath.MaxFrameLength];
+    private readonly int[] _xfwLbrrQ3 = new int[SilkEncoderMath.MaxFrameLength];
     private readonly short[] _residual = new short[(2 * SilkEncoderMath.MaxFrameLength) + SilkEncoderMath.LaPitchMax];
 
     private readonly int[] _speechActivity = new int[SilkEncoderState.MaxFramesPerPacket];
@@ -80,6 +81,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private readonly int _complexity;
     private readonly bool _useCbr;
     private const int BitReservoirDecayTimeMs = 500;
+    private const int LbrrHighRateLambdaBonusQ10 = 150; // FEC-QUAL-1, measured on the Enc2 FEC stream
     private const int LbrrSpeechActivityThresholdQ8 = 77; // SILK_FIX_CONST(0.3, 8)
     private int _bitsExceeded;
 
@@ -482,6 +484,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     {
         _state.Shape.Reset();
         _state.Prefilt.Reset();
+        _state.PrefiltLbrr.Reset();
         _state.Nsq.Reset();
         _delayedDecision.Reset();
         _state.PrevNlsfQ15.AsSpan().Clear();
@@ -568,7 +571,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         SilkSideInfo indices,
         ReadOnlySpan<int> inputQ3,
         Span<short> pulses,
-        SilkNsqDelayedDecision delayed)
+        SilkNsqDelayedDecision delayed,
+        int[] tiltQ14)
     {
         control.PredCoefQ12[0].CopyTo(_delayedDecisionPredictionQ12.AsSpan(0, SilkEncoderMath.MaxLpcOrder));
         control.PredCoefQ12[1].CopyTo(
@@ -579,7 +583,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             control.LtpCoefQ14,
             control.Ar2Q13,
             control.HarmShapeGainQ14,
-            control.TiltQ14,
+            tiltQ14,
             control.LfShpQ14,
             control.GainsQ16,
             control.PitchL,
@@ -630,8 +634,21 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             conditionalCoding == ConditionalCoding ? 1 : 0, state.SubframeCount);
 
         _delayedDecisionLbrr.CopyFullFrom(_delayedDecision);
-        Quantize(state, control, lbrr, _xfwQ3, state.LbrrPulses[frameIndex], _delayedDecisionLbrr);
+        // FEC-QUAL-1: the LBRR copy is requantized at a gain several steps coarser than the main
+        // frame, so it wants a stronger rate penalty than the high-rate main path's lambda.
+        int regularLambdaQ10 = control.LambdaQ10;
+        if (state.HighRate != 0)
+        {
+            control.LambdaQ10 += LbrrHighRateLambdaBonusQ10;
+        }
+        // FEC-QUAL-1: the high-rate tilt boost is a main-path tuning; the coarse LBRR copy is
+        // quantized from the reference-tilt prefilter output instead (identical when not high rate).
+        bool separateLbrrFilter = state.HighRate != 0;
+        Quantize(
+            state, control, lbrr, separateLbrrFilter ? _xfwLbrrQ3 : _xfwQ3, state.LbrrPulses[frameIndex],
+            _delayedDecisionLbrr, separateLbrrFilter ? control.TiltLbrrQ14 : control.TiltQ14);
 
+        control.LambdaQ10 = regularLambdaQ10;
         savedGains.CopyTo(control.GainsQ16);
     }
 
@@ -699,6 +716,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         _state.Nsq.LagPrev = 100;
         _state.Nsq.PrevGainQ16 = 65536;
         _state.Prefilt.LagPrev = 100;
+        _state.PrefiltLbrr.LagPrev = 100;
         _state.TargetRateBps = 0;
         _state.MuLtpQ9 = fsKhz switch
         {
@@ -889,7 +907,14 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         EncProf.Mark(3, "silk find pred coefs (burg/ltp/nlsf)");
         SilkEncoderAnalysis.ProcessGains(state, control, conditionalCoding);
         EncProf.Mark(4, "silk process gains");
-        SilkEncoderAnalysis.Prefilter(state, control, _xfwQ3, state.XBuf, frameOffset);
+        SilkEncoderAnalysis.Prefilter(state, control, _xfwQ3, state.XBuf, frameOffset, state.Prefilt, control.TiltQ14);
+        if (state.LbrrEnabled != 0 && state.HighRate != 0)
+        {
+            // The reference-tilt prefilter runs every frame so its filter memory tracks the signal.
+            SilkEncoderAnalysis.Prefilter(
+                state, control, _xfwLbrrQ3, state.XBuf, frameOffset, state.PrefiltLbrr, control.TiltLbrrQ14);
+        }
+
         EncProf.Mark(5, "silk noise-shape prefilter");
 
         // Low-bitrate redundancy reuses this frame's parameters at a higher gain
@@ -941,7 +966,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                     state.EcPrevSignalType = ecPrevSignalStart;
                 }
 
-                Quantize(state, control, state.Indices, _xfwQ3, state.Pulses, _delayedDecision);
+                Quantize(state, control, state.Indices, _xfwQ3, state.Pulses, _delayedDecision, control.TiltQ14);
                 EncProf.Mark(7, "silk NSQ");
 
                 SilkEntropyEncoder.EncodeIndices(ref rangeEncoder, state, frameIndex, conditionalCoding);
