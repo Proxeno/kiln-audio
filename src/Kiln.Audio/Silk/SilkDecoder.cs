@@ -67,6 +67,18 @@ internal sealed class SilkDecoder
     /// (RFC 6716 §4.2.7.4).
     /// </summary>
     private readonly int[] _previousLogGain = new int[MaxChannels];
+
+    /// <summary>
+    /// PERF-4: the stage-2 PDF selector letters, pre-reduced to 0-based PDF indices.
+    /// </summary>
+    /// <remarks>
+    /// The tables in <see cref="SilkTables"/> store the reference's selector as a string of
+    /// letters; converting them once removes a string index, a character load and a subtraction
+    /// from every NLSF coefficient of every frame.
+    /// </remarks>
+    private static readonly byte[][] NlsfSelectWb = BuildNlsfSelect(SilkTables.NlsfStage2SelectWb, 'i');
+    private static readonly byte[][] NlsfSelectNbMb = BuildNlsfSelect(SilkTables.NlsfStage2SelectNbMb, 'a');
+
     private int _rateHz;
     private int _channels;
     private int _bandwidthIndex;
@@ -119,6 +131,7 @@ internal sealed class SilkDecoder
         bool lbrrOnly = false)
     {
         ArgumentNullException.ThrowIfNull(result);
+        long profileStart = SilkPerf4Profile.Start();
         int bandwidthIndex = internalRateHz switch
         {
             8000 => 0,
@@ -208,16 +221,22 @@ internal sealed class SilkDecoder
         int midLbrrMask = midHasLbrr ? DecodeLbrrMask(ref dec, silkFrames) : 0;
         int sideLbrrMask = sideHasLbrr ? DecodeLbrrMask(ref dec, silkFrames) : 0;
 
+        long stageStart = SilkPerf4Profile.Start();
         DecodeLbrrFrames(ref dec, result, silkFrames, midLbrrMask, sideLbrrMask);
+        SilkPerf4Profile.Stop(15, stageStart);
         if (lbrrOnly)
         {
             // In-band FEC decodes only the LBRR frames; the regular frames are decoded when this
             // packet is submitted normally. Leaving them unparsed keeps the cross-frame state
             // exactly where the reference leaves it after a FLAG_DECODE_LBRR pass.
+            SilkPerf4Profile.Stop(13, profileStart);
             return;
         }
 
+        stageStart = SilkPerf4Profile.Start();
         DecodeRegularFrames(ref dec, result, silkFrames, midVadMask, sideVadMask);
+        SilkPerf4Profile.Stop(16, stageStart);
+        SilkPerf4Profile.Stop(13, profileStart);
     }
 
     /// <summary>
@@ -300,8 +319,8 @@ internal sealed class SilkDecoder
     /// <summary>Decodes the per-frame LBRR flag mask for one channel (RFC 6716 §4.2.4, Table 4).</summary>
     internal static int DecodeLbrrMask(ref RangeDecoder dec, int silkFrames) => silkFrames switch
     {
-        2 => SilkTables.DecodePdf(ref dec, SilkTables.LbrrFlags40Pdf),
-        3 => SilkTables.DecodePdf(ref dec, SilkTables.LbrrFlags60Pdf),
+        2 => dec.DecodePdf(SilkTables.LbrrFlags40Pdf),
+        3 => dec.DecodePdf(SilkTables.LbrrFlags60Pdf),
         _ => 1,
     };
 
@@ -425,20 +444,27 @@ internal sealed class SilkDecoder
             DecodeStereoWeights(ref dec, target, ref state);
             if (!sideActive)
             {
-                midOnly = SilkTables.DecodePdf(ref dec, SilkTables.MidOnlyPdf) != 0;
+                midOnly = dec.DecodePdf(SilkTables.MidOnlyPdf) != 0;
             }
 
             target.IsMidOnly = midOnly;
         }
 
         // RFC 6716 §4.2.7.3, Table 9 and Table 10.
-        int frameType = SilkTables.DecodePdf(
-            ref dec, vadFlag ? SilkTables.FrameTypeActivePdf : SilkTables.FrameTypeInactivePdf);
+        int frameType = dec.DecodePdf(
+            vadFlag ? SilkTables.FrameTypeActivePdf : SilkTables.FrameTypeInactivePdf);
         target.SignalType = (SilkSignalType)(frameType >> 1);
         target.QuantizationOffsetType = frameType & 1;
 
+        long stageStart = SilkPerf4Profile.Start();
         DecodeGains(ref dec, target, channel, firstOfType, previousCoded);
+        SilkPerf4Profile.Stop(17, stageStart);
+
+        stageStart = SilkPerf4Profile.Start();
         DecodeNlsf(ref dec, target);
+        SilkPerf4Profile.Stop(18, stageStart);
+
+        stageStart = SilkPerf4Profile.Start();
         if (target.IsVoiced)
         {
             DecodeLtp(ref dec, target, ref state, isLbrr, firstOfType, previousCoded, previousSignalType);
@@ -448,18 +474,22 @@ internal sealed class SilkDecoder
             target.LtpScalingQ14 = SilkTables.LtpScalingDefaultQ14;
         }
 
+        SilkPerf4Profile.Stop(19, stageStart);
+
+        stageStart = SilkPerf4Profile.Start();
         DecodeExcitation(ref dec, target);
+        SilkPerf4Profile.Stop(20, stageStart);
         return midOnly;
     }
 
     /// <summary>Decodes the stereo prediction weights (RFC 6716 §4.2.7.1, Tables 6 and 7).</summary>
     private static void DecodeStereoWeights(ref RangeDecoder dec, SilkChannelFrame target, ref ChannelState state)
     {
-        int n = SilkTables.DecodePdf(ref dec, SilkTables.StereoPredJointPdf);
-        int i0 = SilkTables.DecodePdf(ref dec, SilkTables.StereoPredStage2Pdf);
-        int i1 = SilkTables.DecodePdf(ref dec, SilkTables.StereoPredStage3Pdf);
-        int i2 = SilkTables.DecodePdf(ref dec, SilkTables.StereoPredStage2Pdf);
-        int i3 = SilkTables.DecodePdf(ref dec, SilkTables.StereoPredStage3Pdf);
+        int n = dec.DecodePdf(SilkTables.StereoPredJointPdf);
+        int i0 = dec.DecodePdf(SilkTables.StereoPredStage2Pdf);
+        int i1 = dec.DecodePdf(SilkTables.StereoPredStage3Pdf);
+        int i2 = dec.DecodePdf(SilkTables.StereoPredStage2Pdf);
+        int i3 = dec.DecodePdf(SilkTables.StereoPredStage3Pdf);
 
         int wi0 = i0 + (3 * (n / 5));
         int wi1 = i2 + (3 * (n % 5));
@@ -490,8 +520,8 @@ internal sealed class SilkDecoder
             if (k == 0 && (firstOfType || !previousCoded))
             {
                 // Independent coding: 3 MSB then 3 LSB, then the previous-gain clamp.
-                int msb = SilkTables.DecodePdf(ref dec, SilkTables.GainMsbPdf[(int)target.SignalType]);
-                int lsb = SilkTables.DecodePdf(ref dec, SilkTables.GainLsbPdf);
+                int msb = dec.DecodePdf(SilkTables.GainMsbPdf[(int)target.SignalType]);
+                int lsb = dec.DecodePdf(SilkTables.GainLsbPdf);
                 logGain = (msb << 3) | lsb;
                 if (previousLogGain >= 0)
                 {
@@ -501,7 +531,7 @@ internal sealed class SilkDecoder
             else
             {
                 int previous = previousLogGain >= 0 ? previousLogGain : 0;
-                int delta = SilkTables.DecodePdf(ref dec, SilkTables.GainDeltaPdf);
+                int delta = dec.DecodePdf(SilkTables.GainDeltaPdf);
                 logGain = Math.Clamp(
                     Math.Max((2 * delta) - 16, previous + delta - 4), 0, 63);
             }
@@ -510,6 +540,24 @@ internal sealed class SilkDecoder
             target.GainQ16[k] = DequantizeGainQ16(logGain);
             previousLogGain = logGain;
         }
+    }
+
+    private static byte[][] BuildNlsfSelect(string[] source, char baseLetter)
+    {
+        var result = new byte[source.Length][];
+        for (int i = 0; i < source.Length; i++)
+        {
+            string letters = source[i];
+            var row = new byte[letters.Length];
+            for (int k = 0; k < letters.Length; k++)
+            {
+                row[k] = (byte)(letters[k] - baseLetter);
+            }
+
+            result[i] = row;
+        }
+
+        return result;
     }
 
     /// <summary>Decodes the normalized LSF indices (RFC 6716 §4.2.7.5.1, §4.2.7.5.2 and §4.2.7.5.5).</summary>
@@ -521,22 +569,21 @@ internal sealed class SilkDecoder
         byte[] stage1 = wideband
             ? (voiced ? SilkTables.NlsfStage1WbVoicedPdf : SilkTables.NlsfStage1WbInactivePdf)
             : (voiced ? SilkTables.NlsfStage1NbMbVoicedPdf : SilkTables.NlsfStage1NbMbInactivePdf);
-        int i1 = SilkTables.DecodePdf(ref dec, stage1);
+        int i1 = dec.DecodePdf(stage1);
         target.NlsfStage1Index = i1;
 
         // RFC 6716 §4.2.7.5.1: NB and MB use an order-10 predictor, WB an order-16 one.
         int order = wideband ? 16 : 10;
-        string selection = wideband ? SilkTables.NlsfStage2SelectWb[i1] : SilkTables.NlsfStage2SelectNbMb[i1];
+        ReadOnlySpan<byte> selection = wideband ? NlsfSelectWb[i1] : NlsfSelectNbMb[i1];
         byte[][] pdfs = wideband ? SilkTables.NlsfStage2WbPdf : SilkTables.NlsfStage2NbMbPdf;
-        int letterBase = wideband ? 'i' : 'a';
 
         for (int k = 0; k < order; k++)
         {
             // RFC 6716 §4.2.7.5.2: 9 symbols centre on index 0; -4 and 4 escape to Table 19.
-            int index = SilkTables.DecodePdf(ref dec, pdfs[selection[k] - letterBase]) - 4;
+            int index = dec.DecodePdf(pdfs[selection[k]]) - 4;
             if (index is -4 or 4)
             {
-                int extension = SilkTables.DecodePdf(ref dec, SilkTables.NlsfExtensionPdf);
+                int extension = dec.DecodePdf(SilkTables.NlsfExtensionPdf);
                 index += index > 0 ? extension : -extension;
             }
 
@@ -545,7 +592,7 @@ internal sealed class SilkDecoder
 
         // RFC 6716 §4.2.7.5.5: the Q2 interpolation factor is coded only for 20 ms frames.
         target.NlsfInterpolationFactor = _subframes == 4
-            ? SilkTables.DecodePdf(ref dec, SilkTables.NlsfInterpolationPdf)
+            ? dec.DecodePdf(SilkTables.NlsfInterpolationPdf)
             : 4;
     }
 
@@ -572,14 +619,14 @@ internal sealed class SilkDecoder
         }
         else
         {
-            int delta = SilkTables.DecodePdf(ref dec, SilkTables.PitchLagDeltaPdf);
+            int delta = dec.DecodePdf(SilkTables.PitchLagDeltaPdf);
             lag = delta == 0 ? DecodeAbsoluteLag(ref dec) : state.PreviousLag + delta - 9;
         }
 
         state.PreviousLag = lag;
         target.PrimaryPitchLag = lag;
 
-        int contour = SilkTables.DecodePdf(ref dec, ContourPdf());
+        int contour = dec.DecodePdf(ContourPdf());
         target.PitchContourIndex = contour;
         ReadOnlySpan<sbyte> offsets = ContourOffsets();
         int lagMin = SilkTables.PitchLagMin[_bandwidthIndex];
@@ -591,12 +638,12 @@ internal sealed class SilkDecoder
         }
 
         // RFC 6716 §4.2.7.6.2: one periodicity index chooses the LTP filter codebook.
-        int periodicity = SilkTables.DecodePdf(ref dec, SilkTables.LtpPeriodicityPdf);
+        int periodicity = dec.DecodePdf(SilkTables.LtpPeriodicityPdf);
         target.LtpPeriodicityIndex = periodicity;
         byte[] filterPdf = SilkTables.LtpFilterPdf[periodicity];
         for (int k = 0; k < _subframes; k++)
         {
-            target.LtpFilterIndex[k] = SilkTables.DecodePdf(ref dec, filterPdf);
+            target.LtpFilterIndex[k] = dec.DecodePdf(filterPdf);
         }
 
         // RFC 6716 §4.2.7.6.3: regular frames code the scaling only in the first interval;
@@ -604,7 +651,7 @@ internal sealed class SilkDecoder
         bool scalingCoded = isLbrr ? (firstOfType || !previousCoded) : firstOfType;
         if (scalingCoded)
         {
-            int symbol = SilkTables.DecodePdf(ref dec, SilkTables.LtpScalingPdf);
+            int symbol = dec.DecodePdf(SilkTables.LtpScalingPdf);
             target.LtpScalingQ14 = SilkTables.LtpScalingQ14[symbol];
         }
         else
@@ -616,8 +663,8 @@ internal sealed class SilkDecoder
     /// <summary>Decodes an absolute primary pitch lag (RFC 6716 §4.2.7.6.1, Tables 29 and 30).</summary>
     private int DecodeAbsoluteLag(ref RangeDecoder dec)
     {
-        int high = SilkTables.DecodePdf(ref dec, SilkTables.PitchLagHighPdf);
-        int low = SilkTables.DecodePdf(ref dec, SilkTables.PitchLagLowPdf[_bandwidthIndex]);
+        int high = dec.DecodePdf(SilkTables.PitchLagHighPdf);
+        int low = dec.DecodePdf(SilkTables.PitchLagLowPdf[_bandwidthIndex]);
         return (high * SilkTables.PitchLagScale[_bandwidthIndex])
             + low
             + SilkTables.PitchLagMin[_bandwidthIndex];
@@ -656,11 +703,11 @@ internal sealed class SilkDecoder
     private void DecodeExcitation(ref RangeDecoder dec, SilkChannelFrame target)
     {
         // RFC 6716 §4.2.7.7: the 2-bit LCG seed follows the LTP parameters.
-        target.Seed = SilkTables.DecodePdf(ref dec, SilkTables.SeedPdf);
+        target.Seed = dec.DecodePdf(SilkTables.SeedPdf);
 
         // RFC 6716 §4.2.7.8.1: the rate level selects the pulse count PDF.
-        int rateLevel = SilkTables.DecodePdf(
-            ref dec, target.IsVoiced ? SilkTables.RateLevelVoicedPdf : SilkTables.RateLevelInactivePdf);
+        int rateLevel = dec.DecodePdf(
+            target.IsVoiced ? SilkTables.RateLevelVoicedPdf : SilkTables.RateLevelInactivePdf);
         target.RateLevel = rateLevel;
 
         // RFC 6716 §4.2.7.8, Table 44: shell block count by bandwidth and SILK frame size.
@@ -671,12 +718,12 @@ internal sealed class SilkDecoder
         // special rate levels 9 and (after ten escapes) 10, and means "extra LSBs follow".
         for (int block = 0; block < blocks; block++)
         {
-            int pulses = SilkTables.DecodePdf(ref dec, SilkTables.PulseCountPdf[rateLevel]);
+            int pulses = dec.DecodePdf(SilkTables.PulseCountPdf[rateLevel]);
             int lsbCount = 0;
             while (pulses == 17)
             {
                 lsbCount++;
-                pulses = SilkTables.DecodePdf(ref dec, SilkTables.PulseCountPdf[lsbCount >= 10 ? 10 : 9]);
+                pulses = dec.DecodePdf(SilkTables.PulseCountPdf[lsbCount >= 10 ? 10 : 9]);
             }
 
             target.ShellBlockPulseCount[block] = pulses;
@@ -703,7 +750,7 @@ internal sealed class SilkDecoder
                 int magnitude = blockPulses[sample];
                 for (int bit = 0; bit < lsbCount; bit++)
                 {
-                    magnitude = (magnitude << 1) | SilkTables.DecodePdf(ref dec, SilkTables.LsbPdf);
+                    magnitude = (magnitude << 1) | dec.DecodePdf(SilkTables.LsbPdf);
                 }
 
                 blockPulses[sample] = (short)magnitude;
@@ -719,7 +766,7 @@ internal sealed class SilkDecoder
                 block * SilkChannelFrame.ShellBlockSize, SilkChannelFrame.ShellBlockSize);
             for (int sample = 0; sample < SilkChannelFrame.ShellBlockSize; sample++)
             {
-                if (blockPulses[sample] != 0 && SilkTables.DecodePdf(ref dec, signPdf) == 0)
+                if (blockPulses[sample] != 0 && dec.DecodePdf(signPdf) == 0)
                 {
                     blockPulses[sample] = (short)-blockPulses[sample];
                 }
@@ -737,13 +784,13 @@ internal sealed class SilkDecoder
 
         if (size == 2)
         {
-            int split = SilkTables.DecodePdf(ref dec, SilkTables.PulseSplitPdf(2, count));
+            int split = dec.DecodePdf(SilkTables.PulseSplitPdf(2, count));
             pulses[offset] = (short)split;
             pulses[offset + 1] = (short)(count - split);
             return;
         }
 
-        int left = SilkTables.DecodePdf(ref dec, SilkTables.PulseSplitPdf(size, count));
+        int left = dec.DecodePdf(SilkTables.PulseSplitPdf(size, count));
         SplitPulses(ref dec, pulses, offset, size / 2, left);
         SplitPulses(ref dec, pulses, offset + (size / 2), size / 2, count - left);
     }
