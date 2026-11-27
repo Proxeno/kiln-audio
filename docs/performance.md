@@ -144,7 +144,7 @@ The forward and inverse MDCT now meet the PERF-1 target of 6 µs at 960 points.
 ## SIMD kernels
 
 Each kernel lives in `src/Kiln.Audio/Simd/` and has a scalar reference path and a portable
-`Vector128<T>` path (AdvSimd on arm64, SSE on x64). No `Vector256`/`Vector512` path is shipped
+`Vector128<T>` path (AdvSimd on arm64, SSE on x64); SIMD-1 (below) moved these onto per-ISA kernel sets. No `Vector256`/`Vector512` path is shipped
 because it was not measured to win on this machine.
 
 | Kernel | Path | Parity |
@@ -871,7 +871,7 @@ overload and the float overload. `EncoderAllocationTests` proves this with
 ## SILK encoder quality
 
 This section records the SILK encoder's quality against libopus 1.5.2, the methodology, and what
-SILK-QUAL-1 and SILK-QUAL-2 changed. It is evidence, not a CI gate; the gate lives in
+SILK-QUAL-1, SILK-QUAL-2 and SILK-QUAL-3 changed. It is evidence, not a CI gate; the gate lives in
 `SilkEncoderQualityTests`.
 
 ### Method
@@ -905,25 +905,27 @@ we beat libopus.
 | ---- | ----- | ---- | ---- | ------- | --- |
 | NB | 20 ms | 8  | 4.01 | 3.60 | +0.41 |
 | NB | 60 ms | 8  | 4.10 | 3.64 | +0.46 |
-| NB | 20 ms | 12 | 5.35 | 5.51 | -0.16 |
-| NB | 60 ms | 12 | 5.44 | 5.49 | -0.05 |
+| NB | 20 ms | 12 | 5.52 | 5.51 | +0.01 |
+| NB | 60 ms | 12 | 5.55 | 5.49 | +0.06 |
 | MB | 20 ms | 8  | 4.06 | 2.77 | +1.29 |
 | MB | 60 ms | 8  | 4.12 | 2.81 | +1.30 |
 | MB | 20 ms | 12 | 5.34 | 5.01 | +0.33 |
 | MB | 60 ms | 12 | 5.40 | 4.84 | +0.56 |
-| MB | 20 ms | 20 | 6.53 | 6.73 | -0.21 |
-| MB | 60 ms | 20 | 6.42 | 6.72 | -0.30 |
+| MB | 20 ms | 20 | 6.55 | 6.73 | -0.19 |
+| MB | 60 ms | 20 | 6.59 | 6.72 | -0.13 |
 | WB | 20 ms | 8  | 3.92 | 1.71 | +2.21 |
 | WB | 60 ms | 8  | 4.05 | 1.77 | +2.28 |
 | WB | 20 ms | 12 | 5.01 | 4.50 | +0.52 |
 | WB | 60 ms | 12 | 5.06 | 4.37 | +0.69 |
-| WB | 20 ms | 20 | 6.44 | 6.44 | -0.00 |
-| WB | 60 ms | 20 | 6.35 | 6.43 | -0.08 |
+| WB | 20 ms | 20 | 6.55 | 6.44 | +0.11 |
+| WB | 60 ms | 20 | 6.57 | 6.43 | +0.13 |
 
 SILK-QUAL-2 improved every complexity-0 configuration, by 0.24-0.74 dB, with no regressions. Ten of
-sixteen now meet the target outright; four more are within 0.16 dB (WB 20 ms 20 kbps is a measured
-tie, NB 60 ms 12 kbps -0.05, WB 60 ms 20 kbps -0.08, NB 20 ms 12 kbps -0.16). MB 20 kbps remains
-0.21-0.30 dB behind. Before SILK-QUAL-1, all sixteen were behind by 0.01-0.90 dB.
+sixteen met the target outright; the other six trailed by 0.00-0.30 dB, all at the high-rate regime
+(above 1.2 bits per internal-rate sample). SILK-QUAL-3 closes four of those six: narrowband 12 kbps
+at both frame durations and wideband 20 kbps at both frame durations now meet or beat libopus. Only
+mediumband 20 kbps still trails, by 0.19 dB (20 ms) and 0.13 dB (60 ms); both are improvements over
+SILK-QUAL-2's 0.21 and 0.30 dB.
 
 ### Complexity 5 and 10
 
@@ -978,6 +980,40 @@ shaping strength and richer c0 analysis. Richer analysis at complexity 0 (the co
 and stronger shaping both made quality worse; the three above are the survivors and were checked
 on vectors 04 and 06 as a held-out pair.
 
+### What SILK-QUAL-3 changed
+
+All four changes act only in the high-rate regime (`HighRate != 0`, i.e. above 1.2 bits per
+internal-rate sample: NB 12 kbps, MB 20 kbps, WB 20 kbps). The ten low-rate configurations that
+already beat libopus are untouched, so none of them can regress. Tuning used vectors 02 and 03;
+vectors 04 and 06 were held out and confirm the result.
+
+1. **Stronger tilt shaping at high rate.** `NoiseShapeAnalysis` scales the tilt shaping coefficient
+   by 1.5 in the high-rate path. In the single-state quantizer a stronger tilt lowers reconstruction
+   noise uniformly: +0.01-0.09 dB across all six targets, at no extra cost (one multiply per frame).
+   The low-rate path keeps the SILK-QUAL-2 strength, which that sweep had already tuned.
+2. **Per-band NSQ rate penalty.** The delayed-decision lambda base is 4 for narrowband and 2 for
+   medium/wideband at high rate (it was 1 for every high-rate configuration). Narrowband 12 kbps
+   was over-producing pulses and gains most (+0.11 dB); the medium/wideband optimum is 2.
+3. **Narrowband 12 kbps target-SNR lift.** One extra dB of target SNR at narrowband high rate,
+   gated to `FsKhz == 8` and `HighRate != 0`. The narrowband configuration was bit-starved relative
+   to libopus; this adds +0.16 dB and is what flips both narrowband 12 kbps rows above libopus.
+   It costs about 6% more payload bytes at narrowband (see below).
+4. **Voice-activity-weighted per-frame allocation at 60 ms.** For high-rate 60 ms packets the
+   per-frame SNR target is distributed by speech activity, normalized so the packet mean stays at
+   the configured rate (the bit reservoir damps the excursions). This is worth +0.06 dB on both
+   60 ms targets and is neutral at 20 ms.
+
+Rate-distortion gain quantization was implemented and measured first, as planned: enumerating every
+decoder-accepted gain symbol and minimizing squared log-gain error (with and without a rate term)
+regressed segSNR by 0.01-0.08 dB everywhere. The reference nearest-index-plus-hysteresis rule is a
+better fit for the quantizer's interaction with the noise-shaping loop, so it was dropped. The LTP
+and NLSF quantizers already include rate terms (SILK-QUAL-1), and forcing the NSQ rate loop to
+enforce the packet budget instead of the packet capacity also regressed (0.19-0.33 dB), confirming
+that side-information bits do not buy excitation pulses in this rate range.
+
+Payload bytes: the high-rate changes stay in the same range as SILK-QUAL-2 (MB/WB about 13-14%
+above libopus). The narrowband SNR lift raises narrowband from about 5% to about 15% above libopus.
+
 ### Encode cost
 
 Measured with a stopwatch over the whole vector 02 corpus (1251 frames of 20 ms, MB, 20 kbps) on
@@ -996,20 +1032,27 @@ unchanged in computation; the high-rate path uses one NSQ state instead of four 
 warped autocorrelation and warped gain, so it is strictly cheaper. The changes are carried by the
 same fixed-point kernels and add no allocations.
 
+SILK-QUAL-3 does not increase encode cost either; the per-frame stopwatch in the quality harness
+shows the same or slightly lower per-frame times (a few percent, because the higher narrowband and
+mediumband lambda produces fewer excitation pulses). The added work is one multiply for the tilt
+scale, one multiply and a few adds for the allocation normalization, and a lookup for the lambda,
+all allocation-free. The ratio against SILK-QUAL-2 is about 1.0x, well inside the 1.5x budget.
+
 ### Remaining gap and next ideas
 
-SILK-QUAL-2 leaves one clear gap: MB 20 kbps, 0.21 dB (20 ms) and 0.30 dB (60 ms) behind libopus.
-NB 12 kbps (0.16/0.05 dB), WB 20 kbps 60 ms (0.08 dB) and WB 20 kbps 20 ms (a tie) are close. The
-gap is flat across complexity, so it is not the quantizer search; the sweeps in SILK-QUAL-2 ruled
-out the trellis width, warping, lambda, the SNR threshold, the quantization offset, NLSF
-interpolation, MSVQ survivors and the shaping strengths as causes at MB 20 kbps. What remains:
+SILK-QUAL-3 leaves one gap: MB 20 kbps, 0.19 dB (20 ms) and 0.13 dB (60 ms) behind libopus, both
+improved from SILK-QUAL-2. Every other complexity-0 configuration meets or beats libopus. The four
+high-rate structural knobs that remained in SILK-QUAL-2's sweep (trellis width, warping, the SNR
+threshold and the quantization offset) were re-measured at these rates in SILK-QUAL-3 and still
+regress; narrowband and wideband responded to tilt strength, the per-band lambda and the narrowband
+SNR lift, while mediumband 20 kbps did not respond to the SNR lift or to stronger shaping beyond
+SILK-QUAL-3's 1.5x. What remains for mediumband:
 
-1. **Rate-distortion index selection** for gains, LTP and NLSFs, instead of nearest-index plus a
-   global gain multiplier.
-2. **Per-frame bit allocation across 40/60 ms packets and the bit reservoir**, favouring voiced
-   onsets.
-3. **Deeper excitation/noise-shaping work** at MB 12 kHz, where libopus still makes up 0.2-0.3 dB
-   with fewer bits.
+1. **Deeper excitation/noise-shaping work at the 12 kHz internal rate**, where libopus still makes
+   up 0.1-0.2 dB with fewer payload bits; the gap there is not rate-control-limited.
+2. **LPC analysis improvements** (window, order, noise-floor regularization) at 12 kHz.
+3. **Rate-distortion NLSF/gain selection that accounts for the noise-shaping loop**, which the
+   plain squared-error RD of SILK-QUAL-3 did not capture.
 
 ### Frozen RFC baseline and the ratchet
 
@@ -1018,7 +1061,175 @@ figures are frozen in `tests/Kiln.Audio.Tests/SilkEncoder/SilkRfcBaseline.cs`, m
 harness (build the RFC source with `FIXED_POINT=1`, then run `SilkRfcBaselineGenerator` with
 `KILN_SILK_RFC_OPUS_DEMO` set to its `opus_demo`). Per configuration the test asserts
 `ours >= max(RFC, frozen ours - 0.05 dB)` where we still trail libopus, and
-`ours >= frozen libopus` where we already beat it. SILK-QUAL-2 raised every floor: the ten
-configurations that beat libopus are pinned to its figure, and the rest to their new measured score
-minus 0.05 dB, so the gain is locked in. The remaining gaps stay reported in the test output and in
-the table above.
+`ours >= frozen libopus` where we already beat it. SILK-QUAL-2 and SILK-QUAL-3 raised every floor:
+the fourteen configurations that now beat or meet libopus are pinned to its figure, and the two
+mediumband 20 kbps rows to their new measured score minus 0.05 dB, so the gain is locked in. The
+remaining gaps stay reported in the test output and in the table above.
+
+## PUB-PERF-1: public-API benchmark, SILK output resampler, CELT output path
+
+The earlier "ratio" tables timed internal stages (`CeltDecoder`/`CeltSynthesizer`, SILK at its
+internal rate), not what a user calls. PUB-PERF-1 adds a benchmark of the shipped entry point and
+fixes the two costs it exposed.
+
+**Benchmark.** `dotnet <Kiln.Audio.Benchmarks.dll> micro pubapi [passes]` times
+`OpusDecoder.Decode(packet, short[])` over each whole RFC vector 01-12 at 48 kHz stereo and mono
+(one outer timer per pass, a fresh decoder per pass, 20 warm-up passes, best of 15).
+`scripts/bench-libopus-inproc.sh pubapi [passes]` runs `opus_decode` at the same rate and channel
+count with the same N and statistic. The script now reads the build flags of the library it links
+from `.oracle/build/CMakeCache.txt` and refuses to run if it cannot. The oracle it printed:
+
+```
+libopus 1.5.2
+C_FLAGS = -O3 -DNDEBUG -std=gnu99 -arch arm64 ... -fstack-protector-strong
+cmake CMAKE_BUILD_TYPE:STRING=Release
+cmake CMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG
+cmake OPUS_FIXED_POINT:BOOL=OFF
+cmake OPUS_HARDENING:BOOL=ON
+simd=arm64 NEON intrinsics enabled (compiled into the static library)
+```
+
+**Resampler.** `SilkResampler` was a scalar double-precision FIR with an integer `%` per tap
+and one call per output sample, run for both channels even when a mono stream was decoded to
+stereo. It is now a block resampler: precomputed float polyphase banks (taps reversed and padded to
+a multiple of 8), a linear history buffer shifted once per block (no modulo), a two-accumulator
+Vector128 dot product (fused multiply-add where the hardware has it), and a block alignment delay.
+`SilkOutput` no longer runs the right-channel resampler for mono-coded frames; it synchronizes the
+right state from the left (`CopyStateFrom`) the first time a coded-stereo frame arrives, which is
+exactly equivalent because both saw identical input until then. Arithmetic is now float with a
+round-to-nearest-even at the end, so an output sample can differ from the old double result by one
+least-significant bit at a rounding tie; the conformance, SNR and opus_compare gates are unchanged
+and pass.
+
+**CELT output.** At a 48 kHz API rate the synthesizer now writes straight into the caller's
+buffer (no `_pcm48` staging and no scalar per-sample copy), and the per-frame `Clear` of the
+output buffer only runs for SILK-only frames, the one mode that accumulates into it. Int16 output
+still goes through the vectorized `CeltPcm.ToInt16`.
+
+48 kHz stereo, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 37.21 | 43.13 | 1.16 | 37.10 | 41.47 | 1.12 |
+| 02 | 9.11 | 143.33 | 15.74 | 9.15 | 18.61 | 2.03 |
+| 03 | 9.19 | 122.86 | 13.38 | 9.28 | 17.76 | 1.91 |
+| 04 | 12.69 | 158.75 | 12.51 | 12.69 | 21.02 | 1.66 |
+| 05 | 22.84 | 175.55 | 7.69 | 22.95 | 33.34 | 1.45 |
+| 06 | 22.47 | 162.92 | 7.25 | 22.63 | 33.32 | 1.47 |
+| 07 | 18.41 | 21.69 | 1.18 | 18.49 | 20.31 | 1.10 |
+| 08 | 18.45 | 23.04 | 1.25 | 18.56 | 21.06 | 1.13 |
+| 09 | 35.89 | 44.41 | 1.24 | 35.55 | 42.49 | 1.20 |
+| 10 | 39.78 | 103.45 | 2.60 | 39.94 | 50.48 | 1.26 |
+| 11 | 28.79 | 30.72 | 1.07 | 28.80 | 29.09 | 1.01 |
+| 12 | 9.79 | 154.51 | 15.78 | 9.73 | 16.98 | 1.75 |
+
+48 kHz mono, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 32.72 | 38.29 | 1.17 | 32.91 | 37.52 | 1.14 |
+| 02 | 7.33 | 74.74 | 10.20 | 7.40 | 14.11 | 1.91 |
+| 03 | 7.54 | 64.96 | 8.61 | 7.58 | 13.80 | 1.82 |
+| 04 | 10.37 | 84.22 | 8.12 | 10.48 | 16.67 | 1.59 |
+| 05 | 18.20 | 95.42 | 5.24 | 18.30 | 25.63 | 1.40 |
+| 06 | 18.30 | 89.64 | 4.90 | 18.21 | 26.74 | 1.47 |
+| 07 | 14.86 | 17.68 | 1.19 | 14.66 | 17.02 | 1.16 |
+| 08 | 14.94 | 18.53 | 1.24 | 14.66 | 17.51 | 1.19 |
+| 09 | 31.90 | 39.45 | 1.24 | 31.61 | 38.61 | 1.22 |
+| 10 | 34.30 | 69.39 | 2.02 | 34.31 | 42.74 | 1.25 |
+| 11 | 24.46 | 26.89 | 1.10 | 24.34 | 25.93 | 1.07 |
+| 12 | 8.24 | 80.32 | 9.75 | 8.37 | 15.26 | 1.82 |
+
+The CELT-only vectors (01, 07, 08, 09, 11) were already near parity and gain a few percent; the
+SILK and hybrid vectors (02-06, 10, 12) went from 5-16x libopus to 1.4-2.0x. The remaining gap on
+those is the SILK decode itself, not the output stage. Two `SilkEncoderQualityTests` rows (MB and
+WB, 60 ms, 20 kbps, complexity 0) fail on unmodified train-next as well and are unrelated.
+
+## SIMD-1: per-ISA kernel sets and the CELT decode/synthesis kernels
+
+Owner directive: scalar loops that should be vectorized, and 256-bit code that runs emulated on
+Apple silicon, are red flags; the video codec avoids both with an intrinsics abstraction. SIMD-1
+adds the audio equivalent and moves the CELT decode/synthesis kernels onto it. The design and the
+per-loop audit that motivated it are in the lane's perf review (section 3 and the audit table).
+
+### Kernel-set design
+
+- `ICeltKernels` (`src/Kiln.Audio/Simd/Kernels/ICeltKernels.cs`) is an interface of **static
+  abstract** members. Tiers are `struct`s, and the CELT decoder and synthesizer are generic over
+  the tier (`DecodeFrameCore<TK>`, `SynthesizeCore<TK>`, `Mdct.InverseUnscaled<TK>`,
+  `Fft.Transform<TK>`). The JIT compiles one body per tier, so `TK.Rotate(...)` is a direct,
+  inlinable call: there is **no dispatch inside a frame**, and the scheme is NativeAOT-safe.
+  Kiln's interface-per-call scheme (video) would cost an interface call per band here.
+- **Tiers.** `ScalarKernels` (reference), `Vector128Kernels` (portable, SSE2/WASM/any),
+  `AdvSimdArm64Kernels` (`AdvSimd`/`AdvSimd.Arm64` directly, fused multiply-add) and
+  `Avx2FmaKernels` (x64 AVX2+FMA3). The three vector tiers share one set of loop bodies,
+  `CeltVec<T>`, parameterised by an `IVecOps` struct that supplies the tier's native fused
+  multiply-add and shuffles (`ArmOps`: `FusedMultiplyAdd`, `UnzipEven/Odd`, `ZipLow/High`, `Ext`;
+  `X86Ops`: `Fma.MultiplyAdd`, `Sse.Shuffle/UnpackLow/High`; `PortableOps`: `Vector128.Shuffle`).
+- **Selection.** `AudioKernels.Select()` is called once, in the `CeltDecoder`/`CeltSynthesizer`
+  constructors, and mirrors `H264KernelSet.CreateBest()`: Avx2Fma, then AdvSimdArm64, then
+  Vector128, then Scalar. `KILN_AUDIO_DISABLE_SIMD` forces `Scalar` there. `OpusDecoder` needs no
+  change: its CELT synthesizer and decoder pick the tier at construction, and there is one
+  `switch` per frame (`DecodeFrame`, `Synthesize`) to enter the generic body. SILK and the encoder
+  can plug into the same `AudioKernels` selection (SIMD-2).
+- **Rules** (enforced by structure): no `Vector256`/`Vector512`/`Vector<T>` outside the Avx2Fma
+  tier; arm64 never touches a 256-bit type; the kernel is the loop (no per-sample call); parity
+  tests call the tiers directly (`KernelTierParityTests`), with `AudioKernels.Scope(tier)` as the
+  whole-codec override that only the constructors consult.
+- The pre-existing static kernel classes (`DecKernels`, `FftKernels`, `MdctKernels`,
+  `CeltPostFilterKernel`) remain as the scalar/portable building blocks and for the encoder; the
+  tiers forward to them where nothing changed, so `SimdParityTests` still guards them.
+
+### What moved, loop by loop
+
+| Loop | Before | Now |
+| --- | --- | --- |
+| FFT leaf level + decimation permutation | scalar, one non-inlined call per node, separate bounds-checked permutation pass | one fused kernel: four leaf nodes per step, contiguous vector loads, lane scatter stores (all radices) |
+| FFT levels with half 5/15/30 (tails) | vector + scalar tail per node | whole vectors; the tail block is re-run at `half-4` and blended with the already-final lanes (no scalar tail, no per-node call) |
+| FFT butterflies | separate mul and add | `FusedMultiplyAdd/Subtract` (arm64), `Fma` (x64) |
+| IMDCT pre-rotation, stride 1 | `Shuffle` + `Create(GetLower,GetLower)` | `UnzipEven/UnzipOdd` + `Reverse` per tier |
+| IMDCT post-rotation + de-shuffle + mirror + copy | four passes, two intermediate buffers | post-rotation fused with the de-shuffle (one pass, `Zip`), middle is one block copy, window ramps vectorized with a pre-reversed window; the output is written straight into the frame's history slot |
+| IMDCT overlap-add | scalar loop + 840-float copy | one vector `OverlapAddSave` (add the old overlap, save the new one) |
+| Short-block accumulate / stereo downmix | V128 / scalar | `AddInPlace` / `Average` kernels |
+| Comb post-filter | no-op loop over the frame when off; V128 mul+add | early return when both gain sets are zero, no steady tail when the new gain is zero; FMA taps |
+| De-emphasis | scalar, 4-unrolled, one channel at a time | prefix scan over 4 samples per step (`ShiftUp1/2`, `Broadcast3`), both channels per step, `Zip` for the interleave, one carried FMA per block |
+| Mono stream to stereo output | synthesis run twice on identical data | channel 1 is not synthesized while both channels are identical (since reset); PCM is duplicated in the de-emphasis kernel; channel 1 state is materialized on the first stereo frame or loss |
+| Spread rotation, stride 1 | scalar mul + add chain | carried chain is one fused multiply-add (`FusedMultiplyAddScalar`/`Fma.MultiplyAddScalar`) |
+| Spread rotation, stride >= 4 | V128 | V128 with FMA |
+| Renormalise energy, stereo-merge dots | scalar, bounds-checked | `SumSquares`, `StereoDots` kernels, two accumulators |
+| Haar, stride 1 | scalar | `Unzip`, add/sub, `Zip` |
+| Haar, stride >= 4 | scalar | vector across the interleaved lanes |
+| Denormalise / PVQ pulse scale / stereo merge | V128 | unchanged kernels, now selected through the tier |
+| Encoder prefilter dot (`Vector256` + `Create(a[i]...)`) | 256-bit on x64, element-wise `Create` on arm64 | retired: `Vector128Kernels.Dot` with real loads; the same 4-lane accumulation as the arm64 path it replaces, so arm64 encoder output is unchanged |
+| SILK input resampler dot (`Vector<float>` + `Slice`) | width-dependent, two bounds checks per step | the same `Vector128Kernels.Dot` |
+
+**Left for SIMD-2 (not touched here):** SILK decode helpers (LTP rewhitening FIR, sLTP scaling,
+stereo unmix, output deinterleave), the SILK encoder correlation kernels, CELT encoder analysis
+(forward MDCT fold and post write, pulse coder, transient/TF/spread analysis, prefilter comb and
+lag search), `SilkResampler` and `CeltOutput` (PUB-PERF-1). Strided (short-block) IMDCT
+pre-rotation is still scalar; it needs a block-deinterleave kernel. The Avx2Fma tier currently
+uses the 128-bit VEX forms with FMA: 256-bit widening of the elementwise kernels is possible but
+could not be validated on the arm64 build machine. The FFT factor order (4,4,2,3,5) is kept so the
+encoder's forward MDCT is not perturbed.
+
+### Measurements
+
+One lock window on the M5 Max: `micro decode` (tier-1 warmed; decode + synthesis + int16) from a
+`train-next` baseline worktree and from this branch, alternated five times each, best of five;
+`scripts/bench-libopus-inproc.sh` twice, best of five passes per run, best of two runs. Ratio is
+Kiln / libopus; below 1.0 means Kiln is faster.
+
+| Vector | libopus us/frame | Kiln before | Kiln after | Ratio before | Ratio after |
+| --- | --- | --- | --- | --- | --- |
+| 01 (CELT) | 6.69 | 7.51 | 6.58 | 1.12 | **0.98** |
+| 07 (CELT) | 4.38 | 4.86 | 3.84 | 1.11 | **0.88** |
+| 11 (CELT) | 19.25 | 19.43 | 16.43 | 1.01 | **0.85** |
+| 02 (SILK) | 4.52 | 5.25 | 5.20 | 1.16 | 1.15 |
+| 03 (SILK) | 5.73 | 6.61 | 6.63 | 1.15 | 1.16 |
+| 04 (SILK) | 6.32 | 7.10 | 7.11 | 1.12 | 1.12 |
+
+The CELT synthesis stage roughly halves (vector 01: 1.75 to 0.99 us, 07: 1.82 to 0.82 us, 11:
+5.06 to 2.80 us); the SILK vectors are unchanged because SIMD-1 does not touch SILK (SIMD-2).
+Float output changed only by FMA and reassociation: the conformance vectors, final-range and PLC
+tests pass unchanged and `KernelTierParityTests` bounds every tier against `ScalarKernels` at
+2e-6 of the signal RMS.

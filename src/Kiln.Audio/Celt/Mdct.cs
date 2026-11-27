@@ -1,5 +1,6 @@
 // Portions derived from the RFC 6716 reference implementation (Appendix A), (c) IETF Trust and the persons identified as authors, Simplified BSD License; see THIRD-PARTY-NOTICES.md.
 using Kiln.Audio.Simd;
+using Kiln.Audio.Simd.Kernels;
 
 namespace Kiln.Audio.Celt;
 
@@ -54,6 +55,7 @@ internal sealed class Mdct
     private readonly int _length;
     private readonly int _half;      // N/4: the complex FFT size.
     private readonly float[] _window;
+    private readonly float[] _windowReversed;
     private readonly Fft _fft;
 
     // Combined pre/post rotations. theta = 2*pi*(p + 1/8)/N with N = 2*coefficientCount.
@@ -111,6 +113,11 @@ internal sealed class Mdct
         _half = coefficientCount / 2;
         _fft = Fft.Get(_half);
         _window = CeltWindow.Create(overlap);
+        _windowReversed = new float[overlap];
+        for (int i = 0; i < overlap; i++)
+        {
+            _windowReversed[i] = _window[overlap - 1 - i];
+        }
 
         int count = coefficientCount;
         int quarter = count / 2;
@@ -311,6 +318,35 @@ internal sealed class Mdct
         MdctKernels.Deshuffle(_spectrumReal, _spectrumImaginary, deshuffle, half, useVector);
 
         MdctKernels.MirrorInverse(output, deshuffle, _window, scale, count, _overlap, useVector);
+    }
+
+    /// <summary>
+    /// The unscaled inverse transform with the given kernel tier: pre-rotation, the FFT, the fused
+    /// post-rotation and de-shuffle, and the TDAC mirror (block copy plus vectorized window ramps).
+    /// </summary>
+    /// <param name="coefficients">The spectrum, read with the given stride.</param>
+    /// <param name="output">Receives <c>count + overlap</c> windowed samples.</param>
+    /// <param name="stride">The coefficient stride (the interleave factor of short blocks).</param>
+    internal void InverseUnscaled<TK>(ReadOnlySpan<float> coefficients, Span<float> output, int stride = 1)
+        where TK : struct, ICeltKernels
+    {
+        ValidateStride(stride);
+        long required = (((long)_coefficientCount - 1) * stride) + 1;
+        if (coefficients.Length < required)
+        {
+            throw new ArgumentException(
+                "The coefficient buffer is too short for the requested stride.", nameof(coefficients));
+        }
+
+        if (output.Length < _length)
+        {
+            throw new ArgumentException($"The output must hold {_length} samples.", nameof(output));
+        }
+
+        TK.ImdctPre(coefficients, stride, _foldReal, _foldImaginary, _rotCos, _rotSin, _coefficientCount, _half);
+        _fft.Transform<TK>(_foldReal, _foldImaginary, _spectrumReal, _spectrumImaginary, inverse: true);
+        TK.ImdctPostDeshuffle(_spectrumReal, _spectrumImaginary, _rotCos, _rotSin, _deshuffle, _half);
+        TK.ImdctMirror(_deshuffle, _window, _windowReversed, output, _coefficientCount, _overlap);
     }
 
     private void ValidateStride(int stride)

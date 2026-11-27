@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using FluentAssertions;
 using Kiln.Audio.Tests.Oracle;
@@ -23,31 +24,31 @@ namespace Kiln.Audio.Tests.SilkEncoder;
 /// </remarks>
 public class SilkEncoderQualityTests
 {
-    /// <summary>Frozen (libopus, ours) at complexity 0, from the verified SILK-QUAL-2 run.</summary>
+    /// <summary>Frozen (libopus, ours) at complexity 0, from the verified SILK-QUAL-3 run.</summary>
     /// <remarks>
     /// Where <c>ours</c> is at least libopus the floor is the libopus figure. Otherwise the floor
-    /// is <c>ours - 0.05</c>, which still locks in the SILK-QUAL-2 gain. The Wideband 20 ms 20 kbps
-    /// entry is a measured tie (gap -0.00 dB), so it keeps the trailing branch deliberately.
+    /// is <c>ours - 0.05</c>, which still locks in the SILK-QUAL-3 gain. After SILK-QUAL-3 only
+    /// Mediumband 20 kbps still trails, so only those two entries take the trailing branch.
     /// </remarks>
     private static readonly Dictionary<(OpusBandwidth, OpusFrameDuration, int), (double Libopus, double Ours)>
         Ratchet = new()
         {
             [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 8000)] = (3.60, 4.01),
             [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 8000)] = (3.64, 4.10),
-            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 12000)] = (5.51, 5.36),
-            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 12000)] = (5.49, 5.44),
+            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, 12000)] = (5.51, 5.52),
+            [(OpusBandwidth.Narrowband, OpusFrameDuration.Ms60, 12000)] = (5.49, 5.55),
             [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 8000)] = (2.77, 4.06),
             [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 8000)] = (2.81, 4.12),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 12000)] = (5.01, 5.33),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 12000)] = (4.84, 5.41),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 20000)] = (6.73, 6.52),
-            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 20000)] = (6.72, 6.41),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 12000)] = (5.01, 5.34),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 12000)] = (4.84, 5.40),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, 20000)] = (6.73, 6.55),
+            [(OpusBandwidth.Mediumband, OpusFrameDuration.Ms60, 20000)] = (6.72, 6.59),
             [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 8000)] = (1.71, 3.92),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 8000)] = (1.77, 4.04),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 12000)] = (4.50, 5.03),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 8000)] = (1.77, 4.05),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 12000)] = (4.50, 5.01),
             [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 12000)] = (4.37, 5.06),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 20000)] = (6.44, 6.43),
-            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 20000)] = (6.43, 6.35),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms20, 20000)] = (6.44, 6.55),
+            [(OpusBandwidth.Wideband, OpusFrameDuration.Ms60, 20000)] = (6.43, 6.57),
         };
 
     private static readonly Lazy<IReadOnlyList<(int Vector, short[] Mono)>> Corpus = new(LoadCorpus);
@@ -144,7 +145,7 @@ public class SilkEncoderQualityTests
         foreach ((int vector, short[] mono) in Corpus.Value)
         {
             short[] reference = ReferenceFor(vector, mono, internalRate);
-            double ours = MeasureOurs(mono, bandwidth, duration, bitrate, complexity, internalRate, reference, out double ourQuality, out int ourPacketBytes);
+            double ours = MeasureOurs(mono, bandwidth, duration, bitrate, complexity, internalRate, reference, out double ourQuality, out int ourPacketBytes, out double ourMicrosecondsPerFrame);
             double theirs = MeasureLibopus(mono, bandwidth, ms, bitrate, complexity, internalRate, reference, out double theirQuality, out int theirPacketBytes, out int theirConfig);
 
             long count = reference.Length / (internalRate / 50);
@@ -153,7 +154,7 @@ public class SilkEncoderQualityTests
             ourBytes += ourPacketBytes;
             theirBytes += theirPacketBytes;
             segments += count;
-            lines.Add($"v{vector}: ours {ours:F2} libopus {theirs:F2} (q {FormatQuality(ourQuality)} / {FormatQuality(theirQuality)}, {ourPacketBytes} / {theirPacketBytes} B, libopus cfg {theirConfig})");
+            lines.Add($"v{vector}: ours {ours:F2} libopus {theirs:F2} (q {FormatQuality(ourQuality)} / {FormatQuality(theirQuality)}, {ourPacketBytes} / {theirPacketBytes} B, {ourMicrosecondsPerFrame:F1} us/frame, libopus cfg {theirConfig})");
         }
 
         double oursMean = oursTotal / segments;
@@ -191,7 +192,8 @@ public class SilkEncoderQualityTests
 
     private static double MeasureOurs(
         short[] mono, OpusBandwidth bandwidth, OpusFrameDuration duration, int bitrate, int complexity,
-        int internalRate, short[] reference, out double quality, out int payloadBytes)
+        int internalRate, short[] reference, out double quality, out int payloadBytes,
+        out double microsecondsPerFrame)
     {
         var options = new OpusEncoderOptions
         {
@@ -210,15 +212,21 @@ public class SilkEncoderQualityTests
         var bit = new MemoryStream();
         Span<byte> header = stackalloc byte[8];
         payloadBytes = 0;
+        int frames = 0;
+        var stopwatch = Stopwatch.StartNew();
         for (int offset = 0; offset + frameSamples <= mono.Length; offset += frameSamples)
         {
             int written = encoder.Encode(mono.AsSpan(offset, frameSamples), packet);
             payloadBytes += written;
+            frames++;
             System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(header[..4], written);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(header[4..], encoder.FinalRange);
             bit.Write(header);
             bit.Write(packet.AsSpan(0, written));
         }
+
+        stopwatch.Stop();
+        microsecondsPerFrame = frames == 0 ? 0 : stopwatch.Elapsed.TotalMilliseconds * 1000 / frames;
 
         short[] decoded = DecodeBitstream(bit.ToArray(), internalRate);
         return Score(reference, decoded, internalRate, out quality);

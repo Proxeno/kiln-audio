@@ -1,4 +1,9 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 
 namespace Kiln.Audio.Silk;
 
@@ -46,19 +51,31 @@ internal sealed class SilkResampler
     private readonly int _down;    // M
     private readonly bool _copy;
 
+    private const int BlockCapacity = 1024;
+    private const int Lanes = 8;
+
+    private static readonly bool UseFma = Fma.IsSupported || AdvSimd.Arm64.IsSupported;
+
     private readonly int[] _phaseLength;
     private readonly int[] _phaseOffset;
     private readonly double[] _coefficients;
-    private readonly int _historyLength;
-    private readonly double[] _history;
 
-    // Integer delay applied after the filter so the total delay matches libopus.
+    // Polyphase float banks: per phase the taps are stored oldest-first (reversed) and padded at
+    // the front with zeros to a multiple of Lanes, so one forward dot product over the linear
+    // history evaluates the phase.
+    private readonly float[] _bank;
+    private readonly int[] _bankOffset;
+    private readonly int[] _bankLength;
+    private readonly int _historyLength;
+
+    // Linear input history: [_historyLength carried samples][up to BlockCapacity new samples].
+    private readonly float[] _buffer;
+
+    // Integer delay applied after the filter so the total delay matches libopus. Oldest first.
     private readonly short[] _delayRing;
-    private int _delayPosition;
 
     private long _consumed;
     private long _produced;
-    private int _ringPosition;
 
     /// <summary>Creates a resampler for one rate pair and channel count.</summary>
     /// <param name="inRateHz">Input rate: 8000, 12000 or 16000.</param>
@@ -99,8 +116,11 @@ internal sealed class SilkResampler
             _phaseLength = [0];
             _phaseOffset = [0];
             _coefficients = [];
-            _historyLength = 1;
-            _history = new double[1];
+            _bank = [];
+            _bankOffset = [0];
+            _bankLength = [0];
+            _historyLength = 0;
+            _buffer = [];
             DelaySamplesOut = alignment;
             return;
         }
@@ -108,8 +128,6 @@ internal sealed class SilkResampler
         int upsampledRate = inRateHz * _up;
         int lowerRate = Math.Min(inRateHz, outRateHz);
         double[] prototype = DesignPrototype(upsampledRate, lowerRate, _up);
-        _historyLength = (prototype.Length + _up - 1) / _up;
-
         _phaseLength = new int[_up];
         _phaseOffset = new int[_up];
         int total = 0;
@@ -131,9 +149,37 @@ internal sealed class SilkResampler
             }
         }
 
+        _bankOffset = new int[_up];
+        _bankLength = new int[_up];
+        int bankTotal = 0;
+        int longest = 0;
+        for (int phase = 0; phase < _up; phase++)
+        {
+            int padded = (_phaseLength[phase] + Lanes - 1) / Lanes * Lanes;
+            _bankOffset[phase] = bankTotal;
+            _bankLength[phase] = padded;
+            bankTotal += padded;
+            longest = Math.Max(longest, padded);
+        }
+
+        _bank = new float[bankTotal];
+        for (int phase = 0; phase < _up; phase++)
+        {
+            int length = _phaseLength[phase];
+            int padded = _bankLength[phase];
+            for (int tap = 0; tap < length; tap++)
+            {
+                _bank[_bankOffset[phase] + padded - 1 - tap] = (float)_coefficients[_phaseOffset[phase] + tap];
+            }
+        }
+
+        // A decimating output can sit up to ceil(down / up) samples behind the newest input, so the
+        // carried history covers the longest phase plus that lag.
+        _historyLength = longest + ((_down + _up - 1) / _up);
+        _buffer = new float[_historyLength + BlockCapacity];
+
         DelaySamplesOut =
             ComputeDelaySamplesOut(prototype, _up, _down, inRateHz, outRateHz) + alignment;
-        _history = new double[_historyLength];
     }
 
     /// <summary>Total nominal latency in output samples.</summary>
@@ -172,12 +218,20 @@ internal sealed class SilkResampler
     /// <summary>Clears all filter and timing state, restoring the newly constructed state.</summary>
     internal void Reset()
     {
-        Array.Clear(_history);
+        Array.Clear(_buffer);
         Array.Clear(_delayRing);
-        _delayPosition = 0;
         _consumed = 0;
         _produced = 0;
-        _ringPosition = 0;
+    }
+
+    /// <summary>Copies the complete streaming state of <paramref name="other"/> into this resampler.</summary>
+    /// <param name="other">A resampler built for the same rate pair.</param>
+    internal void CopyStateFrom(SilkResampler other)
+    {
+        Array.Copy(other._buffer, _buffer, _buffer.Length);
+        Array.Copy(other._delayRing, _delayRing, _delayRing.Length);
+        _consumed = other._consumed;
+        _produced = other._produced;
     }
 
     /// <summary>Converts one block of input samples, carrying filter state between calls.</summary>
@@ -194,56 +248,144 @@ internal sealed class SilkResampler
                 nameof(output));
         }
 
-        if (_copy)
+        int outputOffset = 0;
+        int inputOffset = 0;
+        while (inputOffset < input.Length)
         {
-            int written = 0;
-            foreach (short sample in input)
+            int chunk = Math.Min(BlockCapacity, input.Length - inputOffset);
+            int produced = _copy ? chunk : FilterBlock(input.Slice(inputOffset, chunk), output.Slice(outputOffset));
+            if (_copy)
             {
-                output[written++] = Push(sample);
+                input.Slice(inputOffset, chunk).CopyTo(output.Slice(outputOffset));
+                _consumed += chunk;
+                _produced += chunk;
             }
 
-            _consumed += input.Length;
-            _produced += input.Length;
-            return;
-        }
-
-        int writtenNonCopy = 0;
-        foreach (short sample in input)
-        {
-            _history[_ringPosition] = sample;
-            _ringPosition++;
-            if (_ringPosition == _historyLength)
-            {
-                _ringPosition = 0;
-            }
-
-            _consumed++;
-            long available = (_consumed * _up) / _down;
-            while (_produced < available)
-            {
-                output[writtenNonCopy++] = Push(NextSample());
-                _produced++;
-            }
+            ApplyDelay(output.Slice(outputOffset, produced));
+            outputOffset += produced;
+            inputOffset += chunk;
         }
     }
 
-    /// <summary>Pushes one filtered sample through the alignment delay line.</summary>
-    private short Push(short sample)
+    /// <summary>Filters one block of at most <see cref="BlockCapacity"/> input samples.</summary>
+    /// <returns>The number of output samples written.</returns>
+    private int FilterBlock(ReadOnlySpan<short> input, Span<short> output)
     {
-        if (_delayRing.Length == 0)
+        int history = _historyLength;
+        Span<float> buffer = _buffer;
+        for (int i = 0; i < input.Length; i++)
         {
-            return sample;
+            buffer[history + i] = input[i];
         }
 
-        short delayed = _delayRing[_delayPosition];
-        _delayRing[_delayPosition] = sample;
-        _delayPosition++;
-        if (_delayPosition == _delayRing.Length)
+        long consumedBefore = _consumed;
+        long target = ((consumedBefore + input.Length) * _up) / _down;
+        int count = checked((int)(target - _produced));
+
+        // Position of the first output: index = produced * down, phase = index % up and newest
+        // input sample = index / up, then advanced incrementally.
+        long index = _produced * _down;
+        long newestAbsolute = index / _up;
+        int phase = (int)(index - (newestAbsolute * _up));
+        int stepSamples = _down / _up;
+        int stepPhase = _down % _up;
+        int newest = history + (int)(newestAbsolute - consumedBefore);
+
+        ref float bufferRef = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        ref float bankRef = ref MemoryMarshal.GetArrayDataReference(_bank);
+        for (int n = 0; n < count; n++)
         {
-            _delayPosition = 0;
+            int length = _bankLength[phase];
+            float sum = Dot(
+                ref Unsafe.Add(ref bufferRef, newest - length + 1),
+                ref Unsafe.Add(ref bankRef, _bankOffset[phase]),
+                length);
+            output[n] = ToInt16(sum);
+            newest += stepSamples;
+            phase += stepPhase;
+            if (phase >= _up)
+            {
+                phase -= _up;
+                newest++;
+            }
         }
 
-        return delayed;
+        // Carry the newest samples as the next block's history.
+        buffer.Slice(input.Length, history).CopyTo(buffer);
+        _consumed += input.Length;
+        _produced += count;
+        return count;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static short ToInt16(float sum)
+    {
+        float rounded = MathF.Round(sum);
+        if (rounded > short.MaxValue)
+        {
+            return short.MaxValue;
+        }
+
+        if (rounded < short.MinValue)
+        {
+            return short.MinValue;
+        }
+
+        return (short)rounded;
+    }
+
+    /// <summary>Dot product of <paramref name="length"/> (a multiple of 8) floats.</summary>
+    private static float Dot(ref float x, ref float c, int length)
+    {
+        Vector128<float> acc0 = Vector128<float>.Zero;
+        Vector128<float> acc1 = Vector128<float>.Zero;
+        if (UseFma)
+        {
+            for (int i = 0; i < length; i += Lanes)
+            {
+                acc0 = Vector128.FusedMultiplyAdd(
+                    Vector128.LoadUnsafe(ref x, (nuint)i), Vector128.LoadUnsafe(ref c, (nuint)i), acc0);
+                acc1 = Vector128.FusedMultiplyAdd(
+                    Vector128.LoadUnsafe(ref x, (nuint)(i + 4)), Vector128.LoadUnsafe(ref c, (nuint)(i + 4)), acc1);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < length; i += Lanes)
+            {
+                acc0 += Vector128.LoadUnsafe(ref x, (nuint)i) * Vector128.LoadUnsafe(ref c, (nuint)i);
+                acc1 += Vector128.LoadUnsafe(ref x, (nuint)(i + 4)) * Vector128.LoadUnsafe(ref c, (nuint)(i + 4));
+            }
+        }
+
+        return Vector128.Sum(acc0 + acc1);
+    }
+
+    /// <summary>Delays a block of output by the alignment delay, carrying the tail between blocks.</summary>
+    private void ApplyDelay(Span<short> block)
+    {
+        int delay = _delayRing.Length;
+        if (delay == 0 || block.Length == 0)
+        {
+            return;
+        }
+
+        Span<short> tail = stackalloc short[delay];
+        if (block.Length >= delay)
+        {
+            block[^delay..].CopyTo(tail);
+            block[..^delay].CopyTo(block[delay..]);
+            _delayRing.CopyTo(block);
+            tail.CopyTo(_delayRing);
+        }
+        else
+        {
+            int n = block.Length;
+            _delayRing.AsSpan(0, n).CopyTo(tail);
+            _delayRing.AsSpan(n).CopyTo(_delayRing);
+            block.CopyTo(_delayRing.AsSpan(delay - n));
+            tail[..n].CopyTo(block);
+        }
     }
 
     /// <summary>
@@ -337,45 +479,6 @@ internal sealed class SilkResampler
         }
 
         return Math.Sqrt((re * re) + (im * im)) / dc;
-    }
-
-    private short NextSample()
-    {
-        long index = _produced * _down;
-        int phase = (int)(index % _up);
-        int newest = (int)(index / _up);
-        int offset = _phaseOffset[phase];
-        int length = _phaseLength[phase];
-        int oldestAvailable = (int)(_consumed - _historyLength);
-        double sum = 0;
-        for (int tap = 0; tap < length; tap++)
-        {
-            int source = newest - tap;
-            if (source < 0)
-            {
-                break;
-            }
-
-            if (source < oldestAvailable)
-            {
-                break;
-            }
-
-            sum += _coefficients[offset + tap] * _history[source % _historyLength];
-        }
-
-        double rounded = Math.Round(sum);
-        if (rounded > short.MaxValue)
-        {
-            return short.MaxValue;
-        }
-
-        if (rounded < short.MinValue)
-        {
-            return short.MinValue;
-        }
-
-        return (short)rounded;
     }
 
     private static double[] DesignPrototype(int upsampledRate, int lowerRate, int up)
