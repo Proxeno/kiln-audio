@@ -299,6 +299,7 @@ internal sealed class CeltDecoder
             }
         }
 
+        long profileStart = Perf4Profile.Start();
         int tell = dec.Tell();
         bool silence;
         if (tell >= totalBits)
@@ -357,10 +358,16 @@ internal sealed class CeltDecoder
         // Intra-frame energy flag (RFC 6716 §4.3.2.1).
         bool intraEnergy = tell + 3 <= totalBits && dec.DecodeBitLogp(3);
 
+        Perf4Profile.Stop(1, profileStart);
+
+        long stageStart = Perf4Profile.Start();
         UnquantCoarseEnergy(ref dec, frameBytes, startBand, endBand, c, lm, intraEnergy);
+        Perf4Profile.Stop(2, stageStart);
 
         // Time/frequency resolution (RFC 6716 §4.3.1).
+        stageStart = Perf4Profile.Start();
         TfDecode(ref dec, frameBytes, lm, startBand, endBand, isTransient);
+        Perf4Profile.Stop(3, stageStart);
 
         tell = dec.Tell();
 
@@ -374,6 +381,7 @@ internal sealed class CeltDecoder
         InitCaps(lm, c);
 
         // Dynamic allocation boosts (RFC 6716 §4.3.3).
+        stageStart = Perf4Profile.Start();
         int dynAllocLogp = 6;
         int totalBitsFrac = totalBits << CeltTables.BitRes;
         int tellFrac = (int)dec.TellFrac();
@@ -413,7 +421,9 @@ internal sealed class CeltDecoder
             ? 1 << CeltTables.BitRes
             : 0;
         bits -= antiCollapseReserve;
+        Perf4Profile.Stop(4, stageStart);
 
+        stageStart = Perf4Profile.Start();
         int codedBands = ComputeAllocation(
             ref dec,
             startBand,
@@ -425,10 +435,14 @@ internal sealed class CeltDecoder
             out int intensity,
             out int dualStereo,
             out int balance);
+        Perf4Profile.Stop(5, stageStart);
 
+        stageStart = Perf4Profile.Start();
         UnquantFineEnergy(ref dec, startBand, endBand, c);
+        Perf4Profile.Stop(7, stageStart);
 
         // PVQ band shapes (RFC 6716 §4.3.4).
+        stageStart = Perf4Profile.Start();
         QuantAllBands(
             ref dec,
             lm,
@@ -443,6 +457,7 @@ internal sealed class CeltDecoder
             codedBands,
             (totalBits << CeltTables.BitRes) - antiCollapseReserve,
             balance);
+        Perf4Profile.Stop(8, stageStart);
 
         bool antiCollapse = false;
         if (antiCollapseReserve > 0)
@@ -451,14 +466,19 @@ internal sealed class CeltDecoder
         }
 
         // Leftover energy bits (RFC 6716 §4.3.2.2).
+        stageStart = Perf4Profile.Start();
         UnquantEnergyFinalise(ref dec, startBand, endBand, c, totalBits - dec.Tell());
+        Perf4Profile.Stop(15, stageStart);
 
         if (antiCollapse)
         {
+            stageStart = Perf4Profile.Start();
             ApplyAntiCollapse(lm, startBand, endBand, c, n);
+            Perf4Profile.Stop(14, stageStart);
         }
 
         // Publish the frame.
+        stageStart = Perf4Profile.Start();
         result.CodedBands = codedBands;
         result.Spread = spread;
         result.Intensity = intensity;
@@ -543,6 +563,7 @@ internal sealed class CeltDecoder
         }
 
         _seed = dec.Rng;
+        Perf4Profile.Stop(16, stageStart);
     }
 
     /// <summary>Decodes the finite-difference coarse energies (RFC 6716 §4.3.2.1).</summary>
@@ -711,7 +732,7 @@ internal sealed class CeltDecoder
         out int balance)
     {
         ReadOnlySpan<short> eBands = CeltTables.EBands;
-        ReadOnlySpan<byte> allocVectors = CeltTables.BandAllocation;
+        int allocScaledBase = (((lm * 2) + (c - 1)) * CeltTables.AllocVectorCount) * BandCount;
 
         total = Math.Max(total, 0);
         int skipStart = start;
@@ -753,9 +774,10 @@ internal sealed class CeltDecoder
             bool done = false;
             int psum = 0;
             int mid = (lo + hi) >> 1;
+            int allocRow = allocScaledBase + (mid * BandCount);
             for (int j = end; j-- > start;)
             {
-                int bitsj = c * (eBands[j + 1] - eBands[j]) * allocVectors[(mid * BandCount) + j] << lm >> 2;
+                int bitsj = AllocScaled[allocRow + j];
                 if (bitsj > 0)
                 {
                     bitsj = Math.Max(0, bitsj + _trimOffset[j]);
@@ -787,11 +809,10 @@ internal sealed class CeltDecoder
         hi = lo--;
         for (int j = start; j < end; j++)
         {
-            int width = eBands[j + 1] - eBands[j];
-            int bits1 = c * width * allocVectors[(lo * BandCount) + j] << lm >> 2;
+            int bits1 = AllocScaled[allocScaledBase + (lo * BandCount) + j];
             int bits2 = hi >= CeltTables.AllocVectorCount
                 ? _cap[j]
-                : c * width * allocVectors[(hi * BandCount) + j] << lm >> 2;
+                : AllocScaled[allocScaledBase + (hi * BandCount) + j];
             if (bits1 > 0)
             {
                 bits1 = Math.Max(0, bits1 + _trimOffset[j]);
@@ -818,7 +839,8 @@ internal sealed class CeltDecoder
             _bits2[j] = bits2;
         }
 
-        return InterpolateAllocation(
+        long start6 = Perf4Profile.Start();
+        int codedBands = InterpolateAllocation(
             ref dec,
             start,
             end,
@@ -832,6 +854,8 @@ internal sealed class CeltDecoder
             out intensity,
             out dualStereo,
             out balance);
+        Perf4Profile.Stop(6, start6);
+        return codedBands;
     }
 
     /// <summary>Interpolates between allocation vectors and resolves the skip decisions (RFC 6716 §4.3.3).</summary>
@@ -1164,7 +1188,10 @@ internal sealed class CeltDecoder
             int b;
             if (i <= codedBands - 1)
             {
-                int currentBalance = IntDiv(balance, Math.Min(3, codedBands - i));
+                // PERF-4: the divisor is always 1, 2 or 3, so dispatch to constant divisions
+                // instead of a variable integer divide per band.
+                int divisor = Math.Min(3, codedBands - i);
+                int currentBalance = divisor == 1 ? balance : divisor == 2 ? balance / 2 : balance / 3;
                 b = Math.Max(0, Math.Min(16383, Math.Min(remainingBits + 1, _pulses[i] + currentBalance)));
             }
             else
@@ -1447,6 +1474,7 @@ internal sealed class CeltDecoder
         float gain,
         int fill)
     {
+        long start9 = Perf4Profile.Start();
         int b0 = blocks;
         int collapseMask = 0;
 
@@ -1565,6 +1593,7 @@ internal sealed class CeltDecoder
                         fill);
                 }
 
+                Perf4Profile.Stop(9, start9);
                 return collapseMask;
             }
         }
@@ -1622,6 +1651,7 @@ internal sealed class CeltDecoder
             }
         }
 
+        Perf4Profile.Stop(9, start9);
         return collapseMask;
     }
 
@@ -1819,6 +1849,7 @@ internal sealed class CeltDecoder
         out int itheta,
         out int qalloc)
     {
+        long start11 = Perf4Profile.Start();
         int pulseCap = CeltTables.LogN[_ctx.Band] + (lm << CeltTables.BitRes);
         int offset = (pulseCap >> 1) - (stereo && n == 2 ? QThetaOffsetTwoPhase : QThetaOffset);
         int qn = ComputeQn(n, b, offset, pulseCap, stereo);
@@ -1923,6 +1954,7 @@ internal sealed class CeltDecoder
         iside = localIside;
         delta = localDelta;
         itheta = localTheta;
+        Perf4Profile.Stop(11, start11);
     }
 
     /// <summary>Chooses the angle quantizer resolution (RFC 6716 §4.3.4.2).</summary>
@@ -1957,15 +1989,20 @@ internal sealed class CeltDecoder
     {
         // RFC 6716 Appendix A, celt/vq.c: decode_pulses(), then Ryy = sum(iy[i]**2). The energy
         // is accumulated while the pulse vector is recovered, so the vector is walked once.
+        long start10 = Perf4Profile.Start();
         Span<int> iy = _iy.AsSpan(0, n);
         uint index = dec.DecodeUInt(PvqV(n, k));
-        Cwrsi(n, k, index, iy, out float energy);
+
+        // PERF-4: the collapse mask is accumulated during the unranking walk instead of in a
+        // second pass over the pulse vector.
+        Cwrsi(n, k, index, iy, out float energy, out int mask, blocks);
 
         float g = (1f / (float)Math.Sqrt(energy)) * gain;
         DecKernels.ScaleIntToFloat(x, iy, g);
 
         ExpRotation(x, n, -1, blocks, k, _ctx.Spread);
-        return ExtractCollapseMask(iy, n, blocks);
+        Perf4Profile.Stop(10, start10);
+        return mask;
     }
 
     /// <summary>Decodes a PVQ codeword index into its integer vector (RFC 6716 §4.3.4.2).</summary>
@@ -1994,7 +2031,20 @@ internal sealed class CeltDecoder
     /// the PVQ decoder does not make a second pass over the pulse vector.
     /// </summary>
     private static void Cwrsi(int n, int k, uint index, Span<int> y, out float energy)
+        => Cwrsi(n, k, index, y, out energy, out _, blocks: 1);
+
+    /// <summary>
+    /// Recovers the integer pulse vector, accumulating <c>sum(y[j]^2)</c> and the collapse mask
+    /// (which blocks contain a non-zero pulse) in the same walk.
+    /// </summary>
+    private static void Cwrsi(
+        int n, int k, uint index, Span<int> y, out float energy, out int collapseMask, int blocks)
     {
+        bool fused = blocks > 1 && n % blocks == 0;
+        int perBlock = fused ? n / blocks : n;
+        int inBlock = 0;
+        int bit = 1;
+        int mask = 0;
         uint i = index;
         float sum = 0;
         for (int j = 0; j < n; j++)
@@ -2005,7 +2055,7 @@ internal sealed class CeltDecoder
             // when both terms and the halved U value fit, so accumulate in 64 bits. The
             // V(N-j-1,k) term is reused in step 3, so read it once.
             uint below = PvqV(remaining - 1, k);
-            uint p = (uint)(((ulong)below + PvqV(remaining, k)) / 2);
+            uint p = (uint)(((ulong)below + PvqV(remaining, k)) >> 1);
 
             // 2. If i < p, sgn = 1; otherwise sgn = -1 and i = i - p.
             int sgn;
@@ -2035,16 +2085,33 @@ internal sealed class CeltDecoder
             y[j] = value;
             sum += value * value;
             i -= p;
+
+            if (fused)
+            {
+                if (value != 0)
+                {
+                    mask |= bit;
+                }
+
+                if (++inBlock == perBlock)
+                {
+                    inBlock = 0;
+                    bit <<= 1;
+                }
+            }
         }
 
         energy = sum;
+        collapseMask = blocks <= 1 ? 1 : fused ? mask : ExtractCollapseMask(y, n, blocks);
     }
 
     /// <summary>Decodes the second half of the band splitter's angle (RFC 6716 §4.3.4.2).</summary>
     private static void ExpRotation(Span<float> x, int length, int direction, int stride, int k, int spread)
     {
+        long start13 = Perf4Profile.Start();
         if (2 * k >= length || spread == SpreadNone)
         {
+            Perf4Profile.Stop(13, start13);
             return;
         }
 
@@ -2084,6 +2151,8 @@ internal sealed class CeltDecoder
                 }
             }
         }
+
+        Perf4Profile.Stop(13, start13);
     }
 
     /// <summary>Applies one pass of the spread rotation (RFC 6716 §4.3.4.3).</summary>
@@ -2113,6 +2182,7 @@ internal sealed class CeltDecoder
     /// </summary>
     private static void RenormaliseVector(Span<float> x, float gain)
     {
+        long start12 = Perf4Profile.Start();
         float energy = 1e-15f;
         for (int i = 0; i < x.Length; i++)
         {
@@ -2121,6 +2191,7 @@ internal sealed class CeltDecoder
 
         float g = (1f / (float)Math.Sqrt(energy)) * gain;
         DecKernels.ScaleInPlace(x, g);
+        Perf4Profile.Stop(12, start12);
     }
 
     /// <summary>
@@ -2129,8 +2200,10 @@ internal sealed class CeltDecoder
     /// </summary>
     private static int ExtractCollapseMask(ReadOnlySpan<int> iy, int n, int blocks)
     {
+        long start22 = Perf4Profile.Start();
         if (blocks <= 1)
         {
+            Perf4Profile.Stop(22, start22);
             return 1;
         }
 
@@ -2144,6 +2217,7 @@ internal sealed class CeltDecoder
             }
         }
 
+        Perf4Profile.Stop(22, start22);
         return mask;
     }
 
@@ -2542,6 +2616,40 @@ internal sealed class CeltDecoder
     private const int PvqMaxN = 177;
     private const int PvqMaxK = 129;
 
+    /// <summary>
+    /// The per-band allocation in Q3 bits, precomputed for every <c>(LM, channels, vector)</c>.
+    /// </summary>
+    /// <remarks>
+    /// The allocation bisection evaluates <c>c * width * BandAllocation[q][band] &lt;&lt; lm &gt;&gt; 2</c>
+    /// for several candidate vectors and every band; that product depends only on
+    /// <c>(lm, c, q, band)</c>, so a 7 KiB table replaces the multiplies and shifts in the search.
+    /// </remarks>
+    private static readonly int[] AllocScaled = BuildAllocScaled();
+
+    private static int[] BuildAllocScaled()
+    {
+        ReadOnlySpan<short> eBands = CeltTables.EBands;
+        ReadOnlySpan<byte> allocVectors = CeltTables.BandAllocation;
+        var table = new int[4 * 2 * CeltTables.AllocVectorCount * BandCount];
+        for (int lm = 0; lm < 4; lm++)
+        {
+            for (int c = 1; c <= 2; c++)
+            {
+                for (int vector = 0; vector < CeltTables.AllocVectorCount; vector++)
+                {
+                    int row = ((((lm * 2) + (c - 1)) * CeltTables.AllocVectorCount) + vector) * BandCount;
+                    for (int band = 0; band < BandCount; band++)
+                    {
+                        int width = eBands[band + 1] - eBands[band];
+                        table[row + band] = c * width * allocVectors[(vector * BandCount) + band] << lm >> 2;
+                    }
+                }
+            }
+        }
+
+        return table;
+    }
+
     private static uint[] BuildPvqTable()
     {
         uint[] table = new uint[PvqMaxN * PvqMaxK];
@@ -2575,5 +2683,73 @@ internal sealed class CeltDecoder
         public int TfChange;
         public int RemainingBits;
         public uint Seed;
+    }
+}
+
+/// <summary>
+/// PERF-4: stage timing for the CELT frequency-domain decoder.
+/// </summary>
+/// <remarks>
+/// This is a compile-time switch: define <c>KILN_PERF4_PROFILE</c> to have the decoder stamp each
+/// stage. With the symbol undefined <see cref="Enabled"/> is the constant false, so
+/// <see cref="Start"/> folds to zero and <see cref="Stop"/> to nothing; a normal build carries no
+/// instrumentation overhead. The counters are read by the <c>Perf4Profile</c> benchmark.
+/// </remarks>
+internal static class Perf4Profile
+{
+#if KILN_PERF4_PROFILE
+    /// <summary>Whether the timing blocks are compiled in.</summary>
+    internal const bool Enabled = true;
+#else
+    /// <summary>Whether the timing blocks are compiled in.</summary>
+    internal const bool Enabled = false;
+#endif
+
+    /// <summary>Number of accumulators.</summary>
+    internal const int SlotCount = 24;
+
+    /// <summary>Stage names, in slot order.</summary>
+    internal static readonly string[] Names =
+    [
+        "frame", "flags", "coarse", "tf", "dynalloc", "alloc", "interp", "fine",
+        "pvq-bands", "partition", "pulses", "theta", "renorm", "rotation", "anticollapse",
+        "finalise", "publish", "denorm", "imdct", "postfilter", "deemph", "synth-total",
+        "synth-other", "spare",
+    ];
+
+    /// <summary>Accumulated stopwatch ticks per slot.</summary>
+    internal static readonly long[] Ticks = new long[SlotCount];
+
+    /// <summary>Number of samples accumulated per slot.</summary>
+    internal static readonly long[] Calls = new long[SlotCount];
+
+    /// <summary>Starts a stage timer, or returns zero when instrumentation is off.</summary>
+    /// <returns>The starting timestamp.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static long Start()
+    {
+#if KILN_PERF4_PROFILE
+        return System.Diagnostics.Stopwatch.GetTimestamp();
+#else
+        return 0;
+#endif
+    }
+
+    /// <summary>Adds the elapsed time since <paramref name="start"/> to a slot.</summary>
+    /// <param name="slot">The slot index.</param>
+    /// <param name="start">The timestamp from <see cref="Start"/>.</param>
+    internal static void Stop(int slot, long start)
+    {
+#if KILN_PERF4_PROFILE
+        Ticks[slot] += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+        Calls[slot]++;
+#endif
+    }
+
+    /// <summary>Clears every accumulator.</summary>
+    internal static void Reset()
+    {
+        Ticks.AsSpan().Clear();
+        Calls.AsSpan().Clear();
     }
 }
