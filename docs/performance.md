@@ -1065,3 +1065,82 @@ harness (build the RFC source with `FIXED_POINT=1`, then run `SilkRfcBaselineGen
 the fourteen configurations that now beat or meet libopus are pinned to its figure, and the two
 mediumband 20 kbps rows to their new measured score minus 0.05 dB, so the gain is locked in. The
 remaining gaps stay reported in the test output and in the table above.
+
+## PUB-PERF-1: public-API benchmark, SILK output resampler, CELT output path
+
+The earlier "ratio" tables timed internal stages (`CeltDecoder`/`CeltSynthesizer`, SILK at its
+internal rate), not what a user calls. PUB-PERF-1 adds a benchmark of the shipped entry point and
+fixes the two costs it exposed.
+
+**Benchmark.** `dotnet <Kiln.Audio.Benchmarks.dll> micro pubapi [passes]` times
+`OpusDecoder.Decode(packet, short[])` over each whole RFC vector 01-12 at 48 kHz stereo and mono
+(one outer timer per pass, a fresh decoder per pass, 20 warm-up passes, best of 15).
+`scripts/bench-libopus-inproc.sh pubapi [passes]` runs `opus_decode` at the same rate and channel
+count with the same N and statistic. The script now reads the build flags of the library it links
+from `.oracle/build/CMakeCache.txt` and refuses to run if it cannot. The oracle it printed:
+
+```
+libopus 1.5.2
+C_FLAGS = -O3 -DNDEBUG -std=gnu99 -arch arm64 ... -fstack-protector-strong
+cmake CMAKE_BUILD_TYPE:STRING=Release
+cmake CMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG
+cmake OPUS_FIXED_POINT:BOOL=OFF
+cmake OPUS_HARDENING:BOOL=ON
+simd=arm64 NEON intrinsics enabled (compiled into the static library)
+```
+
+**Resampler.** `SilkResampler` was a scalar double-precision FIR with an integer `%` per tap
+and one call per output sample, run for both channels even when a mono stream was decoded to
+stereo. It is now a block resampler: precomputed float polyphase banks (taps reversed and padded to
+a multiple of 8), a linear history buffer shifted once per block (no modulo), a two-accumulator
+Vector128 dot product (fused multiply-add where the hardware has it), and a block alignment delay.
+`SilkOutput` no longer runs the right-channel resampler for mono-coded frames; it synchronizes the
+right state from the left (`CopyStateFrom`) the first time a coded-stereo frame arrives, which is
+exactly equivalent because both saw identical input until then. Arithmetic is now float with a
+round-to-nearest-even at the end, so an output sample can differ from the old double result by one
+least-significant bit at a rounding tie; the conformance, SNR and opus_compare gates are unchanged
+and pass.
+
+**CELT output.** At a 48 kHz API rate the synthesizer now writes straight into the caller's
+buffer (no `_pcm48` staging and no scalar per-sample copy), and the per-frame `Clear` of the
+output buffer only runs for SILK-only frames, the one mode that accumulates into it. Int16 output
+still goes through the vectorized `CeltPcm.ToInt16`.
+
+48 kHz stereo, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 37.21 | 43.13 | 1.16 | 37.10 | 41.47 | 1.12 |
+| 02 | 9.11 | 143.33 | 15.74 | 9.15 | 18.61 | 2.03 |
+| 03 | 9.19 | 122.86 | 13.38 | 9.28 | 17.76 | 1.91 |
+| 04 | 12.69 | 158.75 | 12.51 | 12.69 | 21.02 | 1.66 |
+| 05 | 22.84 | 175.55 | 7.69 | 22.95 | 33.34 | 1.45 |
+| 06 | 22.47 | 162.92 | 7.25 | 22.63 | 33.32 | 1.47 |
+| 07 | 18.41 | 21.69 | 1.18 | 18.49 | 20.31 | 1.10 |
+| 08 | 18.45 | 23.04 | 1.25 | 18.56 | 21.06 | 1.13 |
+| 09 | 35.89 | 44.41 | 1.24 | 35.55 | 42.49 | 1.20 |
+| 10 | 39.78 | 103.45 | 2.60 | 39.94 | 50.48 | 1.26 |
+| 11 | 28.79 | 30.72 | 1.07 | 28.80 | 29.09 | 1.01 |
+| 12 | 9.79 | 154.51 | 15.78 | 9.73 | 16.98 | 1.75 |
+
+48 kHz mono, whole vector, best of 15 passes (ms):
+
+| Vector | libopus before | Kiln before | Ratio before | libopus after | Kiln after | Ratio after |
+| ------ | -------------- | ----------- | ------------ | ------------- | ---------- | ----------- |
+| 01 | 32.72 | 38.29 | 1.17 | 32.91 | 37.52 | 1.14 |
+| 02 | 7.33 | 74.74 | 10.20 | 7.40 | 14.11 | 1.91 |
+| 03 | 7.54 | 64.96 | 8.61 | 7.58 | 13.80 | 1.82 |
+| 04 | 10.37 | 84.22 | 8.12 | 10.48 | 16.67 | 1.59 |
+| 05 | 18.20 | 95.42 | 5.24 | 18.30 | 25.63 | 1.40 |
+| 06 | 18.30 | 89.64 | 4.90 | 18.21 | 26.74 | 1.47 |
+| 07 | 14.86 | 17.68 | 1.19 | 14.66 | 17.02 | 1.16 |
+| 08 | 14.94 | 18.53 | 1.24 | 14.66 | 17.51 | 1.19 |
+| 09 | 31.90 | 39.45 | 1.24 | 31.61 | 38.61 | 1.22 |
+| 10 | 34.30 | 69.39 | 2.02 | 34.31 | 42.74 | 1.25 |
+| 11 | 24.46 | 26.89 | 1.10 | 24.34 | 25.93 | 1.07 |
+| 12 | 8.24 | 80.32 | 9.75 | 8.37 | 15.26 | 1.82 |
+
+The CELT-only vectors (01, 07, 08, 09, 11) were already near parity and gain a few percent; the
+SILK and hybrid vectors (02-06, 10, 12) went from 5-16x libopus to 1.4-2.0x. The remaining gap on
+those is the SILK decode itself, not the output stage. Two `SilkEncoderQualityTests` rows (MB and
+WB, 60 ms, 20 kbps, complexity 0) fail on unmodified train-next as well and are unrelated.

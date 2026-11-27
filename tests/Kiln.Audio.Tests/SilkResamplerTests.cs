@@ -226,6 +226,33 @@ public class SilkResamplerTests
         create.Should().Throw<ArgumentOutOfRangeException>();
     }
 
+    [Theory]
+    [InlineData(8000, 48000)]
+    [InlineData(16000, 48000)]
+    [InlineData(12000, 16000)]
+    public void CopyStateFrom_continues_exactly_like_the_source(int inRate, int outRate)
+    {
+        var random = new Random(41 + inRate);
+        var warmup = new short[1500];
+        var next = new short[1100];
+        for (int i = 0; i < warmup.Length; i++)
+        {
+            warmup[i] = (short)random.Next(short.MinValue, short.MaxValue + 1);
+        }
+
+        for (int i = 0; i < next.Length; i++)
+        {
+            next[i] = (short)random.Next(short.MinValue, short.MaxValue + 1);
+        }
+
+        var source = new SilkResampler(inRate, outRate);
+        Run(source, warmup);
+        var copy = new SilkResampler(inRate, outRate);
+        copy.CopyStateFrom(source);
+
+        Run(copy, next).Should().Equal(Run(source, next));
+    }
+
     private static short[] Run(SilkResampler resampler, short[] input)
     {
         var output = new short[resampler.OutputCount(input.Length)];

@@ -91,6 +91,14 @@ internal sealed class CeltOutput
         Span<float> pcm)
     {
         _decoder.DecodeFrame(ref dec, frameBytes, lm, startBand, endBand, streamChannels, _frame);
+        if (_downsample == 1)
+        {
+            // 48 kHz output: synthesize straight into the caller's buffer, no intermediate copy.
+            EnsureCapacity(_frame.SampleCount, pcm);
+            _synthesizer.Synthesize(_frame, pcm);
+            return _frame.SampleCount;
+        }
+
         _synthesizer.Synthesize(_frame, _pcm48.AsSpan(0, _frame.SampleCount * _apiChannels));
         return WriteDecimated(_frame.SampleCount, pcm);
     }
@@ -136,6 +144,13 @@ internal sealed class CeltOutput
     internal int DecodeLost(int lm, int startBand, Span<float> pcm)
     {
         int samples48 = CeltTables.ShortBlockSamples << lm;
+        if (_downsample == 1)
+        {
+            EnsureCapacity(samples48, pcm);
+            _synthesizer.DecodeLost(lm, startBand, pcm);
+            return samples48;
+        }
+
         _synthesizer.DecodeLost(lm, startBand, _pcm48.AsSpan(0, samples48 * _apiChannels));
         return WriteDecimated(samples48, pcm);
     }
@@ -147,13 +162,7 @@ internal sealed class CeltOutput
     private int WriteDecimated(int samples48, Span<float> pcm)
     {
         int outputSamples = samples48 / _downsample;
-        if (pcm.Length < outputSamples * _apiChannels)
-        {
-            throw new ArgumentException(
-                FormattableString.Invariant(
-                    $"The PCM destination needs {outputSamples * _apiChannels} samples but holds {pcm.Length}."),
-                nameof(pcm));
-        }
+        EnsureCapacity(outputSamples, pcm);
 
         for (int i = 0; i < outputSamples; i++)
         {
@@ -166,5 +175,16 @@ internal sealed class CeltOutput
         }
 
         return outputSamples;
+    }
+
+    private void EnsureCapacity(int samplesPerChannel, Span<float> pcm)
+    {
+        if (pcm.Length < samplesPerChannel * _apiChannels)
+        {
+            throw new ArgumentException(
+                FormattableString.Invariant(
+                    $"The PCM destination needs {samplesPerChannel * _apiChannels} samples but holds {pcm.Length}."),
+                nameof(pcm));
+        }
     }
 }

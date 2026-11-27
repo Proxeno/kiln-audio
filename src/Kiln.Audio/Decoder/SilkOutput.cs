@@ -47,6 +47,11 @@ internal sealed class SilkOutput
     private SilkResampler? _left;
     private SilkResampler? _right;
     private int _resamplerRate;
+
+    // True while the right resampler's state is known to equal the left one's (both were reset
+    // together and only mono frames, which feed both identically, have been processed since).
+    // The right resampler is then not run for mono frames and is synchronized when needed.
+    private bool _rightMirrorsLeft = true;
     private short _mid1;
     private int _internalRate;
     private int _internalChannels;
@@ -78,6 +83,7 @@ internal sealed class SilkOutput
         _synthesis.Reset();
         _left?.Reset();
         _right?.Reset();
+        _rightMirrorsLeft = true;
         _mid1 = 0;
         _internalRate = 0;
         _internalChannels = 0;
@@ -250,8 +256,22 @@ internal sealed class SilkOutput
                     $"The SILK resampler produced {produced} samples, expected {outputSamples}."));
         }
 
+        // The right resampler only matters for a stereo output. Until a coded-stereo frame
+        // arrives it would hold exactly the left state, so it is synchronized then instead of
+        // being run on identical mono data.
+        bool runRight = _apiChannels == 2 && (internalChannels == 2 || !_rightMirrorsLeft);
+        if (runRight && _rightMirrorsLeft)
+        {
+            _right!.CopyStateFrom(_left);
+        }
+
+        if (runRight)
+        {
+            _rightMirrorsLeft = false;
+        }
+
         _left.Process(feed0, _resampled0.AsSpan(0, produced));
-        if (_apiChannels == 2)
+        if (runRight)
         {
             _right!.Process(feed1, _resampled1.AsSpan(0, produced));
         }
@@ -295,6 +315,7 @@ internal sealed class SilkOutput
         _right = _rightByRate[index];
         _left.Reset();
         _right.Reset();
+        _rightMirrorsLeft = true;
         _resamplerRate = internalRateHz;
     }
 
