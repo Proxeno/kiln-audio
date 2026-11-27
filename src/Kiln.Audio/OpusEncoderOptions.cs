@@ -11,8 +11,13 @@ public sealed record OpusEncoderOptions
 
     /// <summary>Intended application. Default <see cref="OpusApplication.Voip"/>.</summary>
     /// <remarks>
-    /// Voip and Audio use the automatic SILK/hybrid/CELT policy for mono 48 kHz 10 and 20 ms
-    /// frames; RestrictedLowDelay always uses CELT.
+    /// <see cref="OpusApplication.Voip"/> and <see cref="OpusApplication.Audio"/> use the automatic
+    /// per-frame SILK/hybrid/CELT policy for mono 48 kHz 10 and 20 ms frames without
+    /// <see cref="UseDtx"/>. Otherwise <see cref="OpusApplication.Voip"/> uses the SILK-only encoder
+    /// when <see cref="Bandwidth"/> is null, narrowband, mediumband or wideband and the frame is 10,
+    /// 20, 40 or 60 ms, and CELT-only for everything else. <see cref="OpusApplication.Audio"/>
+    /// outside the automatic case and <see cref="OpusApplication.RestrictedLowDelay"/> always use
+    /// CELT-only. See <see cref="OpusEncoder"/> for the full description.
     /// </remarks>
     public OpusApplication Application { get; init; } = OpusApplication.Voip;
 
@@ -26,8 +31,7 @@ public sealed record OpusEncoderOptions
     public int Complexity { get; init; } = 5;
 
     /// <summary>
-    /// Whether to use variable bitrate. Default false, which keeps the constant-bitrate behaviour
-    /// of earlier releases.
+    /// Whether the CELT encoder uses variable bitrate. Default false, which is constant bitrate.
     /// </summary>
     public bool UseVbr { get; init; }
 
@@ -39,8 +43,11 @@ public sealed record OpusEncoderOptions
 
     /// <summary>Whether to emit in-band forward error correction (LBRR). Default false.</summary>
     /// <remarks>
-    /// LBRR is only emitted when <see cref="PacketLossPercent"/> is positive and the bitrate is
-    /// above the reference's LBRR threshold; otherwise enabling the flag has no effect.
+    /// Honoured by the automatic SILK/hybrid/CELT path and by the SILK-only path. The
+    /// <see cref="OpusEncoder"/> constructor throws <see cref="NotSupportedException"/> when it is
+    /// set with options that select the CELT-only path. LBRR is only emitted when
+    /// <see cref="PacketLossPercent"/> is positive and the bitrate is above the reference's LBRR
+    /// threshold; otherwise enabling the flag has no effect.
     /// </remarks>
     public bool UseInbandFec { get; init; }
 
@@ -51,23 +58,36 @@ public sealed record OpusEncoderOptions
     public int PacketLossPercent { get; init; }
 
     /// <summary>Whether to enable discontinuous transmission. Default false.</summary>
+    /// <remarks>
+    /// Honoured only by the SILK-only path (<see cref="OpusApplication.Voip"/>, narrowband to
+    /// wideband, 10 to 60 ms frames); setting it disables the automatic path, so mono 48 kHz Voip
+    /// then uses SILK-only. The <see cref="OpusEncoder"/> constructor throws
+    /// <see cref="NotSupportedException"/> when it is set with options that select the CELT-only path.
+    /// </remarks>
     public bool UseDtx { get; init; }
 
     /// <summary>
-    /// Optional bandwidth override. For <see cref="OpusApplication.Voip"/> it also selects the
-    /// SILK-only path: narrowband (8 kHz internal), mediumband (12 kHz) or wideband (16 kHz).
-    /// When null, <see cref="OpusApplication.Voip"/> defaults to wideband. Hybrid and
-    /// super-wideband/fullband SILK are not implemented yet.
+    /// Optional bandwidth limit. In the automatic SILK/hybrid/CELT case it is an upper bound on the
+    /// audio bandwidth (null means fullband), not a forced value: the encoder still chooses a
+    /// narrower bandwidth at low bitrates, as the reference does, and selects fullband only from
+    /// roughly 30 to 40 kbit/s depending on complexity and content. In the SILK-only case it is the SILK internal bandwidth: narrowband
+    /// (8 kHz), mediumband (12 kHz) or wideband (16 kHz), with null meaning wideband.
+    /// <see cref="OpusBandwidth.SuperWideband"/> and <see cref="OpusBandwidth.Fullband"/> outside
+    /// the automatic case select the CELT-only path. Must be a defined <see cref="OpusBandwidth"/>
+    /// value.
     /// </summary>
     public OpusBandwidth? Bandwidth { get; init; }
 
     /// <summary>
     /// Whether the SILK encoder targets a constant packet size. Default false (variable rate).
-    /// Ignored by the CELT path, which is always constant-rate.
+    /// Applies to the SILK layer only; the CELT encoder is controlled by <see cref="UseVbr"/>.
     /// </summary>
     public bool UseCbr { get; init; }
 
-    /// <summary>Validates every field.</summary>
+    /// <summary>
+    /// Validates every field, including that <see cref="Application"/>, <see cref="FrameDuration"/>
+    /// and a non-null <see cref="Bandwidth"/> are defined enum values.
+    /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A value is outside its legal range.</exception>
     public void Validate()
     {
@@ -97,6 +117,11 @@ public sealed record OpusEncoderOptions
         {
             throw new ArgumentOutOfRangeException(
                 nameof(PacketLossPercent), PacketLossPercent, "Packet loss must be between 0 and 100 percent.");
+        }
+
+        if (Bandwidth is { } bandwidth && !Enum.IsDefined(bandwidth))
+        {
+            throw new ArgumentOutOfRangeException(nameof(Bandwidth), bandwidth, "Unknown bandwidth.");
         }
     }
 }

@@ -16,27 +16,39 @@ Add a Trusted Publishing policy on nuget.org:
    - **Workflow File**: `release.yml`
    - **Environment**: leave empty unless a GitHub Environment is added later.
 
+nuget.org resolves the repository when the policy is first used. A policy created
+while the repository cannot be resolved (for example while it is still private) is
+only temporarily active, so create or re-check the policy shortly before the first
+tag is pushed and confirm it shows as active.
+
 No GitHub secret is needed. The workflow requests a short-lived key with
 `NuGet/login@v1` immediately before pushing, and the `user:` input is the public
 nuget.org profile name, not a credential.
 
 ## Cutting a release
 
-1. Make sure `main` is green and contains everything that should ship.
+1. Make sure `main` is green and contains everything that should ship, and that
+   `PublicAPI.Unshipped.txt` holds only its `#nullable enable` header (move any other
+   line into `PublicAPI.Shipped.txt` first).
+   The release job runs on a GitHub-hosted runner, so the repository must be public
+   (or have hosted-runner minutes) before the tag is pushed.
 2. Pick the next SemVer version. MinVer derives the package version from the tag:
-   `v0.6.0` → `0.6.0`, `v0.6.0-rc.1` → `0.6.0-rc.1`. An untagged build is
+   `v1.0.0` → `1.0.0`, `v1.1.0-rc.1` → `1.1.0-rc.1`. An untagged build after
+   `v1.0.0` is `1.0.1-preview.0.<height>`; with no tag at all it is
    `0.0.0-preview.0.<height>`.
 3. Create and push the tag (a maintainer does this; automation must not):
 
    ```bash
-   git tag v0.6.0
-   git push origin v0.6.0
+   git tag v1.0.0
+   git push origin v1.0.0
    ```
 
 4. Watch the **Release** workflow. It builds, runs the test suite as a gate, packs,
    logs in to nuget.org with OIDC, and pushes the `.nupkg` and `.snupkg`.
 5. Verify the package on nuget.org: README, icon, license expression, repository link,
    and the symbol package.
+6. Publish a GitHub Release for the tag; the package's release notes link to the
+   releases page.
 
 ## Local pre-release checks
 
@@ -47,8 +59,9 @@ unzip -l artifacts/pkg/Proxeno.Kiln.Audio.*.nupkg
 ```
 
 The package must contain `README.md`, `LICENSE`, `THIRD-PARTY-NOTICES.md`,
-`icon.png`, `lib/net10.0/Proxeno.Kiln.Audio.dll` and
-`lib/net10.0/Proxeno.Kiln.Audio.xml`; the `.snupkg` carries the PDB.
+`icon.png`, `lib/net10.0/Kiln.Audio.dll` and `lib/net10.0/Kiln.Audio.xml`
+(the package id is `Proxeno.Kiln.Audio`; the assembly keeps the name
+`Kiln.Audio`); the `.snupkg` carries the PDB.
 
 ## Native AOT smoke test
 
@@ -73,5 +86,5 @@ removal produces RS0016/RS0017 (both are errors). Deliberate changes:
 - add new API lines to `PublicAPI.Unshipped.txt`;
 - when a release ships, move the unshipped lines into `PublicAPI.Shipped.txt`.
 
-XML documentation is part of the package (`Proxeno.Kiln.Audio.xml`), and an
+XML documentation is part of the package (`Kiln.Audio.xml`), and an
 undocumented public member fails the build (CS1591).

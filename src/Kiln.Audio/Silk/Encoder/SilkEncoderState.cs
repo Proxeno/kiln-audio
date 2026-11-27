@@ -65,12 +65,16 @@ internal sealed class SilkShapeState
     internal int HarmShapeGainSmthQ16;
     internal int TiltSmthQ16;
 
+    /// <summary>The tilt smoother at the reference strength, which the LBRR re-encode uses (FEC-QUAL-1).</summary>
+    internal int TiltSmthLbrrQ16;
+
     internal void Reset()
     {
         LastGainIndex = 0;
         HarmBoostSmthQ16 = 0;
         HarmShapeGainSmthQ16 = 0;
         TiltSmthQ16 = 0;
+        TiltSmthLbrrQ16 = 0;
     }
 }
 
@@ -205,6 +209,9 @@ internal sealed class SilkEncoderControl
     internal readonly int[] GainsPreQ14 = new int[4];
     internal readonly int[] HarmBoostQ14 = new int[4];
     internal readonly int[] TiltQ14 = new int[4];
+
+    /// <summary>Per-subframe tilt at the reference strength, for the LBRR re-encode (FEC-QUAL-1).</summary>
+    internal readonly int[] TiltLbrrQ14 = new int[4];
     internal readonly int[] HarmShapeGainQ14 = new int[4];
     internal int LambdaQ10;
     internal int InputQualityQ14;
@@ -318,6 +325,9 @@ internal sealed class SilkEncoderState
         (2 * SilkEncoderMath.MaxFrameLength) + SilkEncoderMath.LaShapeMax];
     internal readonly SilkShapeState Shape = new();
     internal readonly SilkPrefilterState Prefilt = new();
+
+    /// <summary>The prefilter that runs with the reference tilt, feeding the LBRR re-encode (FEC-QUAL-1).</summary>
+    internal readonly SilkPrefilterState PrefiltLbrr = new();
     internal int LtpCorrQ15;
 
     /// <summary>Resets the parts of the state that a bandwidth change clears.</summary>
@@ -325,6 +335,7 @@ internal sealed class SilkEncoderState
     {
         Shape.Reset();
         Prefilt.Reset();
+        PrefiltLbrr.Reset();
         Nsq.Reset();
         PrevNlsfQ15.AsSpan().Clear();
         Lp.InLpState.AsSpan().Clear();
@@ -334,6 +345,7 @@ internal sealed class SilkEncoderState
         PrevLag = 100;
         FirstFrameAfterReset = 1;
         Prefilt.LagPrev = 100;
+        PrefiltLbrr.LagPrev = 100;
         Shape.LastGainIndex = 10;
         Nsq.LagPrev = 100;
         Nsq.PrevGainQ16 = 65536;

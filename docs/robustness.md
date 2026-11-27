@@ -4,6 +4,14 @@ The decoder is the trust boundary: its input is whatever a remote peer sends. Th
 states the contract every entry point keeps for arbitrary input, and describes the fuzzer that
 asserts it.
 
+**Summary.** The fuzzer targets the packet parser, the decoder (all five API rates, mono and
+stereo, with and without FEC and packet loss) and the encoder (random options, random PCM including
+NaN and infinities, wrong frame lengths, and a decode round trip of every packet). Across the 17
+sessions in the session log it ran 163,096,303 executions (8,540 s). It found two distinct
+defects, both in decoder packet-loss concealment (SILK and CELT), both fixed and pinned by
+regression tests. The log records no encoder finding, and no finding in the 150,179,318 executions
+run after the fixes. The CI smoke test replays the corpus and 20,000 mutations on every test run.
+
 ## The contract
 
 Any byte string is legal input to the decoder. The framing rules of RFC 6716 §3.2–§3.4 decide
@@ -106,9 +114,8 @@ nice -n 19 dotnet tests/Kiln.Audio.Fuzz/bin/Release/net10.0/Kiln.Audio.Fuzz.dll 
     --seconds 600 --seed 4 --out artifacts/fuzz-seed4
 ```
 
-`--executions N` caps the total target invocations instead of the wall clock, and `--mutations N`
-caps the mutated executions after the corpus replay. `--no-encoder`, `--no-alloc-check` and
-`--no-replay` trim a session. Findings are written as `<target>-<hash>.bin` (single input) or
+`--executions N` caps the total target invocations as well as the wall clock. `--no-encoder`,
+`--no-alloc-check` and `--no-replay` trim a session. Findings are written as `<target>-<hash>.bin` (single input) or
 `<target>-<hash>.seq` (decoder sequence) plus a text sidecar with the message and parameters.
 
 Reproduce one input:
@@ -145,7 +152,7 @@ committed sequences in `Robustness/FuzzSequenceRegressionTests`.
 | 2026-11-26 | merged `train-next` (PERF-2 vectorized decoder) | 16 | 600 s | 11,172,959 | 0 |
 
 Post-fix total: **150,179,318 executions in 2 h 10 min**, no findings. Across all sessions:
-163,096,303 executions in 8,540 s (2 h 22 min), 14 raw findings from two distinct root causes.
-The first session's nine additional findings were defects in the harness's own parser validator,
-fixed before the runs tabulated above. Every session ran single-threaded under `nice -n 19` for
+163,096,303 executions in 8,540 s (2 h 22 min), 13 raw findings from two distinct root causes
+(the counts in the table above). The first session also reported defects in the harness's own
+parser validator, fixed before the runs tabulated above. Every session ran single-threaded under `nice -n 19` for
 ten minutes or less.
