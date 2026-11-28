@@ -41,8 +41,6 @@ internal sealed class CeltEncoderBands
     private readonly int[] _tfResolution = new int[BandCount];
     private int _band;
 
-    /// <summary>Gets or sets a value indicating whether the Relaxed-mode pulse search is used.</summary>
-    internal bool Relaxed { get; set; }
     private int _spread;
     private int _intensity;
 
@@ -404,7 +402,7 @@ internal sealed class CeltEncoderBands
         {
             int k = CeltTables.GetPulses(pulses);
             CeltEncoderVq.AlgQuant<TK>(
-                x, _iy.AsSpan(0, n), _signs.AsSpan(0, n), _y.AsSpan(0, n), n, k, blocks, _spread, ref enc, Relaxed);
+                x, _iy.AsSpan(0, n), _signs.AsSpan(0, n), _y.AsSpan(0, n), n, k, blocks, _spread, ref enc);
         }
 
         _ = timeDivide;

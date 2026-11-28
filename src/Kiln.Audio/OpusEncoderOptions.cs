@@ -86,10 +86,11 @@ public sealed record OpusEncoderOptions
 
     /// <summary>
     /// Speed/quality trade-off. Default <see cref="OpusPerformanceMode.Precise"/>, which produces
-    /// exactly the output of Kiln 1.0. <see cref="OpusPerformanceMode.Relaxed"/> uses cheaper
-    /// searches (fewer noise-shaping quantizer states, a cheaper pitch search, a lane-parallel
-    /// pulse search and similar) and non-bit-exact math: it encodes faster at a small cost in
-    /// signal-to-noise ratio. The packets are standard Opus and any decoder reads them.
+    /// exactly the output of Kiln 1.0. <see cref="OpusPerformanceMode.Relaxed"/> uses a cheaper
+    /// SILK rate loop and quantizer (a single greedy state at low complexity, fewer trellis states
+    /// above it, a narrower NLSF search, no warped shaping below complexity 6) and skips the CELT
+    /// TF analysis and two-pass coarse energy at low complexity. It encodes faster at a small cost
+    /// in signal-to-noise ratio. The packets are standard Opus and any decoder reads them.
     /// </summary>
     public OpusPerformanceMode PerformanceMode { get; init; } = OpusPerformanceMode.Precise;
 

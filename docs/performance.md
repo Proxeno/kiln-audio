@@ -156,6 +156,73 @@ above; x64 is a rented Ryzen 9 7900X, arm64 the M5 Max):
 Reproduce with `KILN_BENCH_RELAXED=1 dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro pubapi`
 (set `KILN_BENCH_VECTOR=N` for a single vector).
 
+### Encoder
+
+`OpusEncoderOptions.PerformanceMode` is fixed per instance. `Precise` is byte-identical to Kiln 1.0.
+`Relaxed` is a per-instance flag read once per frame (SILK rate loop, quantizer choice, analysis
+switches) or once per call, never inside a per-sample or per-coefficient loop, so it did not need
+generic specialisation. The packets are standard Opus: libopus decodes them and the final range matches.
+
+Relaxed knobs kept (each measured on its own, Zen 4):
+
+- SILK quantizer: with a single trellis state (complexity below 4, or the high-rate path) the greedy
+  noise-shaping quantizer (`SilkNsq`, libopus's own complexity-0 shape) replaces the delayed-decision
+  code; above that the state count is 2 (complexity 4-7) or 3 instead of 4-8.
+- SILK rate loop: once one result fits the budget it stops after one more quantization (Precise keeps
+  searching up to six), and any result that fills at least half the budget is accepted instead of one
+  within 5 bits of it.
+- SILK analysis: half the NLSF survivors; no warped noise shaping below complexity 6.
+- CELT: the TF analysis is off below complexity 8 and the two-pass coarse energy needs complexity 8.
+
+Measured and rejected: a scalar largest-remainder PVQ search (slower than the vectorised exact search
+now in Precise), and turning the CELT prefilter pitch search off at complexity 5 (-8 us, -1.0 dB).
+
+Encode time / libopus 1.5.2 (lower is better; P = Precise, R = Relaxed; CBR, same harness and
+configurations as the Encode tables; x64 is a rented Ryzen 9 7950X, arm64 the M5 Max):
+
+| Configuration | Cx | x64 libopus us | x64 P / R | arm64 libopus us | arm64 P / R |
+| --- | --- | --- | --- | --- | --- |
+| CELT stereo 64 kbps | 0 | 19.6 | 0.97 / 0.97 | 18.5 | 1.38 / 1.37 |
+| CELT stereo 64 kbps | 5 | 42.8 | 0.86 / 0.78 | 47.2 | 0.85 / 0.79 |
+| CELT mono 32 kbps | 0 | 10.2 | 1.00 / 0.99 | 9.5 | 1.33 / 1.33 |
+| CELT mono 32 kbps | 5 | 27.3 | 0.94 / 0.84 | 34.4 | 0.74 / 0.67 |
+| SILK WB mono 20 kbps | 0 | 55.4 | 2.07 / 1.16 | 44.5 | 2.01 / 1.07 |
+| SILK WB mono 20 kbps | 5 | 171.0 | 0.75 / 0.43 | 135.8 | 0.73 / 0.40 |
+| Hybrid FB mono 32 kbps | 0 | 36.4 | 3.09 / 2.08 | 31.7 | 2.81 / 1.83 |
+| Hybrid FB mono 32 kbps | 5 | 84.7 | 1.57 / 1.06 | 70.0 | 1.46 / 0.97 |
+
+The 1.0 target is **not met** at SILK and hybrid complexity 0 (1.07 to 2.08) nor, on x64, at hybrid
+complexity 5 (1.06), and the arm64 CELT complexity-0 rows are unchanged from Precise (1.33 to 1.37; Relaxed
+only changes CELT from complexity 5 up, because Precise already skips TF analysis below 2). What is left at
+SILK complexity 0 is fixed analysis cost, in microseconds on x64: resample, VAD and high-pass 11, pitch search 9,
+LPC/LTP/NLSF search 13, noise-shape prefilter 4, quantizer 19, entropy coding 6; there is no cheap knob
+left in those that costs under 1 dB.
+
+Quality (segmental SNR in dB over 1 s from each of the 12 RFC 8251 vectors, decoded by Kiln, UseCbr; the
+frozen Relaxed floors are in `RelaxedEncoderTests`):
+
+| Configuration | Cx | Precise | Relaxed | Delta |
+| --- | --- | --- | --- | --- |
+| CELT stereo 64 kbps | 0 / 5 | 18.62 / 17.52 | 18.62 / 17.46 | 0.00 / -0.05 |
+| CELT mono 32 kbps | 0 / 5 | 15.85 / 16.78 | 15.85 / 16.64 | 0.00 / -0.14 |
+| SILK WB mono 20 kbps | 0 / 5 | 2.33 / 2.83 | 5.54 / 5.53 | see note |
+| SILK WB mono 12 kbps | 0 / 5 | 1.36 / 1.95 | 3.21 / 3.57 | see note |
+| Hybrid FB mono 32 kbps | 0 / 5 | 3.06 / 3.10 | 6.20 / 6.15 | see note |
+
+Note on SILK and hybrid with `UseCbr`: Precise keeps a Kiln 1.0 defect, so its numbers above are low and
+the Precise column is not a fair baseline there. When the SILK rate loop falls back to an earlier
+iteration (`foundLower` restore in `SilkEncoderCore`), it saved and restored the range coder's bytes
+from an internal scratch buffer instead of the buffer the shared range coder writes (SILK-only and hybrid
+frames), so the restored frame carried zero bytes and libopus reports "Range coder state mismatch". It is
+visible with `UseCbr = true` and, more rarely, in VBR. Relaxed uses the corrected restore;
+Precise is left untouched so that every Precise golden and byte hash stays identical, and the fix is
+a candidate for a separate Precise change. Compared without CBR (which avoids the fallback) Relaxed
+against Precise is: SILK 20 kbps +0.05 / 0.00 dB, SILK 12 kbps -0.64 / -0.36 dB, hybrid -0.01 / -0.02 dB
+(complexity 0 / 5), all within 1.0 dB.
+
+Reproduce: `KILN_BENCH_MODE=relaxed dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro enc run
+<pcm> 48000 <ch> <app> <bitrate> <bw> <cx> 7` (set `KILN_BENCH_SNR=1` for the SNR column).
+
 ## Decode speed
 
 `OpusDecoder.Decode(packet, short[])` over each whole RFC 8251 vector, 48 kHz output, best of 15.

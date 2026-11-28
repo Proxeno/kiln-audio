@@ -113,7 +113,6 @@ internal sealed class CeltEncoder
         OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
         _relaxed = mode == OpusPerformanceMode.Relaxed;
-        _bands.Relaxed = _relaxed;
         _lm = frameDuration switch
         {
             OpusFrameDuration.Ms2_5 => 0,
