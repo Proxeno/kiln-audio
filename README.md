@@ -202,8 +202,9 @@ in 14 of 16 gated configurations and trails by 0.13 to 0.19 dB in the other two 
 ahead of libopus at complexity 0 and within 0.35 dB at complexity 10. These are objective
 waveform measurements on the RFC test vectors, not listening tests.
 
-**What has not been measured:** there are no x64 benchmark numbers. The AVX2+FMA kernels are
-tested for correctness on x64 in CI, but their speed has not been recorded.
+**x64:** one run on an AMD Ryzen 7 7700X (rented VM) has decode at 0.76 to 1.09 times libopus and
+encode at complexity 0 slower than libopus in every configuration (1.55 to 3.37 times). It is a
+single machine; see [docs/performance.md](docs/performance.md#x64-vast-ai-amd-ryzen-7-7700x).
 
 ## What Kiln.Audio is not
 

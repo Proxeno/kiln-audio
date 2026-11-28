@@ -17,8 +17,80 @@ so a value above 1.0 means Kiln is slower.
 - The machine is shared with other work. PERF-1 recorded up to about 15 % run-to-run variation on
   decode, and ENC-PERF-1 and PERF-2 recorded 20-50 % on some single runs. Treat differences
   smaller than 10-15 % between two ratios as noise.
-- **Architecture.** Every number is arm64. No x64 benchmark numbers exist in this repository; the
-  x64 AVX2+FMA kernels are parity-tested against scalar but not benchmarked here.
+- **Architecture.** The tables below are arm64. One x64 run (AMD Ryzen 7 7700X, rented VM) is in
+  [x64 results](#x64-vast-ai-amd-ryzen-7-7700x); it is a single run on a shared host and is not
+  directly comparable with the arm64 tables.
+
+## x64 (vast.ai, AMD Ryzen 7 7700X)
+
+One run on a rented x64 VM, tag `v1.0.0`, same harness and statistic as the arm64 tables (decode:
+best of 15 passes; encode: best of 7 passes over the 320 s corpus). Ratios are Kiln time divided by
+libopus time, so lower is better and above 1.0 means Kiln is slower. Each benchmark was run three
+times; the ratio below uses the best run on each side (medians differ by 0.01 or less).
+
+| Item | Value |
+| ---- | ----- |
+| CPU | AMD Ryzen 7 7700X, 8 cores / 16 threads, Zen 4, up to 5.57 GHz; AVX2, FMA and AVX-512 present |
+| VM | vast.ai container, 16 vCPUs visible, Ubuntu 24.04.5, kernel 6.8.0-151 |
+| Runtime | .NET 10.0.15 (`mcr.microsoft.com/dotnet/sdk:10.0`) |
+| Kiln SIMD tier | Avx2Fma (128-bit VEX with FMA). `KILN_AUDIO_DISABLE_SIMD=1` runs the same decode 1.0x to 7x slower per vector (for example vector 02: 85.2 ms scalar, 13.4 ms SIMD), so the SIMD tier was active |
+| Reference | libopus 1.5.2, `-O3`, built with `OPUS_X86_MAY_HAVE_SSE4_1` and `OPUS_X86_MAY_HAVE_AVX2` (runtime CPU detection, so its AVX2 code runs on this CPU) |
+
+Vector 01 stereo is the 1.0x row (41.8 ms on both sides); its scalar time was 57.3 ms.
+
+**Decode** (`OpusDecoder.Decode`, public API, 48 kHz output, whole vector):
+
+| Vector | Content | Stereo ratio | Mono ratio |
+| ------ | ------- | ------------ | ---------- |
+| 01 | CELT-only | 1.00 | 1.04 |
+| 02 | SILK NB | 0.83 | 0.90 |
+| 03 | SILK MB | 0.78 | 0.85 |
+| 04 | SILK WB | 0.82 | 0.87 |
+| 05 | Hybrid SWB | 0.81 | 0.88 |
+| 06 | Hybrid FB | 0.84 | 0.91 |
+| 07 | CELT-only | 0.89 | 1.01 |
+| 08 | SILK and CELT frames | 0.95 | 1.00 |
+| 09 | SILK and CELT frames | 1.06 | 1.09 |
+| 10 | Hybrid and CELT frames | 1.04 | 1.06 |
+| 11 | CELT-only | 0.93 | 0.98 |
+| 12 | SILK and hybrid frames, mono-coded | 0.76 | 0.85 |
+
+Decode ranges from 0.76 to 1.06 (stereo) and 0.85 to 1.09 (mono). Kiln is ahead on the SILK and
+hybrid vectors and behind on vectors 09 and 10.
+
+**Encode** (microseconds per 20 ms frame, CBR, libopus pinned to the same mode and bandwidth):
+
+| Configuration | Complexity | libopus | Kiln | Ratio |
+| ------------- | ---------- | ------- | ---- | ----- |
+| CELT stereo 64 kbps | 0 | 19.3 | 30.4 | 1.57 |
+| CELT stereo 64 kbps | 5 | 42.6 | 48.4 | 1.14 |
+| CELT mono 32 kbps | 0 | 10.0 | 15.5 | 1.55 |
+| CELT mono 32 kbps | 5 | 27.1 | 31.2 | 1.15 |
+| SILK WB mono 20 kbps | 0 | 54.3 | 122.5 | 2.26 |
+| SILK WB mono 20 kbps | 5 | 168.3 | 143.6 | 0.85 |
+| Hybrid FB mono 32 kbps | 0 | 35.7 | 120.4 | 3.37 |
+| Hybrid FB mono 32 kbps | 5 | 83.4 | 144.0 | 1.73 |
+
+Method for the encode rows: Kiln `micro enc run <pcm> 48000 <ch> <app> <bitrate> <bw> <cx> 7`;
+libopus `scripts/bench-libopus-inproc.sh encode <pcm> 48000 <ch> <app> <bitrate> 20 <cx> 1 7`. CELT
+rows use `restricted-lowdelay`; the SILK row uses `voip` with the bandwidth set to wideband and
+libopus forced to SILK (`KILN_BENCH_BANDWIDTH=WB KILN_BENCH_FORCE_MODE=1000`); the hybrid row uses
+`audio`, fullband, libopus forced to hybrid (`FORCE_MODE=1001`). Kiln's packet-mode histogram
+confirmed the same mode (SILK for all 16,031 frames; hybrid for 15,924 and CELT for 107 in the
+hybrid row). The task did not record the exact applications used for the SILK and hybrid arm64 rows,
+so those two applications are a choice made for this run.
+
+What this shows. On x64 the pattern is the same as on arm64: decode is at parity or better except
+two CELT-heavy vectors (up to 1.09), and encode at complexity 0 is slower than libopus in every
+configuration (1.55 to 3.37). CELT encode at complexity 5 is 1.14 to 1.15 here, against 0.75 to 0.85
+on arm64: libopus has AVX2 code for its PVQ search, pitch search and SILK quantizer on this CPU,
+while Kiln's x64 tier is limited to 128-bit vectors. The PVQ search alone is about 16 of 59 us per
+stereo frame at complexity 5 in a `KILN_ENC_PROFILE` build. No tuning was attempted on x64.
+
+Noise. This was a shared VM on a host Kiln does not control. The three runs on each side agreed
+within about 1 % for decode and 2 % for encode, which is much tighter than on the arm64 machine, but
+that says nothing about other hosts or about CPU frequency scaling on this one. Treat differences
+under 10 % as noise, and treat this as one machine of one model, not as "x64".
 
 ## Decode speed
 
@@ -188,7 +260,8 @@ Kiln encoder timings use `EncodeBenchmarks` and `micro enc` in the benchmark pro
 - Quality: SILK mediumband 20 kbps at complexity 0 trails libopus by 0.19 dB (20 ms) and 0.13 dB
   (60 ms); SILK at complexity 5 and 10 trails by up to 0.6 dB in some configurations; CELT-only at
   complexity 10 and 32 kbps trails by 0.351 dB. SILK `opus_compare` scores are not reported.
-- x64 AVX2+FMA kernels are parity-tested but have no recorded benchmark.
+- x64: one benchmark run exists (Ryzen 7 7700X, see above). Encode at complexity 5 for CELT (1.14 to 1.15)
+  and hybrid (1.73) is slower than libopus there, and the x64 tier has no 256-bit paths.
 
 ## History
 
