@@ -20,10 +20,17 @@ internal static class PublicApiDecodeMeasure
     {
         int passes = args.Length > 2 ? int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : DefaultPasses;
         Console.WriteLine(FormattableString.Invariant($"== PUB-PERF-1 public API decode: best of {passes} passes, 48 kHz =="));
+        Console.WriteLine(Environment.GetEnvironmentVariable("KILN_BENCH_RELAXED") == "1" ? "mode=Relaxed" : "mode=Precise");
         foreach (int channels in new[] { 2, 1 })
         {
+            string? only = Environment.GetEnvironmentVariable("KILN_BENCH_VECTOR");
             for (int vector = 1; vector <= 12; vector++)
             {
+                if (only is not null && int.Parse(only, System.Globalization.CultureInfo.InvariantCulture) != vector)
+                {
+                    continue;
+                }
+
                 byte[][] packets = TestVectorData.ReadPackets(vector);
                 short[] pcm = new short[48000 * 120 / 1000 * channels];
                 double best = MeasureVector(packets, pcm, channels, passes);
@@ -35,7 +42,14 @@ internal static class PublicApiDecodeMeasure
 
     private static double MeasureVector(byte[][] packets, short[] pcm, int channels, int passes)
     {
-        var options = new OpusDecoderOptions { SampleRate = 48000, Channels = channels };
+        var options = new OpusDecoderOptions
+        {
+            SampleRate = 48000,
+            Channels = channels,
+            PerformanceMode = Environment.GetEnvironmentVariable("KILN_BENCH_RELAXED") == "1"
+                ? OpusPerformanceMode.Relaxed
+                : OpusPerformanceMode.Precise,
+        };
 
         // Tier-1 warm-up on a throwaway decoder so the JIT has re-compiled the hot paths.
         using (var warm = new OpusDecoder(options))

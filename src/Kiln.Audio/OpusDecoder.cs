@@ -48,7 +48,7 @@ public sealed class OpusDecoder : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
         Options = options;
-        _core = new OpusDecoderCore(options.SampleRate, options.Channels);
+        _core = new OpusDecoderCore(options.SampleRate, options.Channels, options.PerformanceMode);
         _floatScratch = new float[options.SampleRate * MaxPacketMilliseconds / 1000 * options.Channels];
     }
 

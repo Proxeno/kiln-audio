@@ -92,6 +92,70 @@ within about 1 % for decode and 2 % for encode, which is much tighter than on th
 that says nothing about other hosts or about CPU frequency scaling on this one. Treat differences
 under 10 % as noise, and treat this as one machine of one model, not as "x64".
 
+## Performance modes
+
+`OpusDecoderOptions.PerformanceMode` (and the matching encoder option) selects between exactness and
+speed per instance. `Precise` is the default and is bit-identical to Kiln 1.0; `Relaxed` may use
+non-bit-exact floating-point math. Both modes are fully standard Opus: the mode never changes what
+is accepted or produced on the wire.
+
+### Decoder
+
+The mode is resolved once at construction and specialised through generics, like the kernel tiers: the
+CELT decoder and synthesizer are instantiated either on the bare tier struct (Precise, unchanged code)
+or on `ProfiledKernels<Tier, RelaxedProfile>`, so a Relaxed-only branch is a JIT-time constant and costs
+nothing in Precise. SILK decoding is integer arithmetic and is identical in both modes.
+
+Relaxed knobs kept (each measured; the others below were not worth keeping):
+
+- `RelaxedMath.Exp2`: a degree-5 minimax float polynomial replaces the double-precision `Math.Exp` in
+  band denormalisation and anti-collapse (relative error 2.5e-7).
+- `FastRsqrt`: the hardware reciprocal-square-root estimate plus Newton-Raphson steps (`rsqrtss` +
+  one FMA step on x64, `frsqrte`/`frsqrts` on arm64; error 1.7e-7) replaces `1 / sqrt` in PVQ
+  renormalisation and the stereo merge gains.
+
+Exact (both modes) change made in the same lane: the 2048-sample synthesis history window now slides
+through a longer buffer and is compacted every few thousand samples, instead of being shifted left by
+one frame (two 8 KB copies for 2.5 ms frames) on every frame. Output is unchanged; the gain is
+about 1-2 % on the 2.5 ms-heavy vectors.
+
+Not kept or not done: the IMDCT, comb filter, de-emphasis and overlap-add already use fused
+multiply-add and reassociated sums on every vector tier in Precise too, so there is nothing further to
+contract there; a fused de-emphasis + int16 conversion would only remove the 0.3 % int16 pass; the
+PLC path is rare and was left as is.
+
+Where the time goes: on the CELT vectors the PVQ pulse decode, the range decoder and the band
+partitioning (all integer and bit-exact) are about 75-80 % of a frame and synthesis is 10-25 %, so the
+float knobs move the total by 1-3 %. The 0.90 target is therefore **not met**: Relaxed is the same as
+Precise within about 3 %, and vectors 09 and 10 (high-rate CELT) stay above 1.0, as do the arm64
+SILK vectors.
+
+Conformance and accuracy (Relaxed): all 12 RFC 8251 vectors pass the final-range check and the
+`opus_compare` quality metric against `.dec` or `m.dec`, in the managed and the native comparator,
+with the same result as Precise. Against Precise the PCM differs by at most 1 LSB (99-116 dB SNR) on
+the CELT, hybrid and mixed vectors and is identical on the SILK-only vectors (02, 03, 04, 12).
+
+Decode time / libopus 1.5.2 (lower is better; P = Precise, R = Relaxed; best of 15, same harness as
+above; x64 is a rented Ryzen 9 7900X, arm64 the M5 Max):
+
+| Vector | x64 stereo P / R | x64 mono P / R | arm64 stereo P / R | arm64 mono P / R |
+| --- | --- | --- | --- | --- |
+| 01 | 0.98 / 0.97 | 1.03 / 1.01 | 0.98 / 0.97 | 1.05 / 1.04 |
+| 02 | 0.83 / 0.83 | 0.90 / 0.90 | 1.02 / 1.02 | 1.09 / 1.08 |
+| 03 | 0.79 / 0.79 | 0.86 / 0.86 | 1.02 / 1.02 | 1.09 / 1.07 |
+| 04 | 0.82 / 0.82 | 0.87 / 0.87 | 1.05 / 1.04 | 1.11 / 1.10 |
+| 05 | 0.81 / 0.80 | 0.88 / 0.88 | 0.90 / 0.90 | 0.98 / 0.99 |
+| 06 | 0.84 / 0.84 | 0.91 / 0.91 | 0.95 / 0.94 | 1.02 / 1.03 |
+| 07 | 0.88 / 0.87 | 1.00 / 0.98 | 0.87 / 0.84 | 1.03 / 1.00 |
+| 08 | 0.93 / 0.92 | 0.99 / 0.97 | 0.90 / 0.91 | 1.01 / 0.99 |
+| 09 | 1.05 / 1.05 | 1.09 / 1.08 | 1.06 / 1.06 | 1.13 / 1.12 |
+| 10 | 1.03 / 1.02 | 1.06 / 1.05 | 1.05 / 1.02 | 1.10 / 1.09 |
+| 11 | 0.92 / 0.92 | 0.97 / 0.96 | 0.86 / 0.86 | 0.94 / 0.94 |
+| 12 | 0.77 / 0.76 | 0.85 / 0.85 | 0.91 / 0.91 | 1.05 / 1.04 |
+
+Reproduce with `KILN_BENCH_RELAXED=1 dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro pubapi`
+(set `KILN_BENCH_VECTOR=N` for a single vector).
+
 ## Decode speed
 
 `OpusDecoder.Decode(packet, short[])` over each whole RFC 8251 vector, 48 kHz output, best of 15.

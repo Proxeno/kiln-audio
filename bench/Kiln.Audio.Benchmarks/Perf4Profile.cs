@@ -36,7 +36,7 @@ internal static class Perf4ProfileMeasure
         return;
 #else
         Console.WriteLine("== PERF-4 CELT stage profile (us/frame, instrumented) ==");
-        foreach (int vector in new[] { 1, 7, 11 })
+        foreach (int vector in new[] { 1, 7, 8, 9, 11 })
         {
             Measure(vector);
         }
