@@ -7,7 +7,11 @@ namespace Kiln.Audio.Tests;
 /// ENC-NSQ-1: the SILK noise shaping quantizer and the analysis kernels are performance work only. Every
 /// SILK-only encode of a fixed synthetic corpus must hash to the bytes the encoder produced before the work
 /// (golden hashes recorded from the pre-change encoder), on every kernel tier. The corpus is generated with
-/// integer arithmetic only, so it is identical on every host.
+/// integer arithmetic only, so it is identical on every host. CBR-FIX regenerated 24 CBR hashes: the CBR
+/// rate-loop restore used to emit a corrupt frame ("Range coder state mismatch" in libopus) whenever it ran,
+/// and every case must now also decode in libopus with a matching final range. The two 64 kbps cases also
+/// change because their automatic mode selection falls back to CELT, whose CBR payload is now sized to the
+/// nominal packet. The VBR cases are unchanged.
 /// </summary>
 public class SilkNsqByteHashTests
 {
@@ -16,32 +20,32 @@ public class SilkNsqByteHashTests
 
     private static readonly Case[] s_cases =
     [
-        new("wb12k-c0", 1, 12000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "CBFD33065045C4D08B6F098F"),
-        new("wb12k-c2", 1, 12000, 2, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "96E5795F6EEFF2F16B52C6A7"),
-        new("wb12k-c4", 1, 12000, 4, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "CEAD4E20657D17F86FD5281E"),
-        new("wb12k-c6", 1, 12000, 6, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "0F4DF23C6646D4EB31577ED3"),
-        new("wb12k-c8", 1, 12000, 8, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "B14748F2CD5450993979B017"),
-        new("wb12k-c10", 1, 12000, 10, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "B14748F2CD5450993979B017"),
+        new("wb12k-c0", 1, 12000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "39E58054C2A5DE540BC579FA"),
+        new("wb12k-c2", 1, 12000, 2, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "E698D4ABC5E5A02DFCCA4728"),
+        new("wb12k-c4", 1, 12000, 4, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "3DB9EC7FE51AA59432D71745"),
+        new("wb12k-c6", 1, 12000, 6, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "5C5FBF120A115D0F4FAFD939"),
+        new("wb12k-c8", 1, 12000, 8, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "27E193F432E3D37E935EF785"),
+        new("wb12k-c10", 1, 12000, 10, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "27E193F432E3D37E935EF785"),
         new("wb12k-c5-vbr", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, true, false, false, "4F49B2906A200D08F39376D0"),
-        new("wb12k-c0-10ms", 1, 12000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms10, false, false, false, "6D8FA2D3A0DA01208365B77E"),
-        new("wb12k-c5-10ms", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms10, false, false, false, "69A97A6AE19708B58EDD546F"),
-        new("wb12k-c5-40ms", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms40, false, false, false, "5F3665E92AEFD46CB60D721D"),
-        new("wb12k-c0-60ms", 1, 12000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms60, false, false, false, "F4F3C8C1C4E52B54EE2EE358"),
-        new("wb12k-c5-fec", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, true, false, "CEAD4E20657D17F86FD5281E"),
-        new("wb12k-c8-fec", 1, 12000, 8, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, true, false, "B14748F2CD5450993979B017"),
-        new("wb16k-c3-dtx", 1, 16000, 3, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, true, "F43C963257098A217155D15A"),
-        new("mb10k-c0", 1, 10000, 0, OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, false, false, false, "F890B8907597D41983D8773B"),
-        new("mb10k-c7", 1, 10000, 7, OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, false, false, false, "042284E8CA15B6BE55A0AB96"),
-        new("nb7k-c0", 1, 7000, 0, OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, false, false, false, "B1131FA0FF05363598400F49"),
-        new("nb7k-c9", 1, 7000, 9, OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, false, false, false, "19D6DE14671A5CF07B4B8AD7"),
-        new("wb20k-c0-highrate", 1, 20000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "33BE45ED50BC5BC2870CF3B7"),
-        new("wb20k-c5-highrate", 1, 20000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "DB0FA54A191D3E2C8DE23CDE"),
-        new("wb64k-c0-highrate", 1, 64000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "733D8A44F1048C3E866866F6"),
-        new("wb64k-c8-highrate", 1, 64000, 8, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "D218C03272C4843A5F26DA49"),
-        new("wb20k-st-c0", 2, 20000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "9031F8C566DD13C0540813D0"),
-        new("wb20k-st-c5", 2, 20000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "9B12D1FF3757792B0F057D5D"),
+        new("wb12k-c0-10ms", 1, 12000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms10, false, false, false, "6F46742CD4A27E6AD8500F18"),
+        new("wb12k-c5-10ms", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms10, false, false, false, "260DD9D2B11C001CCA5EAE6E"),
+        new("wb12k-c5-40ms", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms40, false, false, false, "E287050AFBE8522470AAE774"),
+        new("wb12k-c0-60ms", 1, 12000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms60, false, false, false, "3C5E478732B9D853E8CF458F"),
+        new("wb12k-c5-fec", 1, 12000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, true, false, "3DB9EC7FE51AA59432D71745"),
+        new("wb12k-c8-fec", 1, 12000, 8, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, true, false, "27E193F432E3D37E935EF785"),
+        new("wb16k-c3-dtx", 1, 16000, 3, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, true, "E37684697842D710A7AC929A"),
+        new("mb10k-c0", 1, 10000, 0, OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, false, false, false, "2E653661FF35EC8A3FFB6DFE"),
+        new("mb10k-c7", 1, 10000, 7, OpusBandwidth.Mediumband, OpusFrameDuration.Ms20, false, false, false, "0D45C22659EC1DA28447C4C9"),
+        new("nb7k-c0", 1, 7000, 0, OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, false, false, false, "6C9B1875AF1F3DCE8F3D1F1A"),
+        new("nb7k-c9", 1, 7000, 9, OpusBandwidth.Narrowband, OpusFrameDuration.Ms20, false, false, false, "97E909603EC3D8482B681985"),
+        new("wb20k-c0-highrate", 1, 20000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "28CB191B756EB7478C7DC00F"),
+        new("wb20k-c5-highrate", 1, 20000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "3C32EDF7A0ED07F5C8578D71"),
+        new("wb64k-c0-highrate", 1, 64000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "DDBBE95F1083F30A1CC9171D"),
+        new("wb64k-c8-highrate", 1, 64000, 8, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "73270BE89E8AE3649C43DAE4"),
+        new("wb20k-st-c0", 2, 20000, 0, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "B64333CF78E44709138A7646"),
+        new("wb20k-st-c5", 2, 20000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "912D248089000838FC4AED87"),
         new("wb20k-st-c9-vbr", 2, 20000, 9, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, true, false, false, "E3170CF5457A47B402430C28"),
-        new("wb40k-st-c5", 2, 40000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "B357F3FA31ED501B238DE289"),
+        new("wb40k-st-c5", 2, 40000, 5, OpusBandwidth.Wideband, OpusFrameDuration.Ms20, false, false, false, "438639102C768D793895DCEE"),
     ];
 
 
@@ -85,6 +89,85 @@ public class SilkNsqByteHashTests
 
         Assert.True(failures.Count == 0, $"{name} expected {c.Hash}; got {string.Join(", ", failures)}");
     }
+
+    [Theory]
+    [MemberData(nameof(CaseNames))]
+    public void A_silk_encode_decodes_in_libopus_with_matching_final_range(string name)
+    {
+        if (!Kiln.Audio.Tests.Oracle.OracleTestSupport.OracleAvailable())
+        {
+            return;
+        }
+
+        Case c = Array.Find(s_cases, x => x.Name == name)!;
+        short[] pcm = Synthesize(c.Channels, 48000 * 3);
+        var packets = new List<(byte[] Packet, uint Range)>();
+        int suppressed = 0;
+        uint lastTransmittedRange = 0;
+        using (AudioKernels.Scope(AudioKernelTier.Scalar))
+        {
+            using var encoder = CreateEncoder(c);
+            int frame = FrameSamples(c) * c.Channels;
+            var buffer = new byte[1276];
+            for (int offset = 0; offset + frame <= pcm.Length; offset += frame)
+            {
+                int length = encoder.Encode(pcm.AsSpan(offset, frame), buffer);
+                byte[] packet = buffer.AsSpan(0, length).ToArray();
+                if (c.Dtx && length == 1)
+                {
+                    // A DTX-suppressed packet is one TOC byte and no range-coded payload. The encoder
+                    // leaves FinalRange at the last transmitted frame's value (a pre-existing accounting
+                    // gap, unrelated to the CBR restore), while a decoder reports 0 for such a packet and
+                    // the .bit format skips the range check when the stored range is 0. Record it as 0 so
+                    // that every transmitted packet is still range-checked exactly.
+                    Assert.Equal(lastTransmittedRange, encoder.FinalRange);
+                    suppressed++;
+                    packets.Add((packet, 0u));
+                }
+                else
+                {
+                    lastTransmittedRange = encoder.FinalRange;
+                    packets.Add((packet, encoder.FinalRange));
+                }
+            }
+        }
+
+        if (c.Dtx)
+        {
+            // The fixture must actually exercise DTX, and every other packet must carry a range check.
+            Assert.True(suppressed > 0, $"{name}: the DTX fixture must suppress at least one packet");
+            Assert.True(packets.Count > suppressed, $"{name}: the DTX fixture must transmit packets");
+        }
+
+        (_, string diagnostics) = Kiln.Audio.Tests.Encoder.EncoderOracle.Decode(
+            Kiln.Audio.Tests.Encoder.EncoderCorpus.WriteBitFileToBytes(packets), c.Channels);
+        Assert.False(
+            Kiln.Audio.Tests.Encoder.EncoderOracle.HasRangeMismatch(diagnostics), $"{name}: {diagnostics}");
+    }
+
+    private static int FrameSamples(Case c) => c.Duration switch
+    {
+        OpusFrameDuration.Ms10 => 480,
+        OpusFrameDuration.Ms40 => 1920,
+        OpusFrameDuration.Ms60 => 2880,
+        _ => 960,
+    };
+
+    private static OpusEncoder CreateEncoder(Case c) => new(new OpusEncoderOptions
+    {
+        Application = OpusApplication.Voip,
+        SampleRate = 48000,
+        Channels = c.Channels,
+        BitrateBps = c.BitrateBps,
+        FrameDuration = c.Duration,
+        Complexity = c.Complexity,
+        Bandwidth = c.Bandwidth,
+        UseCbr = !c.Vbr,
+        UseVbr = c.Vbr,
+        UseInbandFec = c.Fec,
+        PacketLossPercent = c.Fec ? 15 : 0,
+        UseDtx = c.Dtx,
+    });
 
     private static string HashEncode(AudioKernelTier tier, Case c, short[] pcm)
     {

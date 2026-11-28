@@ -106,7 +106,7 @@ public class OpusHybridEncoderTests
         int endBand = bandwidth == OpusBandwidth.Fullband ? 21 : 19;
         int bytes = OpusHybridEncoder.Encode(
             silk, celt, redundant, pcm.AsSpan(frame * FrameSamples, FrameSamples), 48000, FrameSamples,
-            Bitrate, payload.Length, endBand, redundancy, celtToSilk, payload, out uint range);
+            Bitrate, payload.Length, endBand, redundancy, celtToSilk, constantBitrate: false, payload, out uint range);
 
         byte toc = OpusTocBuilder.Build(OpusMode.Hybrid, bandwidth, OpusFrameDuration.Ms20, stereo: false);
         var packet = new byte[bytes + 2];

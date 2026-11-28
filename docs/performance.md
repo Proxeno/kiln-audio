@@ -205,20 +205,22 @@ frozen Relaxed floors are in `RelaxedEncoderTests`):
 | --- | --- | --- | --- | --- |
 | CELT stereo 64 kbps | 0 / 5 | 18.62 / 17.52 | 18.62 / 17.46 | 0.00 / -0.05 |
 | CELT mono 32 kbps | 0 / 5 | 15.85 / 16.78 | 15.85 / 16.64 | 0.00 / -0.14 |
-| SILK WB mono 20 kbps | 0 / 5 | 2.33 / 2.83 | 5.54 / 5.53 | see note |
-| SILK WB mono 12 kbps | 0 / 5 | 1.36 / 1.95 | 3.21 / 3.57 | see note |
-| Hybrid FB mono 32 kbps | 0 / 5 | 3.06 / 3.10 | 6.20 / 6.15 | see note |
+| SILK WB mono 20 kbps | 0 / 5 | 5.66 / 5.65 | 5.54 / 5.53 | -0.12 / -0.12 |
+| SILK WB mono 12 kbps | 0 / 5 | 4.39 / 4.32 | 3.85 / 4.09 | -0.54 / -0.23 |
+| Hybrid FB mono 32 kbps | 0 / 5 | 6.17 / 6.18 | 6.18 / 6.15 | +0.01 / -0.03 |
 
-Note on SILK and hybrid with `UseCbr`: Precise keeps a Kiln 1.0 defect, so its numbers above are low and
-the Precise column is not a fair baseline there. When the SILK rate loop falls back to an earlier
-iteration (`foundLower` restore in `SilkEncoderCore`), it saved and restored the range coder's bytes
-from an internal scratch buffer instead of the buffer the shared range coder writes (SILK-only and hybrid
-frames), so the restored frame carried zero bytes and libopus reports "Range coder state mismatch". It is
-visible with `UseCbr = true` and, more rarely, in VBR. Relaxed uses the corrected restore;
-Precise is left untouched so that every Precise golden and byte hash stays identical, and the fix is
-a candidate for a separate Precise change. Compared without CBR (which avoids the fallback) Relaxed
-against Precise is: SILK 20 kbps +0.05 / 0.00 dB, SILK 12 kbps -0.64 / -0.36 dB, hybrid -0.01 / -0.02 dB
-(complexity 0 / 5), all within 1.0 dB.
+Note on SILK and hybrid with `UseCbr` (these are the re-measured CBR-FIX / 1.1.0 numbers). Before CBR-FIX,
+Precise carried a Kiln 1.0 defect: when the SILK rate loop fell back to an earlier iteration (`foundLower`
+restore in `SilkEncoderCore`) it restored the frame bytes from an internal scratch buffer instead of the
+buffer the shared range coder writes (SILK-only and hybrid), so the restored frame carried zero bytes and
+libopus reported "Range coder state mismatch". The defect both corrupted the stream and depressed the old
+Precise SILK/hybrid rows (the earlier table showed ~2 to 3 dB); CBR-FIX uses the corrected restore in both
+modes, which is why the Precise SILK and hybrid CBR rows here are much higher and are now a fair baseline.
+CBR-FIX also sizes the automatic CELT fallback and the hybrid CBR frame to the nominal packet budget, so
+neither can emit one byte over the nominal size on a transition. Relaxed low-rate SILK CBR now fills the
+CBR budget instead of stopping at roughly half of it, which recovers ~0.6 dB at 12 kbps wideband complexity 0
+(3.21 -> 3.85) and keeps Precise and Relaxed within the 1 dB limit; the cost is a few more rate-loop
+quantizations on those low-rate frames, while VBR and high-rate Relaxed are unchanged.
 
 Reproduce: `KILN_BENCH_MODE=relaxed dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro enc run
 <pcm> 48000 <ch> <app> <bitrate> <bw> <cx> 7` (set `KILN_BENCH_SNR=1` for the SNR column).

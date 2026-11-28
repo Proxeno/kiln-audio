@@ -213,8 +213,15 @@ internal sealed class CeltEncoder
     /// <param name="destination">The destination payload buffer.</param>
     /// <param name="startBand">The first coded band, 0 for CELT-only.</param>
     /// <param name="endBand">One past the last coded band, 1 to 21.</param>
+    /// <param name="cbrFrameBytes">
+    /// In CBR, an optional cap on the payload size in bytes, used by the automatic mode selector's
+    /// CELT fallback so the packet (TOC included) fits the nominal frame budget. -1 uses
+    /// <see cref="FrameBytes"/>, which is one byte more and is the documented standalone-CELT
+    /// convention. Ignored when the encoder is in VBR mode.
+    /// </param>
     /// <returns>The payload size in bytes.</returns>
-    internal int EncodeFrame(ReadOnlySpan<short> pcm, Span<byte> destination, int startBand, int endBand)
+    internal int EncodeFrame(
+        ReadOnlySpan<short> pcm, Span<byte> destination, int startBand, int endBand, int cbrFrameBytes = -1)
     {
         if (startBand < 0 || endBand <= startBand || endBand > BandCount)
         {
@@ -259,7 +266,7 @@ internal sealed class CeltEncoder
         }
         else
         {
-            int frameBytes = FrameBytes;
+            int frameBytes = cbrFrameBytes > 0 ? Math.Clamp(cbrFrameBytes, 2, FrameBytes) : FrameBytes;
             if (destination.Length < frameBytes)
             {
                 throw new ArgumentException(

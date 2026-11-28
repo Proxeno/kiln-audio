@@ -1015,7 +1015,11 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         int ecPrevSignalStart = state.EcPrevSignalType;
 
         // Relaxed accepts any result that fills most of the budget; Precise only one within 5 bits of it.
-        int fitWindow = _relaxed ? Math.Max(5, maxBits >> RelaxedFitShift) : 5;
+        // At low rate that half-budget window makes the CBR gain loop stop at roughly half the budget,
+        // which costs far more quality than it saves (12 kbps wideband lost ~1.2 dB against Precise once
+        // the CBR restore fix lifted Precise), so Relaxed fills the budget like Precise there. VBR never
+        // reaches this window (it accepts the first frame that fits), and high rate keeps the half window.
+        int fitWindow = _relaxed && state.HighRate != 0 ? Math.Max(5, maxBits >> RelaxedFitShift) : 5;
         for (int iter = 0; ; iter++)
         {
             if (gainsId == gainsIdLower)
@@ -1068,16 +1072,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 if (foundLower && (gainsId == gainsIdLower || nBits > maxBits))
                 {
                     rangeEncoder = savedLower;
-                    if (_relaxed)
-                    {
-                        rangeEncoder.RestoreFrontBytes(_rangeLowerBytes.AsSpan(0, _rangeLowerCount));
-                    }
-                    else
-                    {
-                        // Kiln 1.0 behaviour, kept byte for byte in Precise: the saved copy comes from the
-                        // internal scratch buffer, which is not where a shared (SILK-only/hybrid) range coder writes.
-                        _rangeLowerBytes.AsSpan(0, _rangeLowerCount).CopyTo(_rangeBuffer);
-                    }
+                    rangeEncoder.RestoreFrontBytes(_rangeLowerBytes.AsSpan(0, _rangeLowerCount));
 
                     if (_greedy)
                     {
@@ -1119,16 +1114,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 {
                     gainsIdLower = gainsId;
                     savedLower = rangeEncoder;
-                    if (_relaxed)
-                    {
-                        _rangeLowerCount = rangeEncoder.FrontBytes;
-                        rangeEncoder.CopyFrontBytesTo(_rangeLowerBytes);
-                    }
-                    else
-                    {
-                        _rangeLowerCount = rangeEncoder.RangeBytes;
-                        _rangeBuffer.AsSpan(0, _rangeLowerCount).CopyTo(_rangeLowerBytes);
-                    }
+                    _rangeLowerCount = rangeEncoder.FrontBytes;
+                    rangeEncoder.CopyFrontBytesTo(_rangeLowerBytes);
 
                     if (_greedy)
                     {

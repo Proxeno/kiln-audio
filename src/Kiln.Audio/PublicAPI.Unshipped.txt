@@ -1,8 +1,1 @@
 #nullable enable
-Kiln.Audio.OpusPerformanceMode
-Kiln.Audio.OpusPerformanceMode.Precise = 0 -> Kiln.Audio.OpusPerformanceMode
-Kiln.Audio.OpusPerformanceMode.Relaxed = 1 -> Kiln.Audio.OpusPerformanceMode
-Kiln.Audio.OpusEncoderOptions.PerformanceMode.get -> Kiln.Audio.OpusPerformanceMode
-Kiln.Audio.OpusEncoderOptions.PerformanceMode.init -> void
-Kiln.Audio.OpusDecoderOptions.PerformanceMode.get -> Kiln.Audio.OpusPerformanceMode
-Kiln.Audio.OpusDecoderOptions.PerformanceMode.init -> void
