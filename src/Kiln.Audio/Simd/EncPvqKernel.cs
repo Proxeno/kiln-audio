@@ -4,7 +4,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Numerics;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 
 namespace Kiln.Audio.Simd;
 
@@ -38,7 +37,7 @@ internal static class EncPvqKernel
         ref float yr = ref MemoryMarshal.GetReference(y);
 
         int jj = 0;
-        if (Sse.IsSupported)
+        if (Vector128.IsHardwareAccelerated)
         {
             Vector128<float> one = Vector128.Create(1f);
             Vector128<float> minusOne = Vector128.Create(-1f);
@@ -116,11 +115,11 @@ internal static class EncPvqKernel
             pulsesLeft = 0;
         }
 
-        if (Sse.IsSupported && n >= 4 && n <= 16 && (n & 3) == 0)
+        if (Vector128.IsHardwareAccelerated && n >= 4 && n <= 16 && (n & 3) == 0)
         {
             SearchRatioSmall(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
         }
-        else if (Sse.IsSupported && n >= 4 && n <= MaxRatioN)
+        else if (Vector128.IsHardwareAccelerated && n >= 4 && n <= MaxRatioN)
         {
             SearchRatio(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
         }
@@ -134,7 +133,7 @@ internal static class EncPvqKernel
         }
 
         int jf = 0;
-        if (Sse.IsSupported)
+        if (Vector128.IsHardwareAccelerated)
         {
             for (; jf + 4 <= n; jf += 4)
             {
@@ -248,7 +247,7 @@ internal static class EncPvqKernel
     }
 
     /// <summary>
-    /// x64 search: one branch-free pass computes every candidate's ratio <c>num/den</c>; when exactly one
+    /// Vector search: one branch-free pass computes every candidate's ratio <c>num/den</c>; when exactly one
     /// candidate lies within 2^-18 (relative) of the maximum ratio it is the scalar loop's winner (every
     /// other candidate loses to it by far more than the rounding of the scalar loop's two cross products,
     /// and it beats any running best before it). Any other case (ties, near-ties, NaN) re-runs the exact
