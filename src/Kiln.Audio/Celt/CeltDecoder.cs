@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Kiln.Audio.Entropy;
+using Kiln.Audio.Decoder;
 using Kiln.Audio.Simd;
 using Kiln.Audio.Simd.Kernels;
 
@@ -184,6 +185,7 @@ internal sealed class CeltDecoder
     private bool _phaseInverted;
     private uint _seed;
     private readonly AudioKernelTier _tier;
+    private readonly bool _relaxed;
     private int _postFilterPeriod;
     private int _postFilterPeriodOld;
     private float _postFilterGainValue;
@@ -199,11 +201,21 @@ internal sealed class CeltDecoder
     {
     }
 
+    /// <summary>Initializes a CELT decoder for a performance mode on the best kernel tier.</summary>
+    /// <param name="channels">Output channel count, 1 or 2.</param>
+    /// <param name="mode">Precise (bit-exact) or Relaxed (fast, not bit-exact).</param>
+    internal CeltDecoder(int channels, OpusPerformanceMode mode)
+        : this(channels, AudioKernels.Select(), mode)
+    {
+    }
+
     /// <summary>Initializes a CELT decoder on an explicit kernel tier (parity tests).</summary>
     /// <param name="channels">Output channel count, 1 or 2.</param>
     /// <param name="tier">The kernel tier; it must be supported by the host.</param>
-    internal CeltDecoder(int channels, AudioKernelTier tier)
+    /// <param name="mode">Precise (bit-exact) or Relaxed (fast, not bit-exact).</param>
+    internal CeltDecoder(int channels, AudioKernelTier tier, OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
+        _relaxed = mode == OpusPerformanceMode.Relaxed;
         if (!AudioKernels.IsSupported(tier))
         {
             throw new PlatformNotSupportedException($"The {tier} kernel tier is not supported on this host.");
@@ -257,20 +269,52 @@ internal sealed class CeltDecoder
         int streamChannels,
         CeltFrameResult result)
     {
-        // One switch per frame; everything below it is a direct call specialised to the tier.
+        // One switch per frame; everything below it is a direct call specialised to the tier and profile.
         switch (_tier)
         {
             case AudioKernelTier.Avx2Fma:
-                DecodeFrameCore<Avx2FmaKernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                if (_relaxed)
+                {
+                    DecodeFrameCore<ProfiledKernels<Avx2FmaKernels, RelaxedProfile>>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+                else
+                {
+                    DecodeFrameCore<Avx2FmaKernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+
                 break;
             case AudioKernelTier.AdvSimdArm64:
-                DecodeFrameCore<AdvSimdArm64Kernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                if (_relaxed)
+                {
+                    DecodeFrameCore<ProfiledKernels<AdvSimdArm64Kernels, RelaxedProfile>>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+                else
+                {
+                    DecodeFrameCore<AdvSimdArm64Kernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+
                 break;
             case AudioKernelTier.Vector128:
-                DecodeFrameCore<Vector128Kernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                if (_relaxed)
+                {
+                    DecodeFrameCore<ProfiledKernels<Vector128Kernels, RelaxedProfile>>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+                else
+                {
+                    DecodeFrameCore<Vector128Kernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+
                 break;
             default:
-                DecodeFrameCore<ScalarKernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                if (_relaxed)
+                {
+                    DecodeFrameCore<ProfiledKernels<ScalarKernels, RelaxedProfile>>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+                else
+                {
+                    DecodeFrameCore<ScalarKernels>(ref dec, frameBytes, lm, startBand, endBand, streamChannels, result);
+                }
+
                 break;
         }
     }
@@ -2083,7 +2127,7 @@ internal sealed class CeltDecoder
         // second pass over the pulse vector.
         Cwrsi(n, k, index, iy, out float energy, out int mask, blocks);
 
-        float g = (1f / MathF.Sqrt(energy)) * gain;
+        float g = (TK.Relaxed ? TK.FastRsqrt(energy) : 1f / MathF.Sqrt(energy)) * gain;
         TK.ScaleIntToFloat(x, iy, g);
 
         // PERF-7: most leaves are too dense to rotate; skip the call (and its setup) for them.
@@ -2358,7 +2402,7 @@ internal sealed class CeltDecoder
     {
         long start12 = Perf4Profile.Start();
         float energy = 1e-15f + TK.SumSquares(x);
-        float g = (1f / MathF.Sqrt(energy)) * gain;
+        float g = (TK.Relaxed ? TK.FastRsqrt(energy) : 1f / MathF.Sqrt(energy)) * gain;
         TK.ScaleInPlace(x, g);
         Perf4Profile.Stop(12, start12);
     }
@@ -2406,8 +2450,8 @@ internal sealed class CeltDecoder
             return;
         }
 
-        float lgain = 1f / (float)Math.Sqrt(el);
-        float rgain = 1f / (float)Math.Sqrt(er);
+        float lgain = TK.Relaxed ? TK.FastRsqrt(el) : 1f / (float)Math.Sqrt(el);
+        float rgain = TK.Relaxed ? TK.FastRsqrt(er) : 1f / (float)Math.Sqrt(er);
         TK.StereoMerge(x, y, mid, lgain, rgain, n);
     }
 
@@ -2422,7 +2466,9 @@ internal sealed class CeltDecoder
         {
             int n0 = eBands[i + 1] - eBands[i];
             int depth = (1 + _pulses[i]) / (n0 << lm);
-            float threshold = 0.5f * (float)Math.Exp(0.6931471805599453094 * (-0.125f * depth));
+            float threshold = 0.5f * (TK.Relaxed
+                ? RelaxedMath.Exp2(-0.125f * depth)
+                : (float)Math.Exp(0.6931471805599453094 * (-0.125f * depth)));
             float sqrt1 = 1f / (float)Math.Sqrt(n0 << lm);
             for (int ch = 0; ch < c; ch++)
             {
@@ -2435,7 +2481,7 @@ internal sealed class CeltDecoder
                 }
 
                 float difference = Math.Max(0, _oldBandE[(ch * BandCount) + i] - Math.Min(prev1, prev2));
-                float r = 2f * (float)Math.Exp(0.6931471805599453094 * -difference);
+                float r = 2f * (TK.Relaxed ? RelaxedMath.Exp2(-difference) : (float)Math.Exp(0.6931471805599453094 * -difference));
                 if (lm == 3)
                 {
                     r *= 1.41421356f;

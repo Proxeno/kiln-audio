@@ -36,12 +36,13 @@ internal sealed class CeltOutput
     /// <inheritdoc cref="CeltOutput"/>
     /// <param name="apiRate">API sample rate: 8000, 12000, 16000, 24000 or 48000 Hz.</param>
     /// <param name="apiChannels">API channel count: 1 or 2.</param>
-    internal CeltOutput(int apiRate, int apiChannels)
+    /// <param name="mode">The decoder performance mode.</param>
+    internal CeltOutput(int apiRate, int apiChannels, OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
         _apiChannels = apiChannels;
         _downsample = 48000 / apiRate;
-        _decoder = new CeltDecoder(apiChannels);
-        _synthesizer = new CeltSynthesizer(apiChannels, downsample: _downsample);
+        _decoder = new CeltDecoder(apiChannels, mode);
+        _synthesizer = new CeltSynthesizer(apiChannels, _downsample, mode);
         _pcm48 = new float[MaxCeltSamples48 * apiChannels];
 
         float[] window = CeltWindow.Create(CeltWindow.DefaultOverlap);
