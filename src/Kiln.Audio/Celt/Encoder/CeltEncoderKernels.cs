@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Celt.Encoder;
@@ -63,6 +64,19 @@ internal static class CeltEncoderKernels
         {
             ref float state = ref memory[0];
             EncKernels.PreEmphasis(pcm, destination, ref state, out silent);
+            return;
+        }
+
+        if (channels == 2 && upsample == 1 && Sse.IsSupported && SimdConfig.UseSimd && pcm.Length >= 16
+            && pcm.Length == 2 * frameSamples)
+        {
+            EncKernels.PreEmphasisStereo(
+                pcm,
+                destination.Slice(offset, frameSamples),
+                destination.Slice(stride + offset, frameSamples),
+                ref memory[0],
+                ref memory[1],
+                out silent);
             return;
         }
 

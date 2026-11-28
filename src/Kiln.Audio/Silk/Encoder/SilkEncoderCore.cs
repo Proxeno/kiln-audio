@@ -359,18 +359,26 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         int a0U = -a0 >> 14;
         int a1L = -a1 & 0x3FFF;
         int a1U = -a1 >> 14;
+        // The filter memory lives in locals for the loop: it is a serial chain, and a field round-trip per sample
+        // would add store-to-load forwarding latency to it.
+        int mem0 = _hpMem0;
+        int mem1 = _hpMem1;
+        short[] output = _hpBuffer;
         for (int k = 0; k < pcm.Length; k++)
         {
             int input = pcm[k];
-            int out32Q14 = SilkFixedPoint.Smlawb(_hpMem0, b0, input) << 2;
-            _hpMem0 = _hpMem1 + SilkEncoderMath.RshiftRound(SilkFixedPoint.Smulwb(out32Q14, a0L), 14);
-            _hpMem0 = SilkFixedPoint.Smlawb(_hpMem0, out32Q14, a0U);
-            _hpMem0 = SilkFixedPoint.Smlawb(_hpMem0, b1, input);
-            _hpMem1 = SilkEncoderMath.RshiftRound(SilkFixedPoint.Smulwb(out32Q14, a1L), 14);
-            _hpMem1 = SilkFixedPoint.Smlawb(_hpMem1, out32Q14, a1U);
-            _hpMem1 = SilkFixedPoint.Smlawb(_hpMem1, b2, input);
-            _hpBuffer[k] = (short)SilkEncoderMath.Sat16((out32Q14 + (1 << 14) - 1) >> 14);
+            int out32Q14 = SilkFixedPoint.Smlawb(mem0, b0, input) << 2;
+            mem0 = mem1 + SilkEncoderMath.RshiftRound(SilkFixedPoint.Smulwb(out32Q14, a0L), 14);
+            mem0 = SilkFixedPoint.Smlawb(mem0, out32Q14, a0U);
+            mem0 = SilkFixedPoint.Smlawb(mem0, b1, input);
+            mem1 = SilkEncoderMath.RshiftRound(SilkFixedPoint.Smulwb(out32Q14, a1L), 14);
+            mem1 = SilkFixedPoint.Smlawb(mem1, out32Q14, a1U);
+            mem1 = SilkFixedPoint.Smlawb(mem1, b2, input);
+            output[k] = (short)SilkEncoderMath.Sat16((out32Q14 + (1 << 14) - 1) >> 14);
         }
+
+        _hpMem0 = mem0;
+        _hpMem1 = mem1;
     }
 
     /// <summary>Adapts the high-pass cutoff to the pitch statistics (<c>silk_HP_variable_cutoff</c>).</summary>
