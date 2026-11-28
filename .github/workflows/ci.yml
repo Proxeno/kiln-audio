@@ -15,18 +15,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Self-hosted Proxeno org runners (owner, 2026-11-26: the GitHub-hosted Actions budget is exhausted).
-        # SIMD paths differ per arch: macOS is arm64 (NEON/AdvSimd), Linux/Windows are x64 (AVX2/SSSE3).
-        # Linux uses the `docker` label to stay off the weft-vast-ci boxes (weft rule: not for builds).
+        # GitHub-hosted runners (owner, 2026-11-28): the repo is public, so hosted minutes are free, and
+        # self-hosted runners must not serve a public repo (the org runner group disallows public repos).
+        # SIMD paths differ per arch: macos-latest is arm64 (AdvSimd), Linux/Windows are x64 (AVX2+FMA).
         include:
           - os: linux
-            runs_on: [self-hosted, Linux, X64, docker]
+            runs_on: ubuntu-latest
             require_oracle: '1'
           - os: windows
-            runs_on: [self-hosted, Windows, X64]
+            runs_on: windows-latest
             require_oracle: '0'
           - os: macos
-            runs_on: [self-hosted, macOS, ARM64]
+            runs_on: macos-latest
             require_oracle: '1'
     name: build-test (${{ matrix.os }})
     runs-on: ${{ matrix.runs_on }}
@@ -39,7 +39,6 @@ jobs:
         with:
           dotnet-version: 10.0.x
         env:
-          # Self-hosted fleet: the default global install prefix is not writable ("mkdir: Permission denied").
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
       - name: Prefer Git for Windows bash
         # system32 bash.exe is WSL, which refuses to run as the runner's LocalSystem account.

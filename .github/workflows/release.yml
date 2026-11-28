@@ -17,8 +17,9 @@ permissions:
 
 jobs:
   pack-publish:
-    # Self-hosted Proxeno org runner (owner, 2026-11-27: no GitHub-hosted minutes).
-    runs-on: [self-hosted, Linux, X64, docker]
+    # GitHub-hosted (owner, 2026-11-28): public repo, so hosted minutes are free and self-hosted
+    # runners must not serve it.
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
