@@ -1715,6 +1715,66 @@ shaping and delayed-decision path where libopus runs its plain greedy quantizer.
 bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
 are what is left for cx0 and hybrid.
 
+### PERF-X64: x64 gap work (encode)
+
+Measured on the same class of box as the x64 section above (AMD Ryzen 7 7700X, rented VM; the
+instance differs, the baseline re-measured on it matches the earlier run to within 1 %). Base is
+`origin/train-next` at PR #57; both sides were re-benchmarked on the box after the changes. Ratio is
+Kiln / libopus, lower is better, target 1.05. Every change is bit-exact: the encoder byte hashes of
+all eight configurations are unchanged, and the targeted test run (670 tests, oracle required)
+passes. Decode was not touched (the 09 and 10 rows are unchanged within noise).
+
+| Encode, 48 kHz | c0 before | c0 after | c5 before | c5 after |
+| -------------- | --------- | -------- | --------- | -------- |
+| CELT stereo 64k | 1.57 | 0.97 | 1.14 | 0.86 |
+| CELT mono 32k | 1.56 | 0.99 | 1.15 | 0.94 |
+| SILK WB 20k | 2.26 | 2.04 | 0.86 | 0.75 |
+| Hybrid FB 32k | 3.36 | 3.05 | 1.73 | 1.54 |
+
+Absolute us per 20 ms frame (Kiln before to after): CELT stereo c0 30.3 to 18.8, c5 48.3 to 36.4;
+CELT mono c0 15.6 to 9.9, c5 31.4 to 25.5; SILK c0 122.7 to 111.0, c5 143.9 to 126.3; hybrid c0
+120.2 to 109.1, c5 145.0 to 129.1.
+
+What was kept (all x64-only in effect):
+
+- **PVQ search** (`EncPvqKernel`). Measured with a replay of 147,672 real `alg_quant` calls, the
+  search cost 11.7 us per stereo frame; most of it was not the pulse loop. The per-band sign split
+  and the final sign restore were branchy scalar loops over random signs (about 110 ns per call of
+  mispredictions) and are now branch-free vector selects. The pulse loop computes every candidate's
+  ratio `num/den` in one pass and accepts the arg-max only when exactly one candidate is within
+  2^-18 of the maximum; any tie or near-tie re-runs the exact scalar-order cross-multiply walk for
+  that pulse, so the selected pulse, and therefore the bytes, are identical (the replay compares
+  every call against `PvqSearchScalar`: 0 mismatches; 1248 fallbacks in 16,031 frames). For
+  `n` of 4 to 16 the ratios stay in registers. Result: 11.7 to 5.4 us per stereo frame.
+- **Stereo pre-emphasis** (`EncKernels.PreEmphasisStereo`): the interleaved 48 kHz stereo path was
+  the scalar loop (2 us per frame); it is now four frames per pass with the same multiply and add.
+- **SILK NSQ without warping** (`SilkNsqVec`): when the warping coefficient is zero (the high-rate
+  case, which includes the 20 kbps WB and the hybrid configurations) every `Smlawb` of the warped
+  chain multiplies by zero, so the all-pass cascade is a one-position shift register and the eight
+  taps are independent multiply-accumulates instead of a serial chain. About 10 % of the SILK frame.
+- **SILK input high-pass**: the biquad memory was read and written through class fields each sample
+  on a serial chain; it is now held in locals for the block.
+
+What was tried and rejected:
+
+- A scalar single-state kernel for the delayed-decision quantizer when one state is live (complexity
+  0 to 3 at high rate), using lane 0 of the same history arrays. Bit-exact (hashes identical) but no
+  faster than the lane-parallel kernel (122 vs 123 us), so it was dropped.
+- Branch-free selection of the two quantizer levels in that scalar kernel: no change, so the
+  quantizer is not branch-misprediction bound.
+- Storing the PVQ `y` update as a vector read-modify-write to keep store forwarding: no change.
+
+What is left and why. SILK and hybrid at complexity 0 are still 2.0x and 3.0x. In a profile of the
+SILK WB 20k frame (111 us) the delayed-decision NSQ is about 55 us over five rate-loop iterations
+(roughly 36 ns, or 190 cycles, per sample, a serial chain through the quantization decision), the
+entropy coder 13 us (it re-encodes indices and pulses in every iteration), NLSF processing 9 us,
+pitch analysis 9 us, the input resampler 5.5 us, the high-pass 4 us and Burg 4.6 us. libopus does the
+same rate loop with a greedy, unwarped quantizer at c0 (its whole frame is 54 us), so the remaining
+gap is mostly the quality-bearing delayed-decision work that the frozen quality floors require. A
+compiler-level look (`DOTNET_JitDisasm`) shows the NSQ loop spilling most of its locals; splitting
+the per-sample work into smaller methods or restructuring the loop-carried state is the next thing
+to try. Hybrid c5 (1.54) and the NLSF, entropy and pitch stages are the other open items.
+
 ### ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
 
 Goal: CELT encode at or below 1.0x libopus. Same machine and harness as SIMD-3 (`micro enc run`, the libopus in-process
