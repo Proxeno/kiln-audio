@@ -16,6 +16,19 @@ internal interface ICeltKernels
     /// <summary>Gets the tier this kernel set implements.</summary>
     static abstract AudioKernelTier Tier { get; }
 
+    /// <summary>
+    /// Gets a value indicating whether this kernel set is a Relaxed-profile wrapper, so callers can
+    /// take a non-bit-exact shortcut. A constant per instantiation: the JIT folds the branch.
+    /// </summary>
+    static virtual bool Relaxed => false;
+
+    /// <summary>
+    /// Returns <c>1 / sqrt(x)</c> for positive <paramref name="x"/>, accurate to about 2 ulp: the
+    /// hardware reciprocal-square-root estimate refined by one Newton-Raphson step. Used only by
+    /// Relaxed profiles; the default is the exact expression.
+    /// </summary>
+    static virtual float FastRsqrt(float x) => 1f / MathF.Sqrt(x);
+
     // ---- PVQ and band leaf kernels ----
 
     /// <summary><c>destination[i] = source[i] * gain</c>.</summary>

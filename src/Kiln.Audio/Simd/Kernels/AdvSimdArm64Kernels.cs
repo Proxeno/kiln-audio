@@ -12,6 +12,17 @@ internal readonly partial struct AdvSimdArm64Kernels : ICeltKernels, ISilkEncode
 
     public static AudioKernelTier Tier => AudioKernelTier.AdvSimdArm64;
 
+    /// <summary>Hardware reciprocal square root estimate refined by two Newton-Raphson steps (about 23 bits).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float FastRsqrt(float x)
+    {
+        var v = System.Runtime.Intrinsics.Vector64.CreateScalarUnsafe(x);
+        var y = System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.ReciprocalSquareRootEstimateScalar(v);
+        y = System.Runtime.Intrinsics.Arm.AdvSimd.Multiply(y, System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.ReciprocalSquareRootStepScalar(System.Runtime.Intrinsics.Arm.AdvSimd.Multiply(v, y), y));
+        y = System.Runtime.Intrinsics.Arm.AdvSimd.Multiply(y, System.Runtime.Intrinsics.Arm.AdvSimd.Arm64.ReciprocalSquareRootStepScalar(System.Runtime.Intrinsics.Arm.AdvSimd.Multiply(v, y), y));
+        return System.Runtime.Intrinsics.Vector64.ToScalar(y);
+    }
+
     [MethodImpl(Inline)]
     public static void ScaleCopy(Span<float> destination, ReadOnlySpan<float> source, float gain) =>
         DecKernels.ScaleCopy(destination, source, gain, useVector: true);

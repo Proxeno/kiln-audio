@@ -228,23 +228,60 @@ internal static class SilkNsqVec<TOps>
             Vector128<int> lpcPred = Vector128.ShiftLeft(lpcAcc, 4);
 
             // Warped noise shaping filter, the serial chain run on all states at once.
-            Vector128<int> a0 = Ld(ar2, 0);
-            Vector128<int> t2 = TOps.Smlawb(Ld(lpc, lpcBase), a0, warpP);
-            Vector128<int> t1 = TOps.Smlawb(a0, Ld(ar2, 1) - t2, warpP);
-            St(ar2, 0, t2);
-            Vector128<int> noiseAr = TOps.Smlawb(shapeInit, t2, shapeP[0]);
-            for (int j = 2; j < shapeOrder; j += 2)
+            Vector128<int> noiseAr;
+            if ((short)a.WarpingQ16 == 0)
             {
-                t2 = TOps.Smlawb(Ld(ar2, j - 1), Ld(ar2, j) - t1, warpP);
-                St(ar2, j - 1, t1);
-                noiseAr = TOps.Smlawb(noiseAr, t1, shapeP[j - 1]);
-                t1 = TOps.Smlawb(Ld(ar2, j), Ld(ar2, j + 1) - t2, warpP);
-                St(ar2, j, t2);
-                noiseAr = TOps.Smlawb(noiseAr, t2, shapeP[j]);
+                // Without warping every Smlawb of the chain multiplies by zero, so the all-pass cascade degenerates
+                // to a one-position shift register and the taps become independent multiply-accumulates.
+                Vector128<int> x0 = Ld(lpc, lpcBase);
+                Vector128<int> shift0 = Ld(ar2, 0);
+                noiseAr = TOps.Smlawb(shapeInit, x0, shapeP[0]);
+                Vector128<int> acc1 = Vector128<int>.Zero;
+                Vector128<int> carry = x0;
+                int j = 1;
+                for (; j + 1 < shapeOrder; j += 2)
+                {
+                    Vector128<int> v0 = Ld(ar2, j - 1);
+                    Vector128<int> v1 = Ld(ar2, j);
+                    noiseAr = TOps.Smlawb(noiseAr, v0, shapeP[j]);
+                    acc1 = TOps.Smlawb(acc1, v1, shapeP[j + 1]);
+                    St(ar2, j - 1, carry);
+                    St(ar2, j, v0);
+                    carry = v1;
+                }
+
+                for (; j < shapeOrder; j++)
+                {
+                    Vector128<int> v0 = Ld(ar2, j - 1);
+                    noiseAr = TOps.Smlawb(noiseAr, v0, shapeP[j]);
+                    St(ar2, j - 1, carry);
+                    carry = v0;
+                }
+
+                St(ar2, shapeOrder - 1, carry);
+                noiseAr += acc1;
+            }
+            else
+            {
+                Vector128<int> a0 = Ld(ar2, 0);
+                Vector128<int> t2 = TOps.Smlawb(Ld(lpc, lpcBase), a0, warpP);
+                Vector128<int> t1 = TOps.Smlawb(a0, Ld(ar2, 1) - t2, warpP);
+                St(ar2, 0, t2);
+                noiseAr = TOps.Smlawb(shapeInit, t2, shapeP[0]);
+                for (int j = 2; j < shapeOrder; j += 2)
+                {
+                    t2 = TOps.Smlawb(Ld(ar2, j - 1), Ld(ar2, j) - t1, warpP);
+                    St(ar2, j - 1, t1);
+                    noiseAr = TOps.Smlawb(noiseAr, t1, shapeP[j - 1]);
+                    t1 = TOps.Smlawb(Ld(ar2, j), Ld(ar2, j + 1) - t2, warpP);
+                    St(ar2, j, t2);
+                    noiseAr = TOps.Smlawb(noiseAr, t2, shapeP[j]);
+                }
+
+                St(ar2, shapeOrder - 1, t1);
+                noiseAr = TOps.Smlawb(noiseAr, t1, shapeP[shapeOrder - 1]);
             }
 
-            St(ar2, shapeOrder - 1, t1);
-            noiseAr = TOps.Smlawb(noiseAr, t1, shapeP[shapeOrder - 1]);
             noiseAr = Vector128.ShiftLeft(noiseAr, 1);
             noiseAr = TOps.Smlawb(noiseAr, lfAr, tiltP);
             noiseAr = Vector128.ShiftLeft(noiseAr, 2);
