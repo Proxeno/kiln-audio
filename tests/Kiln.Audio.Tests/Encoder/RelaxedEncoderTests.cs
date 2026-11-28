@@ -40,7 +40,7 @@ public class RelaxedEncoderTests
 
     [Theory]
     [MemberData(nameof(Configs))]
-    public void Relaxed_packets_decode_in_libopus_with_matching_final_range(
+    public void Packets_decode_in_libopus_with_matching_final_range_in_both_modes(
         string name, OpusApplication app, int channels, int bitrate, OpusBandwidth? bandwidth, int complexity, double floor)
     {
         _ = floor;
@@ -49,9 +49,57 @@ public class RelaxedEncoderTests
             return;
         }
 
-        // Precise is not exercised with UseCbr here: its Kiln 1.0 rate-loop restore corrupts SILK/hybrid CBR
-        // frames that need the restore (kept byte-identical on purpose; see the Relaxed restore fix).
+        // UseCbr with VBR off forces the SILK rate-loop restore path in both modes (CBR-FIX).
+        AssertInterop(name, app, channels, bitrate, bandwidth, complexity, OpusPerformanceMode.Precise);
         AssertInterop(name, app, channels, bitrate, bandwidth, complexity, OpusPerformanceMode.Relaxed);
+    }
+
+    [Theory]
+    [InlineData(OpusApplication.Voip, 12000, OpusBandwidth.Wideband)]
+    [InlineData(OpusApplication.Voip, 16000, OpusBandwidth.Wideband)]
+    [InlineData(OpusApplication.Voip, 24000, OpusBandwidth.Wideband)]
+    [InlineData(OpusApplication.Voip, 8000, OpusBandwidth.Narrowband)]
+    [InlineData(OpusApplication.Audio, 24000, OpusBandwidth.Fullband)]
+    [InlineData(OpusApplication.Audio, 32000, OpusBandwidth.Fullband)]
+    [InlineData(OpusApplication.Audio, 40000, OpusBandwidth.SuperWideband)]
+    public void Silk_and_hybrid_cbr_restore_path_decodes_across_bitrates_and_complexities(
+        OpusApplication app, int bitrate, OpusBandwidth bandwidth)
+    {
+        if (!OracleTestSupport.OracleAvailable() || !TestVectors.Available)
+        {
+            return;
+        }
+
+        foreach (OpusPerformanceMode mode in new[] { OpusPerformanceMode.Precise, OpusPerformanceMode.Relaxed })
+        {
+            foreach (int complexity in new[] { 0, 2, 5, 8, 10 })
+            {
+                AssertInterop($"{app}-{bitrate}", app, 1, bitrate, bandwidth, complexity, mode);
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Configs))]
+    public void Every_cbr_packet_is_within_the_nominal_size_in_both_modes(
+        string name, OpusApplication app, int channels, int bitrate, OpusBandwidth? bandwidth, int complexity, double floor)
+    {
+        _ = floor;
+        if (!TestVectors.Available)
+        {
+            return;
+        }
+
+        short[] pcm = Input(channels);
+
+        // SILK and hybrid packets (TOC included) fit the nominal size. A CELT-only CBR packet carries a payload of
+        // the nominal size plus its TOC byte (unchanged since Kiln 1.0), so it is allowed that one byte.
+        int nominal = (bitrate * 20 / 8000) + (app == OpusApplication.RestrictedLowDelay ? 1 : 0);
+        foreach (OpusPerformanceMode mode in new[] { OpusPerformanceMode.Precise, OpusPerformanceMode.Relaxed })
+        {
+            WorstPacket(pcm, channels, app, bitrate, bandwidth, complexity, mode)
+                .Should().BeLessThanOrEqualTo(nominal, $"{name} cx{complexity} {mode}: CBR packet (TOC included) over the nominal size");
+        }
     }
 
     private static void AssertInterop(
@@ -81,28 +129,6 @@ public class RelaxedEncoderTests
 
         EncoderOracle.HasRangeMismatch(diagnostics).Should().BeFalse($"{name} cx{complexity} {mode}: {diagnostics}");
         decoded.Length.Should().Be(packets.Count * frameLength, name);
-    }
-
-    [Theory]
-    [MemberData(nameof(Configs))]
-    public void Relaxed_cbr_packets_never_exceed_the_budget_precise_keeps(
-        string name, OpusApplication app, int channels, int bitrate, OpusBandwidth? bandwidth, int complexity, double floor)
-    {
-        _ = floor;
-        if (!TestVectors.Available)
-        {
-            return;
-        }
-
-        short[] pcm = Input(channels);
-        int precise = WorstPacket(pcm, channels, app, bitrate, bandwidth, complexity, OpusPerformanceMode.Precise);
-        int relaxed = WorstPacket(pcm, channels, app, bitrate, bandwidth, complexity, OpusPerformanceMode.Relaxed);
-        relaxed.Should().BeLessThanOrEqualTo(precise, $"{name} cx{complexity}: Relaxed must not outgrow Precise's CBR packets");
-        if (app == OpusApplication.Voip)
-        {
-            // SILK-only CBR: the packet (TOC included) must fit the nominal frame budget exactly.
-            relaxed.Should().BeLessThanOrEqualTo(bitrate * 20 / 8000, $"{name} cx{complexity}: SILK CBR budget");
-        }
     }
 
     private static int WorstPacket(

@@ -3,7 +3,8 @@ namespace Kiln.Audio;
 /// <summary>Selects between exactness/quality and speed for an encoder or decoder instance.</summary>
 public enum OpusPerformanceMode
 {
-    /// <summary>The default. Encoder: quality-first tuning (Kiln 1.0 output, byte for byte).
+    /// <summary>The default. Encoder: quality-first tuning (Kiln 1.0 output, except CBR packets,
+    /// whose low-rate fill and nominal sizing were corrected in 1.1.0).
     /// Decoder: output bit-identical to Kiln 1.0.</summary>
     Precise = 0,
 
