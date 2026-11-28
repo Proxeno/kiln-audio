@@ -37,7 +37,7 @@ fi
 
 # The harness itself is -O2; the measured code is inside the prebuilt static
 # libopus, which the oracle build compiled with -O3 -DNDEBUG.
-"${CC:-cc}" -O2 -std=c99 -Wall -Wextra \
+"${CC:-cc}" -O2 -std=gnu99 -Wall -Wextra \
     -I"${lib_dir}/include" \
     -o "${bench_bin}" "${bench_source}" "${lib_dir}/libopus.a" -lm
 

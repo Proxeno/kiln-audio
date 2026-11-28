@@ -2,6 +2,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Numerics;
 using System.Runtime.Intrinsics;
 
 namespace Kiln.Audio.Simd;
@@ -24,6 +25,7 @@ namespace Kiln.Audio.Simd;
 /// </remarks>
 internal static class EncPvqKernel
 {
+
     private const float VeryLarge = 1e15f;
 
     /// <summary>Vector greedy PVQ search; see <c>CeltEncoderKernels.PvqSearch</c> for the contract.</summary>
@@ -34,21 +36,37 @@ internal static class EncPvqKernel
         ref float signsr = ref MemoryMarshal.GetReference(signs);
         ref float yr = ref MemoryMarshal.GetReference(y);
 
-        for (int j = 0; j < n; j++)
+        int jj = 0;
+        if (Vector128.IsHardwareAccelerated)
         {
-            float value = Unsafe.Add(ref xr, j);
+            Vector128<float> one = Vector128.Create(1f);
+            Vector128<float> minusOne = Vector128.Create(-1f);
+            for (; jj + 4 <= n; jj += 4)
+            {
+                Vector128<float> v = Vector128.LoadUnsafe(ref xr, (nuint)jj);
+                Vector128<float> positive = Vector128.GreaterThan(v, Vector128<float>.Zero);
+                Vector128.ConditionalSelect(positive, one, minusOne).StoreUnsafe(ref signsr, (nuint)jj);
+                Vector128.ConditionalSelect(positive, v, -v).StoreUnsafe(ref xr, (nuint)jj);
+                Vector128<int>.Zero.StoreUnsafe(ref iyr, (nuint)jj);
+                Vector128<float>.Zero.StoreUnsafe(ref yr, (nuint)jj);
+            }
+        }
+
+        for (; jj < n; jj++)
+        {
+            float value = Unsafe.Add(ref xr, jj);
             if (value > 0f)
             {
-                Unsafe.Add(ref signsr, j) = 1f;
+                Unsafe.Add(ref signsr, jj) = 1f;
             }
             else
             {
-                Unsafe.Add(ref signsr, j) = -1f;
-                Unsafe.Add(ref xr, j) = -value;
+                Unsafe.Add(ref signsr, jj) = -1f;
+                Unsafe.Add(ref xr, jj) = -value;
             }
 
-            Unsafe.Add(ref iyr, j) = 0;
-            Unsafe.Add(ref yr, j) = 0f;
+            Unsafe.Add(ref iyr, jj) = 0;
+            Unsafe.Add(ref yr, jj) = 0f;
         }
 
         float xy = 0f;
@@ -97,7 +115,15 @@ internal static class EncPvqKernel
             pulsesLeft = 0;
         }
 
-        if (Vector128.IsHardwareAccelerated && n >= 4)
+        if (Vector128.IsHardwareAccelerated && n >= 4 && n <= 16 && (n & 3) == 0)
+        {
+            SearchRatioSmall(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
+        }
+        else if (Vector128.IsHardwareAccelerated && n >= 4 && n <= MaxRatioN)
+        {
+            SearchRatio(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
+        }
+        else if (Vector128.IsHardwareAccelerated && n >= 4)
         {
             SearchVector(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
         }
@@ -106,18 +132,217 @@ internal static class EncPvqKernel
             SearchScalar(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
         }
 
-        for (int j = 0; j < n; j++)
+        int jf = 0;
+        if (Vector128.IsHardwareAccelerated)
         {
-            float xValue = Unsafe.Add(ref xr, j);
-            float sign = Unsafe.Add(ref signsr, j);
-            Unsafe.Add(ref xr, j) = xValue * sign;
+            for (; jf + 4 <= n; jf += 4)
+            {
+                Vector128<float> sign = Vector128.LoadUnsafe(ref signsr, (nuint)jf);
+                (Vector128.LoadUnsafe(ref xr, (nuint)jf) * sign).StoreUnsafe(ref xr, (nuint)jf);
+                Vector128<int> negative = Vector128.AsInt32(Vector128.LessThan(sign, Vector128<float>.Zero));
+                Vector128<int> value = Vector128.LoadUnsafe(ref iyr, (nuint)jf);
+                ((value ^ negative) - negative).StoreUnsafe(ref iyr, (nuint)jf);
+            }
+        }
+
+        for (; jf < n; jf++)
+        {
+            float xValue = Unsafe.Add(ref xr, jf);
+            float sign = Unsafe.Add(ref signsr, jf);
+            Unsafe.Add(ref xr, jf) = xValue * sign;
             if (sign < 0f)
             {
-                Unsafe.Add(ref iyr, j) = -Unsafe.Add(ref iyr, j);
+                Unsafe.Add(ref iyr, jf) = -Unsafe.Add(ref iyr, jf);
             }
         }
 
         return yy;
+    }
+
+    private const int MaxRatioN = 256;
+
+    /// <summary>
+    /// <see cref="SearchRatio"/> for <c>n</c> of 4, 8, 12 or 16: the ratios stay in registers and the horizontal
+    /// maximum is a pair of shuffles, which shortens the dependency chain between pulses.
+    /// </summary>
+    private static void SearchRatioSmall(
+        ref float xr, ref int iyr, ref float yr, int n, int pulsesLeft, ref float xy, ref float yy)
+    {
+        Vector128<float> sentinel = Vector128.Create(-1f);
+        Vector128<float> eps = Vector128.Create(1f - (1f / 262144f));
+        Vector128<float> x0 = Vector128.LoadUnsafe(ref xr, 0);
+        Vector128<float> x1 = n > 4 ? Vector128.LoadUnsafe(ref xr, 4) : sentinel;
+        Vector128<float> x2 = n > 8 ? Vector128.LoadUnsafe(ref xr, 8) : sentinel;
+        Vector128<float> x3 = n > 12 ? Vector128.LoadUnsafe(ref xr, 12) : sentinel;
+        bool two = n > 4;
+        bool three = n > 8;
+        bool four = n > 12;
+        for (int i = 0; i < pulsesLeft; i++)
+        {
+            yy += 1f;
+            Vector128<float> xyv = Vector128.Create(xy);
+            Vector128<float> yyv = Vector128.Create(yy);
+            Vector128<float> t0 = xyv + x0;
+            Vector128<float> r0 = (t0 * t0) / (yyv + Vector128.LoadUnsafe(ref yr, 0));
+            Vector128<float> r1 = sentinel;
+            Vector128<float> r2 = sentinel;
+            Vector128<float> r3 = sentinel;
+            Vector128<float> vmax = r0;
+            if (two)
+            {
+                Vector128<float> t1 = xyv + x1;
+                r1 = (t1 * t1) / (yyv + Vector128.LoadUnsafe(ref yr, 4));
+                vmax = Vector128.Max(vmax, r1);
+                if (three)
+                {
+                    Vector128<float> t2 = xyv + x2;
+                    r2 = (t2 * t2) / (yyv + Vector128.LoadUnsafe(ref yr, 8));
+                    vmax = Vector128.Max(vmax, r2);
+                    if (four)
+                    {
+                        Vector128<float> t3 = xyv + x3;
+                        r3 = (t3 * t3) / (yyv + Vector128.LoadUnsafe(ref yr, 12));
+                        vmax = Vector128.Max(vmax, r3);
+                    }
+                }
+            }
+
+            vmax = Vector128.Max(vmax, Vector128.Shuffle(vmax, Vector128.Create(2, 3, 0, 1)));
+            vmax = Vector128.Max(vmax, Vector128.Shuffle(vmax, Vector128.Create(1, 0, 3, 2)));
+            Vector128<float> threshold = vmax * eps;
+            uint mask = Vector128.GreaterThanOrEqual(r0, threshold).ExtractMostSignificantBits()
+                | (Vector128.GreaterThanOrEqual(r1, threshold).ExtractMostSignificantBits() << 4)
+                | (Vector128.GreaterThanOrEqual(r2, threshold).ExtractMostSignificantBits() << 8)
+                | (Vector128.GreaterThanOrEqual(r3, threshold).ExtractMostSignificantBits() << 12);
+            int bestId;
+            if (mask != 0 && (mask & (mask - 1)) == 0 && vmax.ToScalar() > 0f && vmax.ToScalar() < 1e30f)
+            {
+                bestId = BitOperations.TrailingZeroCount(mask);
+            }
+            else
+            {
+                bestId = 0;
+                float bestNum = -VeryLarge;
+                float bestDen = 0f;
+                for (int j = 0; j < n; j++)
+                {
+                    float num = xy + Unsafe.Add(ref xr, j);
+                    num *= num;
+                    float den = yy + Unsafe.Add(ref yr, j);
+                    if (bestDen * num > den * bestNum)
+                    {
+                        bestDen = den;
+                        bestNum = num;
+                        bestId = j;
+                    }
+                }
+            }
+
+            xy += Unsafe.Add(ref xr, bestId);
+            yy += Unsafe.Add(ref yr, bestId);
+
+            Unsafe.Add(ref yr, bestId) += 2f;
+            Unsafe.Add(ref iyr, bestId)++;
+        }
+    }
+
+    /// <summary>
+    /// Vector search: one branch-free pass computes every candidate's ratio <c>num/den</c>; when exactly one
+    /// candidate lies within 2^-18 (relative) of the maximum ratio it is the scalar loop's winner (every
+    /// other candidate loses to it by far more than the rounding of the scalar loop's two cross products,
+    /// and it beats any running best before it). Any other case (ties, near-ties, NaN) re-runs the exact
+    /// scalar-order walk for that pulse, so the result is bit-identical to the scalar reference.
+    /// </summary>
+    [SkipLocalsInit]
+    private static void SearchRatio(
+        ref float xr, ref int iyr, ref float yr, int n, int pulsesLeft, ref float xy, ref float yy)
+    {
+        Span<float> ratio = stackalloc float[MaxRatioN];
+        ref float rr = ref MemoryMarshal.GetReference(ratio);
+        int groupEnd = n & ~3;
+        for (int i = 0; i < pulsesLeft; i++)
+        {
+            yy += 1f;
+            Vector128<float> xyv = Vector128.Create(xy);
+            Vector128<float> yyv = Vector128.Create(yy);
+            Vector128<float> vmax = Vector128.Create(-1f);
+            int j = 0;
+            for (; j < groupEnd; j += 4)
+            {
+                Vector128<float> rxy = xyv + Vector128.LoadUnsafe(ref xr, (nuint)j);
+                rxy *= rxy;
+                Vector128<float> r = rxy / (yyv + Vector128.LoadUnsafe(ref yr, (nuint)j));
+                r.StoreUnsafe(ref rr, (nuint)j);
+                vmax = Vector128.Max(vmax, r);
+            }
+
+            float m = Math.Max(Math.Max(vmax.GetElement(0), vmax.GetElement(1)), Math.Max(vmax.GetElement(2), vmax.GetElement(3)));
+            for (; j < n; j++)
+            {
+                float num = xy + Unsafe.Add(ref xr, j);
+                num *= num;
+                float r = num / (yy + Unsafe.Add(ref yr, j));
+                Unsafe.Add(ref rr, j) = r;
+                m = Math.Max(m, r);
+            }
+
+            int bestId = -1;
+            if (m > 0f && m < 1e30f)
+            {
+                float threshold = m * (1f - (1f / 262144f));
+                Vector128<float> tv = Vector128.Create(threshold);
+                int count = 0;
+                int found = 0;
+                j = 0;
+                for (; j < groupEnd; j += 4)
+                {
+                    uint mask = Vector128.GreaterThanOrEqual(Vector128.LoadUnsafe(ref rr, (nuint)j), tv).ExtractMostSignificantBits();
+                    if (mask != 0)
+                    {
+                        count += BitOperations.PopCount(mask);
+                        found = j + BitOperations.TrailingZeroCount(mask);
+                    }
+                }
+
+                for (; j < n; j++)
+                {
+                    if (Unsafe.Add(ref rr, j) >= threshold)
+                    {
+                        count++;
+                        found = j;
+                    }
+                }
+
+                if (count == 1)
+                {
+                    bestId = found;
+                }
+            }
+
+            if (bestId < 0)
+            {
+                bestId = 0;
+                float bestNum = -VeryLarge;
+                float bestDen = 0f;
+                for (j = 0; j < n; j++)
+                {
+                    float num = xy + Unsafe.Add(ref xr, j);
+                    num *= num;
+                    float den = yy + Unsafe.Add(ref yr, j);
+                    if (bestDen * num > den * bestNum)
+                    {
+                        bestDen = den;
+                        bestNum = num;
+                        bestId = j;
+                    }
+                }
+            }
+
+            xy += Unsafe.Add(ref xr, bestId);
+            yy += Unsafe.Add(ref yr, bestId);
+            Unsafe.Add(ref yr, bestId) += 2f;
+            Unsafe.Add(ref iyr, bestId)++;
+        }
     }
 
     private static void SearchVector(

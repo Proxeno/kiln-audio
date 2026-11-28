@@ -42,6 +42,10 @@ internal static class OpusHybridEncoder
     /// <param name="endBand">One past the last coded band: 19 for super-wideband, 21 for fullband.</param>
     /// <param name="redundancy">Whether the transition wants a redundant frame.</param>
     /// <param name="celtToSilk">Whether the transition is CELT to SILK.</param>
+    /// <param name="constantBitrate">
+    /// Whether the packet must not outgrow the nominal size: the frame is then bounded by its CBR size, so a
+    /// redundant frame that would have to be appended past it is not sent.
+    /// </param>
     /// <param name="frameData">Destination for the payload.</param>
     /// <param name="finalRange">Receives the decoder's expected final range.</param>
     /// <returns>The number of payload bytes written.</returns>
@@ -57,6 +61,7 @@ internal static class OpusHybridEncoder
         int endBand,
         bool redundancy,
         bool celtToSilk,
+        bool constantBitrate,
         Span<byte> frameData,
         out uint finalRange)
     {
@@ -94,17 +99,26 @@ internal static class OpusHybridEncoder
             silkMaxDataBytes -= silkMaxDataBytes / (1 + Math.Max(1, framesPerFiveMilliseconds));
         }
 
-        silk.Encode(ref enc, pcm, frameSamples, silkMaxDataBytes - 1);
-        int silkBits = enc.Tell();
-        int silkBytes = (silkBits + 7) >> 3;
-        int len = silkBytes + (redundancy ? 3 : 0);
-
         // bytes_target is the equivalent CBR size minus the TOC byte (reference line 817).
         int bytesTarget = Math.Min(maxFrameBytes + 1, (int)((long)bitrateBps * frameSamples / (apiRate * 8))) - 1;
         if (bytesTarget < 0)
         {
             bytesTarget = 0;
         }
+
+        // In CBR the SILK layer sizes its rate loop to the capacity it is handed and writes its flag bits on top,
+        // so it is held one byte under the CBR payload to keep the frame (and the packet) at the nominal size.
+        int silkCapacity = constantBitrate && bytesTarget > 1
+            ? Math.Min(silkMaxDataBytes - 1, bytesTarget - 1)
+            : silkMaxDataBytes - 1;
+        silk.Encode(ref enc, pcm, frameSamples, silkCapacity);
+        int silkBits = enc.Tell();
+        int silkBytes = (silkBits + 7) >> 3;
+
+        // The reference reserves 3 bytes for the redundancy signalling; in CBR the frame is capped at its nominal
+        // size and a redundant frame that would not fit is dropped, so nothing is reserved for it there.
+        bool cbrBounded = constantBitrate && bytesTarget > 0;
+        int len = silkBytes + (redundancy && !cbrBounded ? 3 : 0);
 
         int nbComprBytes;
         if (bytesTarget == 0)
@@ -119,13 +133,30 @@ internal static class OpusHybridEncoder
 
         nbComprBytes = Math.Max(2, Math.Min(maxFrameBytes, nbComprBytes));
 
+        // In CBR the packet, redundant frame included, must not outgrow the nominal size, so the frame is
+        // bounded by its CBR size here and a redundant frame that would not fit inside it is not sent.
+        int budget = cbrBounded ? Math.Min(maxFrameBytes, nbComprBytes) : maxFrameBytes;
+
+        // In CBR the main payload normally fills the whole nominal budget, which leaves the signalling
+        // helper no room for a redundant frame. Offer it the smaller main payload that would make room
+        // when at least the 37 bits the hybrid flag needs still fit after SILK.
+        int signallingBytes = nbComprBytes;
+        if (cbrBounded && redundancy)
+        {
+            int prospectiveBytes = budget - redundantCelt.FrameBytes - 1;
+            if (enc.Tell() + 37 <= 8 * prospectiveBytes)
+            {
+                signallingBytes = prospectiveBytes;
+            }
+        }
+
         bool hasRedundancy = OpusTransitionEncoder.TryEncodeSignalling(
-            ref enc, OpusMode.Hybrid, redundancy, celtToSilk, nbComprBytes, maxFrameBytes, bitrateBps,
+            ref enc, OpusMode.Hybrid, redundancy, celtToSilk, signallingBytes, budget, bitrateBps,
             out int redundancyBytes, redundantCelt.FrameBytes);
         if (hasRedundancy)
         {
-            // The reference shrinks the CELT budget to leave room for the redundant frame.
-            nbComprBytes = Math.Min(maxFrameBytes - redundancyBytes, nbComprBytes);
+            // Keep the reduced main payload that made room for the redundant frame.
+            nbComprBytes = Math.Min(budget - redundancyBytes, signallingBytes);
         }
 
         nbComprBytes = Math.Max(2, Math.Min(maxFrameBytes, nbComprBytes));

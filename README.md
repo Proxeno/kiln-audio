@@ -115,6 +115,7 @@ instances are independent and can run on different threads at the same time.
 | Packet loss concealment | SILK, CELT and hybrid (`DecodeLoss`, or an empty packet) | n/a |
 | Sample rates | 8, 12, 16, 24, 48 kHz output | 8, 12, 16, 24, 48 kHz input |
 | Channels | 1 or 2 (mono/stereo up- and down-mix) | 1 or 2 |
+| Performance modes | `PerformanceMode`: `Precise` (default, bit-identical to 1.0) or `Relaxed` (non-bit-exact float math) | `PerformanceMode`: `Precise` (default; matches 1.0 except CBR packets, whose low-rate fill and nominal sizing were corrected in 1.1.0) or `Relaxed` (cheaper SILK rate loop and quantizer, fewer CELT analysis passes; standard packets, small quality cost) |
 | Packet layouts | Codes 0 to 3, padding, up to 120 ms per packet | One packet per `Encode` call |
 | Sample formats | `short` and `float` | `short` and `float` |
 
@@ -131,6 +132,7 @@ Encoder options, all on `OpusEncoderOptions`:
 | `Bandwidth` | null | Caps the audio bandwidth, or selects the SILK bandwidth on the SILK-only path. |
 | `UseVbr` / `ConstrainedVbr` | false / true | Variable bitrate for the CELT encoder. |
 | `UseCbr` | false | Constant packet size for the SILK layer. |
+| `PerformanceMode` | `Precise` | `Relaxed` encodes faster at a small quality cost; see [Performance modes](docs/performance.md#performance-modes). |
 | `UseInbandFec` / `PacketLossPercent` | false / 0 | In-band FEC on SILK and hybrid frames. |
 | `UseDtx` | false | Discontinuous transmission on the SILK-only path. |
 
@@ -202,8 +204,9 @@ in 14 of 16 gated configurations and trails by 0.13 to 0.19 dB in the other two 
 ahead of libopus at complexity 0 and within 0.35 dB at complexity 10. These are objective
 waveform measurements on the RFC test vectors, not listening tests.
 
-**What has not been measured:** there are no x64 benchmark numbers. The AVX2+FMA kernels are
-tested for correctness on x64 in CI, but their speed has not been recorded.
+**x64:** one run on an AMD Ryzen 7 7700X (rented VM) has decode at 0.76 to 1.09 times libopus and
+encode at complexity 0 slower than libopus in every configuration (1.55 to 3.37 times). It is a
+single machine; see [docs/performance.md](docs/performance.md#x64-vast-ai-amd-ryzen-7-7700x).
 
 ## What Kiln.Audio is not
 

@@ -72,6 +72,7 @@ internal sealed class SilkStereoPacketEncoder
     /// <param name="useInbandFec">Whether to emit LBRR frames.</param>
     /// <param name="packetLossPercent">The expected packet loss, 0 to 100.</param>
     /// <param name="useDtx">Whether to suppress all-silent packets.</param>
+    /// <param name="mode">The performance mode.</param>
     internal SilkStereoPacketEncoder(
         int apiRate,
         int internalRate,
@@ -82,7 +83,8 @@ internal sealed class SilkStereoPacketEncoder
         int channels,
         bool useInbandFec,
         int packetLossPercent,
-        bool useDtx)
+        bool useDtx,
+        OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
         _channels = channels;
         _durationMs = durationMs;
@@ -92,7 +94,7 @@ internal sealed class SilkStereoPacketEncoder
         _useCbr = useCbr;
         _useDtx = useDtx;
 
-        _mid = new SilkEncoderCore(apiRate, internalRate, durationMs, bitrateBps, complexity, useCbr);
+        _mid = new SilkEncoderCore(apiRate, internalRate, durationMs, bitrateBps, complexity, useCbr, mode);
         _side = channels == 2
             ? new SilkEncoderCore(apiRate, internalRate, durationMs, bitrateBps, complexity, useCbr)
             : null;
@@ -149,6 +151,9 @@ internal sealed class SilkStereoPacketEncoder
         int payloadBits = EncodeInto(ref rangeEncoder, pcm, Math.Min(packet.Length + 1, 1276));
         if (LastPacketSuppressed)
         {
+            // A DTX-suppressed packet carries no range-coded payload, so the decoder reports a
+            // final range of zero; do not leave the previous frame's value in place.
+            FinalRange = 0;
             return 0;
         }
 

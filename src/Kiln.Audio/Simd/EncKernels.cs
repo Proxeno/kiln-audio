@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Kiln.Audio.Simd;
 
@@ -122,6 +123,63 @@ internal static class EncKernels
         }
 
         memory = -PreEmphasisCoefficient * Unsafe.Add(ref src, pcm.Length - 1);
+        silent = allZero;
+    }
+
+    /// <summary>
+    /// x64 stereo pre-emphasis at 48 kHz (no upsampling): the same per-sample operations as the scalar loop
+    /// (one multiply and one add, no clipping needed for 16-bit input), four frames per pass, with the
+    /// interleaved pairs split into the two channel blocks.
+    /// </summary>
+    internal static void PreEmphasisStereo(
+        ReadOnlySpan<short> pcm, Span<float> left, Span<float> right, ref float memoryLeft, ref float memoryRight, out bool silent)
+    {
+        int frames = pcm.Length / 2;
+        ref short src = ref MemoryMarshal.GetReference(pcm);
+        ref float dl = ref MemoryMarshal.GetReference(left);
+        ref float dr = ref MemoryMarshal.GetReference(right);
+
+        float yl = Unsafe.Add(ref src, 0) + memoryLeft;
+        float yr = Unsafe.Add(ref src, 1) + memoryRight;
+        Unsafe.Add(ref dl, 0) = yl;
+        Unsafe.Add(ref dr, 0) = yr;
+        bool allZero = yl == 0f && yr == 0f;
+
+        Vector128<float> negCoefficient = Vector128.Create(-PreEmphasisCoefficient);
+        Vector128<float> zero = Vector128<float>.Zero;
+        int i = 1;
+        for (; i + 4 <= frames; i += 4)
+        {
+            int s = 2 * i;
+            Vector128<short> current = Vector128.LoadUnsafe(in src, (nuint)s);
+            Vector128<short> previous = Vector128.LoadUnsafe(in src, (nuint)(s - 2));
+            (Vector128<int> currentLow, Vector128<int> currentHigh) = Vector128.Widen(current);
+            (Vector128<int> previousLow, Vector128<int> previousHigh) = Vector128.Widen(previous);
+            Vector128<float> low =
+                (negCoefficient * Vector128.ConvertToSingle(previousLow)) + Vector128.ConvertToSingle(currentLow);
+            Vector128<float> high =
+                (negCoefficient * Vector128.ConvertToSingle(previousHigh)) + Vector128.ConvertToSingle(currentHigh);
+            Vector128<float> even = Sse.Shuffle(low, high, 0x88);
+            Vector128<float> odd = Sse.Shuffle(low, high, 0xDD);
+            Vector128.StoreUnsafe(even, ref dl, (nuint)i);
+            Vector128.StoreUnsafe(odd, ref dr, (nuint)i);
+            if (!Vector128.EqualsAll(even, zero) || !Vector128.EqualsAll(odd, zero))
+            {
+                allZero = false;
+            }
+        }
+
+        for (; i < frames; i++)
+        {
+            yl = Unsafe.Add(ref src, 2 * i) + (-PreEmphasisCoefficient * Unsafe.Add(ref src, (2 * i) - 2));
+            yr = Unsafe.Add(ref src, (2 * i) + 1) + (-PreEmphasisCoefficient * Unsafe.Add(ref src, (2 * i) - 1));
+            Unsafe.Add(ref dl, i) = yl;
+            Unsafe.Add(ref dr, i) = yr;
+            allZero &= yl == 0f && yr == 0f;
+        }
+
+        memoryLeft = -PreEmphasisCoefficient * Unsafe.Add(ref src, pcm.Length - 2);
+        memoryRight = -PreEmphasisCoefficient * Unsafe.Add(ref src, pcm.Length - 1);
         silent = allZero;
     }
 }

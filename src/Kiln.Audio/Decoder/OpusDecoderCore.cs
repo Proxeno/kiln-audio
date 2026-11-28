@@ -55,7 +55,8 @@ internal sealed class OpusDecoderCore
     /// <summary>Initializes the decoder for one API rate and channel count.</summary>
     /// <param name="apiRate">API sample rate: 8000, 12000, 16000, 24000 or 48000 Hz.</param>
     /// <param name="apiChannels">API channel count: 1 or 2.</param>
-    internal OpusDecoderCore(int apiRate, int apiChannels)
+    /// <param name="mode">The decoder performance mode.</param>
+    internal OpusDecoderCore(int apiRate, int apiChannels, OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
         _apiRate = apiRate;
         _channels = apiChannels;
@@ -68,7 +69,7 @@ internal sealed class OpusDecoderCore
         _bandwidth = OpusBandwidth.Narrowband;
 
         _silk = new SilkOutput(apiRate, apiChannels);
-        _celt = new CeltOutput(apiRate, apiChannels);
+        _celt = new CeltOutput(apiRate, apiChannels, mode);
         _pcmSilk = new float[_maxFrameSamples * apiChannels];
         _pcmTransition = new float[_f5 * apiChannels];
         _redundantAudio = new float[_f5 * apiChannels];

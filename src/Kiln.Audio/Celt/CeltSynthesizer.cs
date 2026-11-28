@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Kiln.Audio.Decoder;
 using Kiln.Audio.Simd;
 using Kiln.Audio.Simd.Kernels;
 
@@ -47,12 +48,16 @@ internal sealed partial class CeltSynthesizer
 
     // The history carries Overlap extra samples after the rolling window: the inverse MDCT writes
     // its whole windowed output (frame plus trailing overlap) straight into the frame's slot.
-    private const int HistoryAllocation = HistorySize + Overlap;
+    // The window slides forward through a longer buffer instead of being shifted left every frame;
+    // the buffer is compacted once the slack is used up (a copy per ~SlideSlack samples, not per frame).
+    private const int SlideSlack = 6144;
+    private const int HistoryAllocation = HistorySize + Overlap + SlideSlack;
     private const int MaxFrameSamples = CeltTables.MaxFrameSamples;
 
     private readonly int _outputChannels;
     private readonly int _downsample;
     private readonly AudioKernelTier _tier;
+    private readonly bool _relaxed;
 
     // True while both output channels hold identical state (a mono stream decoded to stereo since
     // the last reset): channel 1 is then not synthesized, its output is a copy of channel 0 and
@@ -67,6 +72,9 @@ internal sealed partial class CeltSynthesizer
     private readonly float[][] _rawOverlap = new float[2][];
     private readonly float[][] _history = new float[2][];
     private readonly float[] _deemphasis = new float[2];
+
+    // Offset of the 2048-sample history window inside each history buffer.
+    private int _historyStart;
     private readonly float[] _windowSquare = new float[Overlap];
 
     /// <summary>Initializes a synthesizer for the given output channel count and decimation.</summary>
@@ -82,12 +90,23 @@ internal sealed partial class CeltSynthesizer
     {
     }
 
+    /// <summary>Initializes a synthesizer for a performance mode on the best kernel tier.</summary>
+    /// <param name="outputChannels">Output channels, 1 or 2.</param>
+    /// <param name="downsample">The 48 kHz-to-API-rate factor.</param>
+    /// <param name="mode">Precise (bit-exact) or Relaxed (fast, not bit-exact).</param>
+    internal CeltSynthesizer(int outputChannels, int downsample, OpusPerformanceMode mode)
+        : this(outputChannels, downsample, AudioKernels.Select(), mode)
+    {
+    }
+
     /// <summary>Initializes a synthesizer on an explicit kernel tier (parity tests).</summary>
     /// <param name="outputChannels">Output channels, 1 or 2.</param>
     /// <param name="downsample">The 48 kHz-to-API-rate factor.</param>
     /// <param name="tier">The kernel tier; it must be supported by the host.</param>
-    internal CeltSynthesizer(int outputChannels, int downsample, AudioKernelTier tier)
+    /// <param name="mode">Precise (bit-exact) or Relaxed (fast, not bit-exact).</param>
+    internal CeltSynthesizer(int outputChannels, int downsample, AudioKernelTier tier, OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
+        _relaxed = mode == OpusPerformanceMode.Relaxed;
         if (!AudioKernels.IsSupported(tier))
         {
             throw new PlatformNotSupportedException($"The {tier} kernel tier is not supported on this host.");
@@ -145,6 +164,7 @@ internal sealed partial class CeltSynthesizer
         }
 
         Array.Clear(_deemphasis);
+        _historyStart = 0;
         _identical = _outputChannels == 2;
         Array.Clear(_freq);
         Array.Clear(_block);
@@ -208,18 +228,77 @@ internal sealed partial class CeltSynthesizer
         switch (_tier)
         {
             case AudioKernelTier.Avx2Fma:
-                SynthesizeCore<Avx2FmaKernels>(frame, samples, pcmOut);
+                if (_relaxed)
+                {
+                    SynthesizeCore<ProfiledKernels<Avx2FmaKernels, RelaxedProfile>>(frame, samples, pcmOut);
+                }
+                else
+                {
+                    SynthesizeCore<Avx2FmaKernels>(frame, samples, pcmOut);
+                }
+
                 break;
             case AudioKernelTier.AdvSimdArm64:
-                SynthesizeCore<AdvSimdArm64Kernels>(frame, samples, pcmOut);
+                if (_relaxed)
+                {
+                    SynthesizeCore<ProfiledKernels<AdvSimdArm64Kernels, RelaxedProfile>>(frame, samples, pcmOut);
+                }
+                else
+                {
+                    SynthesizeCore<AdvSimdArm64Kernels>(frame, samples, pcmOut);
+                }
+
                 break;
             case AudioKernelTier.Vector128:
-                SynthesizeCore<Vector128Kernels>(frame, samples, pcmOut);
+                if (_relaxed)
+                {
+                    SynthesizeCore<ProfiledKernels<Vector128Kernels, RelaxedProfile>>(frame, samples, pcmOut);
+                }
+                else
+                {
+                    SynthesizeCore<Vector128Kernels>(frame, samples, pcmOut);
+                }
+
                 break;
             default:
-                SynthesizeCore<ScalarKernels>(frame, samples, pcmOut);
+                if (_relaxed)
+                {
+                    SynthesizeCore<ProfiledKernels<ScalarKernels, RelaxedProfile>>(frame, samples, pcmOut);
+                }
+                else
+                {
+                    SynthesizeCore<ScalarKernels>(frame, samples, pcmOut);
+                }
+
                 break;
         }
+    }
+
+    /// <summary>Slides the history window forward by one frame, compacting the buffers when the slack runs out.</summary>
+    private void AdvanceHistory(int samples)
+    {
+        if (_historyStart + samples > SlideSlack)
+        {
+            NormalizeHistory();
+        }
+
+        _historyStart += samples;
+    }
+
+    /// <summary>Moves the history window back to offset zero (concealment indexes it absolutely).</summary>
+    private void NormalizeHistory()
+    {
+        if (_historyStart == 0)
+        {
+            return;
+        }
+
+        for (int channel = 0; channel < 2; channel++)
+        {
+            Array.Copy(_history[channel], _historyStart, _history[channel], 0, HistorySize);
+        }
+
+        _historyStart = 0;
     }
 
     /// <summary>Makes channel 1 a real copy of channel 0 again so the two can diverge.</summary>
@@ -252,6 +331,7 @@ internal sealed partial class CeltSynthesizer
 
         long profileStart = Perf4Profile.Start();
         long stageStart = Perf4Profile.Start();
+        AdvanceHistory(samples);
         Denormalise<TK>(frame, samples, streamChannels, channels, duplicate);
         Perf4Profile.Stop(17, stageStart);
 
@@ -268,7 +348,7 @@ internal sealed partial class CeltSynthesizer
 
         stageStart = Perf4Profile.Start();
         const float inv = 1f / CeltTables.SignalScale;
-        int baseIndex = HistorySize - samples;
+        int baseIndex = _historyStart + HistorySize - samples;
         TK.Deemphasis(
             _history[0].AsSpan(baseIndex, samples),
             _history[channels == 2 && !duplicate ? 1 : 0].AsSpan(baseIndex, samples),
@@ -328,7 +408,9 @@ internal sealed partial class CeltSynthesizer
                     logEnergy = 32f;
                 }
 
-                float gain = (float)Math.Exp(0.6931471805599453094 * logEnergy);
+                float gain = TK.Relaxed
+                    ? RelaxedMath.Exp2(logEnergy)
+                    : (float)Math.Exp(0.6931471805599453094 * logEnergy);
                 int start = m * eBands[i];
                 int end = m * eBands[i + 1];
                 TK.ScaleCopy(
@@ -373,8 +455,7 @@ internal sealed partial class CeltSynthesizer
         // Shift the rolling history first; the frame (and the trailing overlap, which lands in the
         // allocation margin) is then written straight into its tail.
         float[] history = _history[channel];
-        Array.Copy(history, samples, history, 0, HistorySize - samples);
-        Span<float> raw = history.AsSpan(HistorySize - samples, samples + Overlap);
+        Span<float> raw = history.AsSpan(_historyStart + HistorySize - samples, samples + Overlap);
 
         // PERF-6: the inverse transforms are left unscaled (the 2/N factor and the N/2 the
         // reference multiplies by straight afterwards cancel).
@@ -415,7 +496,7 @@ internal sealed partial class CeltSynthesizer
         where TK : struct, ICeltKernels
     {
         float[] history = _history[channel];
-        int baseIndex = HistorySize - samples;
+        int baseIndex = _historyStart + HistorySize - samples;
 
         // The reference clamps the two historical periods before use; the newly decoded pitch
         // is used as-is (it is at least the minimum whenever its gain is non-zero).
@@ -491,7 +572,7 @@ internal sealed partial class CeltSynthesizer
     private void Deemphasise(int samples, int channel, Span<float> pcmOut, int channels)
     {
         float[] history = _history[channel];
-        int baseIndex = HistorySize - samples;
+        int baseIndex = _historyStart + HistorySize - samples;
         float memory = _deemphasis[channel];
         const float inv = 1f / CeltTables.SignalScale;
         if (pcmOut.Length < ((samples - 1) * channels) + channel + 1)

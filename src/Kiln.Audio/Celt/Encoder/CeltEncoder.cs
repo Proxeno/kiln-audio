@@ -38,6 +38,7 @@ internal sealed class CeltEncoder
     private readonly int _apiFrameSamples;
     private readonly int _channels;
     private readonly AudioKernelTier _tier = AudioKernels.Select();
+    private readonly bool _relaxed;
     private readonly int _upsample;
     private readonly int _end;
     private readonly int _complexity;
@@ -100,6 +101,7 @@ internal sealed class CeltEncoder
     /// <param name="sampleRate">The API sample rate (8000, 12000, 16000, 24000 or 48000).</param>
     /// <param name="useVbr">Whether to use variable bitrate.</param>
     /// <param name="constrainedVbr">Whether VBR is constrained by the bit reservoir.</param>
+    /// <param name="mode">The performance mode.</param>
     internal CeltEncoder(
         OpusFrameDuration frameDuration,
         int bitrateBps,
@@ -107,8 +109,10 @@ internal sealed class CeltEncoder
         int channels,
         int sampleRate,
         bool useVbr,
-        bool constrainedVbr)
+        bool constrainedVbr,
+        OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
+        _relaxed = mode == OpusPerformanceMode.Relaxed;
         _lm = frameDuration switch
         {
             OpusFrameDuration.Ms2_5 => 0,
@@ -209,8 +213,15 @@ internal sealed class CeltEncoder
     /// <param name="destination">The destination payload buffer.</param>
     /// <param name="startBand">The first coded band, 0 for CELT-only.</param>
     /// <param name="endBand">One past the last coded band, 1 to 21.</param>
+    /// <param name="cbrFrameBytes">
+    /// In CBR, an optional cap on the payload size in bytes, used by the automatic mode selector's
+    /// CELT fallback so the packet (TOC included) fits the nominal frame budget. -1 uses
+    /// <see cref="FrameBytes"/>, which is one byte more and is the documented standalone-CELT
+    /// convention. Ignored when the encoder is in VBR mode.
+    /// </param>
     /// <returns>The payload size in bytes.</returns>
-    internal int EncodeFrame(ReadOnlySpan<short> pcm, Span<byte> destination, int startBand, int endBand)
+    internal int EncodeFrame(
+        ReadOnlySpan<short> pcm, Span<byte> destination, int startBand, int endBand, int cbrFrameBytes = -1)
     {
         if (startBand < 0 || endBand <= startBand || endBand > BandCount)
         {
@@ -255,7 +266,7 @@ internal sealed class CeltEncoder
         }
         else
         {
-            int frameBytes = FrameBytes;
+            int frameBytes = cbrFrameBytes > 0 ? Math.Clamp(cbrFrameBytes, 2, FrameBytes) : FrameBytes;
             if (destination.Length < frameBytes)
             {
                 throw new ArgumentException(
@@ -464,7 +475,7 @@ internal sealed class CeltEncoder
 
         int tfSelect;
         int tfSum;
-        if (_complexity < 2)
+        if (_complexity < 2 || (_relaxed && _complexity < 8))
         {
             // RFC 6716 Appendix A, celt/celt_encoder.c: enable_tf_analysis requires complexity 2.
             // Below that the reference forces the time resolution from isTransient, which is
@@ -488,7 +499,7 @@ internal sealed class CeltEncoder
         CeltEncoderEnergy.QuantCoarseEnergy(
             ref enc, lm, start, end, end, channels, _bandLogE, _oldBandE, _error,
             _intraOldBandE, _intraError, frameBuffer, snapshot,
-            nbAvailableBytes, totalBits, twoPass: _complexity >= 4, ref _delayedIntra);
+            nbAvailableBytes, totalBits, twoPass: _complexity >= (_relaxed ? 8 : 4), ref _delayedIntra);
 
         CeltEncoderAnalysis.TfEncode(
             ref enc, start, end, isTransient, _tfResolution, lm, tfSelect, nbCompressedBytes);

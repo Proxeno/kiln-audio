@@ -130,13 +130,15 @@ public sealed class OpusEncoder : IDisposable
                     channels: 1,
                     useInbandFec: true,
                     options.PacketLossPercent,
-                    useDtx: false);
+                    useDtx: false,
+                    options.PerformanceMode);
                 _silkLayer = new SilkFecLayerAdapter(_silkPacket);
             }
             else
             {
                 _silk = new SilkEncoderCore(
-                    48000, silkRate, frameDurationMs, options.BitrateBps, options.Complexity, options.UseCbr);
+                    48000, silkRate, frameDurationMs, options.BitrateBps, options.Complexity, options.UseCbr,
+                    options.PerformanceMode);
                 _silkLayer = new SilkLayerAdapter(_silk);
             }
 
@@ -147,8 +149,10 @@ public sealed class OpusEncoder : IDisposable
                 channels: 1,
                 48000,
                 options.UseVbr,
-                options.ConstrainedVbr);
-            _redundantCelt = new CeltRedundantEncoder(Math.Clamp(options.BitrateBps, 3200, 257 * 1600), options.Complexity);
+                options.ConstrainedVbr,
+                options.PerformanceMode);
+            _redundantCelt = new CeltRedundantEncoder(
+                Math.Clamp(options.BitrateBps, 3200, 257 * 1600), options.Complexity, options.PerformanceMode);
             _autoFrameSamples = frameDurationMs * 48;
 
             // The reference seeds its voice estimate from the application and refines it with a
@@ -201,7 +205,8 @@ public sealed class OpusEncoder : IDisposable
                 options.Channels,
                 options.UseInbandFec,
                 options.PacketLossPercent,
-                options.UseDtx);
+                options.UseDtx,
+                options.PerformanceMode);
             _silkFrameSamples = options.SampleRate * frameDurationMs / 1000 * options.Channels;
             _conversionBuffer = new short[_silkFrameSamples];
             _subFrameData = [];
@@ -262,7 +267,8 @@ public sealed class OpusEncoder : IDisposable
             options.Channels,
             options.SampleRate,
             options.UseVbr,
-            options.ConstrainedVbr);
+            options.ConstrainedVbr,
+            options.PerformanceMode);
         _subFrameSamples = _encoder.FrameSamples;
         _inputFrameSamples = _subFrameSamples * _subFrameCount * options.Channels;
         _silkFrameSamples = _inputFrameSamples;
@@ -476,6 +482,7 @@ public sealed class OpusEncoder : IDisposable
                 endBand,
                 decision.Redundancy,
                 decision.CeltToSilk,
+                Options.UseCbr,
                 packet[1..],
                 out _autoRange);
             packet[0] = OpusTocBuilder.Build(OpusMode.Hybrid, bandwidth, Options.FrameDuration, stereo: false);
@@ -485,7 +492,12 @@ public sealed class OpusEncoder : IDisposable
         if (decision.Mode == OpusMode.Celt)
         {
             int endBand = OpusTransitionEncoder.EndBandOf(decision.Bandwidth);
-            int minimum = Options.UseVbr ? 2 : _autoCelt!.FrameBytes + 1;
+
+            // The automatic CELT fallback must fit the nominal CBR packet, so its payload is the
+            // nominal size less the TOC byte. Standalone CELT keeps its own one-byte-larger
+            // convention (see CeltEncoder.EncodeFrame); VBR is not bounded by the nominal size.
+            int cbrPayload = Options.UseVbr ? -1 : Math.Max(1, NominalCbrPacketBytes() - 1);
+            int minimum = Options.UseVbr ? 2 : Math.Min(_autoCelt!.FrameBytes, cbrPayload) + 1;
             if (packet.Length < minimum)
             {
                 throw new ArgumentException(
@@ -494,7 +506,7 @@ public sealed class OpusEncoder : IDisposable
             }
 
             packet[0] = OpusTocBuilder.Build(OpusMode.Celt, decision.Bandwidth, Options.FrameDuration, stereo: false);
-            int celtBytes = _autoCelt!.EncodeFrame(pcm, packet[1..], 0, endBand);
+            int celtBytes = _autoCelt!.EncodeFrame(pcm, packet[1..], 0, endBand, cbrPayload);
             _autoRange = _autoCelt.FinalRange;
             return celtBytes + 1;
         }
@@ -510,10 +522,37 @@ public sealed class OpusEncoder : IDisposable
             _autoSilkBandwidth,
             decision.Redundancy,
             decision.CeltToSilk,
+            SilkOnlyFrameBudget(packet.Length - 1),
             packet[1..],
             out _autoRange);
         packet[0] = OpusTocBuilder.Build(OpusMode.Silk, _autoSilkBandwidth, Options.FrameDuration, stereo: false);
         return frameBytes + 1;
+    }
+
+    /// <summary>
+    /// The payload budget of a SILK-only frame: in CBR the nominal packet size (less the TOC byte), so a
+    /// redundant frame cannot push the packet past it.
+    /// </summary>
+    private int SilkOnlyFrameBudget(int capacity)
+    {
+        if (!Options.UseCbr)
+        {
+            return capacity;
+        }
+
+        int frameRate = 48000 / _autoFrameSamples;
+        int cbrBytes = (Options.BitrateBps + (4 * frameRate)) / (8 * frameRate);
+        return Math.Max(1, Math.Min(capacity, cbrBytes - 1));
+    }
+
+    /// <summary>
+    /// The nominal CBR packet size in bytes, TOC included: the frame duration's bitrate budget. The
+    /// automatic CELT fallback sizes its payload one byte under this so the packet fits.
+    /// </summary>
+    private int NominalCbrPacketBytes()
+    {
+        // bitrate (bits/s) * frame duration (s) / 8 (bits/byte), floored like the nominal size gate.
+        return Math.Max(1, (int)((long)Options.BitrateBps * _autoFrameSamples / (48000 * 8)));
     }
 
     /// <summary>

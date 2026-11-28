@@ -17,8 +17,216 @@ so a value above 1.0 means Kiln is slower.
 - The machine is shared with other work. PERF-1 recorded up to about 15 % run-to-run variation on
   decode, and ENC-PERF-1 and PERF-2 recorded 20-50 % on some single runs. Treat differences
   smaller than 10-15 % between two ratios as noise.
-- **Architecture.** Every number is arm64. No x64 benchmark numbers exist in this repository; the
-  x64 AVX2+FMA kernels are parity-tested against scalar but not benchmarked here.
+- **Architecture.** The tables below are arm64. One x64 run (AMD Ryzen 7 7700X, rented VM) is in
+  [x64 results](#x64-vast-ai-amd-ryzen-7-7700x); it is a single run on a shared host and is not
+  directly comparable with the arm64 tables.
+
+## x64 (vast.ai, AMD Ryzen 7 7700X)
+
+One run on a rented x64 VM, tag `v1.0.0`, same harness and statistic as the arm64 tables (decode:
+best of 15 passes; encode: best of 7 passes over the 320 s corpus). Ratios are Kiln time divided by
+libopus time, so lower is better and above 1.0 means Kiln is slower. Each benchmark was run three
+times; the ratio below uses the best run on each side (medians differ by 0.01 or less).
+
+| Item | Value |
+| ---- | ----- |
+| CPU | AMD Ryzen 7 7700X, 8 cores / 16 threads, Zen 4, up to 5.57 GHz; AVX2, FMA and AVX-512 present |
+| VM | vast.ai container, 16 vCPUs visible, Ubuntu 24.04.5, kernel 6.8.0-151 |
+| Runtime | .NET 10.0.15 (`mcr.microsoft.com/dotnet/sdk:10.0`) |
+| Kiln SIMD tier | Avx2Fma (128-bit VEX with FMA). `KILN_AUDIO_DISABLE_SIMD=1` runs the same decode 1.0x to 7x slower per vector (for example vector 02: 85.2 ms scalar, 13.4 ms SIMD), so the SIMD tier was active |
+| Reference | libopus 1.5.2, `-O3`, built with `OPUS_X86_MAY_HAVE_SSE4_1` and `OPUS_X86_MAY_HAVE_AVX2` (runtime CPU detection, so its AVX2 code runs on this CPU) |
+
+Vector 01 stereo is the 1.0x row (41.8 ms on both sides); its scalar time was 57.3 ms.
+
+**Decode** (`OpusDecoder.Decode`, public API, 48 kHz output, whole vector):
+
+| Vector | Content | Stereo ratio | Mono ratio |
+| ------ | ------- | ------------ | ---------- |
+| 01 | CELT-only | 1.00 | 1.04 |
+| 02 | SILK NB | 0.83 | 0.90 |
+| 03 | SILK MB | 0.78 | 0.85 |
+| 04 | SILK WB | 0.82 | 0.87 |
+| 05 | Hybrid SWB | 0.81 | 0.88 |
+| 06 | Hybrid FB | 0.84 | 0.91 |
+| 07 | CELT-only | 0.89 | 1.01 |
+| 08 | SILK and CELT frames | 0.95 | 1.00 |
+| 09 | SILK and CELT frames | 1.06 | 1.09 |
+| 10 | Hybrid and CELT frames | 1.04 | 1.06 |
+| 11 | CELT-only | 0.93 | 0.98 |
+| 12 | SILK and hybrid frames, mono-coded | 0.76 | 0.85 |
+
+Decode ranges from 0.76 to 1.06 (stereo) and 0.85 to 1.09 (mono). Kiln is ahead on the SILK and
+hybrid vectors and behind on vectors 09 and 10.
+
+**Encode** (microseconds per 20 ms frame, CBR, libopus pinned to the same mode and bandwidth):
+
+| Configuration | Complexity | libopus | Kiln | Ratio |
+| ------------- | ---------- | ------- | ---- | ----- |
+| CELT stereo 64 kbps | 0 | 19.3 | 30.4 | 1.57 |
+| CELT stereo 64 kbps | 5 | 42.6 | 48.4 | 1.14 |
+| CELT mono 32 kbps | 0 | 10.0 | 15.5 | 1.55 |
+| CELT mono 32 kbps | 5 | 27.1 | 31.2 | 1.15 |
+| SILK WB mono 20 kbps | 0 | 54.3 | 122.5 | 2.26 |
+| SILK WB mono 20 kbps | 5 | 168.3 | 143.6 | 0.85 |
+| Hybrid FB mono 32 kbps | 0 | 35.7 | 120.4 | 3.37 |
+| Hybrid FB mono 32 kbps | 5 | 83.4 | 144.0 | 1.73 |
+
+Method for the encode rows: Kiln `micro enc run <pcm> 48000 <ch> <app> <bitrate> <bw> <cx> 7`;
+libopus `scripts/bench-libopus-inproc.sh encode <pcm> 48000 <ch> <app> <bitrate> 20 <cx> 1 7`. CELT
+rows use `restricted-lowdelay`; the SILK row uses `voip` with the bandwidth set to wideband and
+libopus forced to SILK (`KILN_BENCH_BANDWIDTH=WB KILN_BENCH_FORCE_MODE=1000`); the hybrid row uses
+`audio`, fullband, libopus forced to hybrid (`FORCE_MODE=1001`). Kiln's packet-mode histogram
+confirmed the same mode (SILK for all 16,031 frames; hybrid for 15,924 and CELT for 107 in the
+hybrid row). The task did not record the exact applications used for the SILK and hybrid arm64 rows,
+so those two applications are a choice made for this run.
+
+What this shows. On x64 the pattern is the same as on arm64: decode is at parity or better except
+two CELT-heavy vectors (up to 1.09), and encode at complexity 0 is slower than libopus in every
+configuration (1.55 to 3.37). CELT encode at complexity 5 is 1.14 to 1.15 here, against 0.75 to 0.85
+on arm64: libopus has AVX2 code for its PVQ search, pitch search and SILK quantizer on this CPU,
+while Kiln's x64 tier is limited to 128-bit vectors. The PVQ search alone is about 16 of 59 us per
+stereo frame at complexity 5 in a `KILN_ENC_PROFILE` build. No tuning was attempted on x64.
+
+Noise. This was a shared VM on a host Kiln does not control. The three runs on each side agreed
+within about 1 % for decode and 2 % for encode, which is much tighter than on the arm64 machine, but
+that says nothing about other hosts or about CPU frequency scaling on this one. Treat differences
+under 10 % as noise, and treat this as one machine of one model, not as "x64".
+
+## Performance modes
+
+`OpusDecoderOptions.PerformanceMode` (and the matching encoder option) selects between exactness and
+speed per instance. `Precise` is the default and is bit-identical to Kiln 1.0; `Relaxed` may use
+non-bit-exact floating-point math. Both modes are fully standard Opus: the mode never changes what
+is accepted or produced on the wire.
+
+### Decoder
+
+The mode is resolved once at construction and specialised through generics, like the kernel tiers: the
+CELT decoder and synthesizer are instantiated either on the bare tier struct (Precise, unchanged code)
+or on `ProfiledKernels<Tier, RelaxedProfile>`, so a Relaxed-only branch is a JIT-time constant and costs
+nothing in Precise. SILK decoding is integer arithmetic and is identical in both modes.
+
+Relaxed knobs kept (each measured; the others below were not worth keeping):
+
+- `RelaxedMath.Exp2`: a degree-5 minimax float polynomial replaces the double-precision `Math.Exp` in
+  band denormalisation and anti-collapse (relative error 2.5e-7).
+- `FastRsqrt`: the hardware reciprocal-square-root estimate plus Newton-Raphson steps (`rsqrtss` +
+  one FMA step on x64, `frsqrte`/`frsqrts` on arm64; error 1.7e-7) replaces `1 / sqrt` in PVQ
+  renormalisation and the stereo merge gains.
+
+Exact (both modes) change made in the same lane: the 2048-sample synthesis history window now slides
+through a longer buffer and is compacted every few thousand samples, instead of being shifted left by
+one frame (two 8 KB copies for 2.5 ms frames) on every frame. Output is unchanged; the gain is
+about 1-2 % on the 2.5 ms-heavy vectors.
+
+Not kept or not done: the IMDCT, comb filter, de-emphasis and overlap-add already use fused
+multiply-add and reassociated sums on every vector tier in Precise too, so there is nothing further to
+contract there; a fused de-emphasis + int16 conversion would only remove the 0.3 % int16 pass; the
+PLC path is rare and was left as is.
+
+Where the time goes: on the CELT vectors the PVQ pulse decode, the range decoder and the band
+partitioning (all integer and bit-exact) are about 75-80 % of a frame and synthesis is 10-25 %, so the
+float knobs move the total by 1-3 %. The 0.90 target is therefore **not met**: Relaxed is the same as
+Precise within about 3 %, and vectors 09 and 10 (high-rate CELT) stay above 1.0, as do the arm64
+SILK vectors.
+
+Conformance and accuracy (Relaxed): all 12 RFC 8251 vectors pass the final-range check and the
+`opus_compare` quality metric against `.dec` or `m.dec`, in the managed and the native comparator,
+with the same result as Precise. Against Precise the PCM differs by at most 1 LSB (99-116 dB SNR) on
+the CELT, hybrid and mixed vectors and is identical on the SILK-only vectors (02, 03, 04, 12).
+
+Decode time / libopus 1.5.2 (lower is better; P = Precise, R = Relaxed; best of 15, same harness as
+above; x64 is a rented Ryzen 9 7900X, arm64 the M5 Max):
+
+| Vector | x64 stereo P / R | x64 mono P / R | arm64 stereo P / R | arm64 mono P / R |
+| --- | --- | --- | --- | --- |
+| 01 | 0.98 / 0.97 | 1.03 / 1.01 | 0.98 / 0.97 | 1.05 / 1.04 |
+| 02 | 0.83 / 0.83 | 0.90 / 0.90 | 1.02 / 1.02 | 1.09 / 1.08 |
+| 03 | 0.79 / 0.79 | 0.86 / 0.86 | 1.02 / 1.02 | 1.09 / 1.07 |
+| 04 | 0.82 / 0.82 | 0.87 / 0.87 | 1.05 / 1.04 | 1.11 / 1.10 |
+| 05 | 0.81 / 0.80 | 0.88 / 0.88 | 0.90 / 0.90 | 0.98 / 0.99 |
+| 06 | 0.84 / 0.84 | 0.91 / 0.91 | 0.95 / 0.94 | 1.02 / 1.03 |
+| 07 | 0.88 / 0.87 | 1.00 / 0.98 | 0.87 / 0.84 | 1.03 / 1.00 |
+| 08 | 0.93 / 0.92 | 0.99 / 0.97 | 0.90 / 0.91 | 1.01 / 0.99 |
+| 09 | 1.05 / 1.05 | 1.09 / 1.08 | 1.06 / 1.06 | 1.13 / 1.12 |
+| 10 | 1.03 / 1.02 | 1.06 / 1.05 | 1.05 / 1.02 | 1.10 / 1.09 |
+| 11 | 0.92 / 0.92 | 0.97 / 0.96 | 0.86 / 0.86 | 0.94 / 0.94 |
+| 12 | 0.77 / 0.76 | 0.85 / 0.85 | 0.91 / 0.91 | 1.05 / 1.04 |
+
+Reproduce with `KILN_BENCH_RELAXED=1 dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro pubapi`
+(set `KILN_BENCH_VECTOR=N` for a single vector).
+
+### Encoder
+
+`OpusEncoderOptions.PerformanceMode` is fixed per instance. `Precise` keeps Kiln 1.0's output for
+VBR and non-CBR frames; CBR packets changed in 1.1.0 when CBR-FIX corrected the low-rate SILK fill
+and the nominal CBR sizing.
+`Relaxed` is a per-instance flag read once per frame (SILK rate loop, quantizer choice, analysis
+switches) or once per call, never inside a per-sample or per-coefficient loop, so it did not need
+generic specialisation. The packets are standard Opus: libopus decodes them and the final range matches.
+
+Relaxed knobs kept (each measured on its own, Zen 4):
+
+- SILK quantizer: with a single trellis state (complexity below 4, or the high-rate path) the greedy
+  noise-shaping quantizer (`SilkNsq`, libopus's own complexity-0 shape) replaces the delayed-decision
+  code; above that the state count is 2 (complexity 4-7) or 3 instead of 4-8.
+- SILK rate loop: once one result fits the budget it stops after one more quantization (Precise keeps
+  searching up to six), and any result that fills at least half the budget is accepted instead of one
+  within 5 bits of it.
+- SILK analysis: half the NLSF survivors; no warped noise shaping below complexity 6.
+- CELT: the TF analysis is off below complexity 8 and the two-pass coarse energy needs complexity 8.
+
+Measured and rejected: a scalar largest-remainder PVQ search (slower than the vectorised exact search
+now in Precise), and turning the CELT prefilter pitch search off at complexity 5 (-8 us, -1.0 dB).
+
+Encode time / libopus 1.5.2 (lower is better; P = Precise, R = Relaxed; CBR, same harness and
+configurations as the Encode tables; x64 is a rented Ryzen 9 7950X, arm64 the M5 Max):
+
+| Configuration | Cx | x64 libopus us | x64 P / R | arm64 libopus us | arm64 P / R |
+| --- | --- | --- | --- | --- | --- |
+| CELT stereo 64 kbps | 0 | 19.6 | 0.97 / 0.97 | 18.5 | 1.38 / 1.37 |
+| CELT stereo 64 kbps | 5 | 42.8 | 0.86 / 0.78 | 47.2 | 0.85 / 0.79 |
+| CELT mono 32 kbps | 0 | 10.2 | 1.00 / 0.99 | 9.5 | 1.33 / 1.33 |
+| CELT mono 32 kbps | 5 | 27.3 | 0.94 / 0.84 | 34.4 | 0.74 / 0.67 |
+| SILK WB mono 20 kbps | 0 | 55.4 | 2.07 / 1.16 | 44.5 | 2.01 / 1.07 |
+| SILK WB mono 20 kbps | 5 | 171.0 | 0.75 / 0.43 | 135.8 | 0.73 / 0.40 |
+| Hybrid FB mono 32 kbps | 0 | 36.4 | 3.09 / 2.08 | 31.7 | 2.81 / 1.83 |
+| Hybrid FB mono 32 kbps | 5 | 84.7 | 1.57 / 1.06 | 70.0 | 1.46 / 0.97 |
+
+The 1.0 target is **not met** at SILK and hybrid complexity 0 (1.07 to 2.08) nor, on x64, at hybrid
+complexity 5 (1.06), and the arm64 CELT complexity-0 rows are unchanged from Precise (1.33 to 1.37; Relaxed
+only changes CELT from complexity 5 up, because Precise already skips TF analysis below 2). What is left at
+SILK complexity 0 is fixed analysis cost, in microseconds on x64: resample, VAD and high-pass 11, pitch search 9,
+LPC/LTP/NLSF search 13, noise-shape prefilter 4, quantizer 19, entropy coding 6; there is no cheap knob
+left in those that costs under 1 dB.
+
+Quality (segmental SNR in dB over 1 s from each of the 12 RFC 8251 vectors, decoded by Kiln, UseCbr; the
+frozen Relaxed floors are in `RelaxedEncoderTests`):
+
+| Configuration | Cx | Precise | Relaxed | Delta |
+| --- | --- | --- | --- | --- |
+| CELT stereo 64 kbps | 0 / 5 | 18.62 / 17.52 | 18.62 / 17.46 | 0.00 / -0.05 |
+| CELT mono 32 kbps | 0 / 5 | 15.85 / 16.78 | 15.85 / 16.64 | 0.00 / -0.14 |
+| SILK WB mono 20 kbps | 0 / 5 | 5.66 / 5.65 | 5.54 / 5.53 | -0.12 / -0.12 |
+| SILK WB mono 12 kbps | 0 / 5 | 4.39 / 4.32 | 3.85 / 4.09 | -0.54 / -0.23 |
+| Hybrid FB mono 32 kbps | 0 / 5 | 6.17 / 6.18 | 6.18 / 6.15 | +0.01 / -0.03 |
+
+Note on SILK and hybrid with `UseCbr` (these are the re-measured CBR-FIX / 1.1.0 numbers). Before CBR-FIX,
+Precise carried a Kiln 1.0 defect: when the SILK rate loop fell back to an earlier iteration (`foundLower`
+restore in `SilkEncoderCore`) it restored the frame bytes from an internal scratch buffer instead of the
+buffer the shared range coder writes (SILK-only and hybrid), so the restored frame carried zero bytes and
+libopus reported "Range coder state mismatch". The defect both corrupted the stream and depressed the old
+Precise SILK/hybrid rows (the earlier table showed ~2 to 3 dB); CBR-FIX uses the corrected restore in both
+modes, which is why the Precise SILK and hybrid CBR rows here are much higher and are now a fair baseline.
+CBR-FIX also sizes the automatic CELT fallback and the hybrid CBR frame to the nominal packet budget, so
+neither can emit one byte over the nominal size on a transition. The low-rate SILK CBR fill is narrowed to
+the frames that previously stopped at roughly half their budget: Relaxed now fills that budget, which
+recovers ~0.6 dB at 12 kbps wideband complexity 0
+(3.21 -> 3.85) and keeps Precise and Relaxed within the 1 dB limit; the cost is a few more rate-loop
+quantizations on those low-rate frames, while VBR output stays unchanged.
+
+Reproduce: `KILN_BENCH_MODE=relaxed dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro enc run
+<pcm> 48000 <ch> <app> <bitrate> <bw> <cx> 7` (set `KILN_BENCH_SNR=1` for the SNR column).
 
 ## Decode speed
 
@@ -188,7 +396,8 @@ Kiln encoder timings use `EncodeBenchmarks` and `micro enc` in the benchmark pro
 - Quality: SILK mediumband 20 kbps at complexity 0 trails libopus by 0.19 dB (20 ms) and 0.13 dB
   (60 ms); SILK at complexity 5 and 10 trails by up to 0.6 dB in some configurations; CELT-only at
   complexity 10 and 32 kbps trails by 0.351 dB. SILK `opus_compare` scores are not reported.
-- x64 AVX2+FMA kernels are parity-tested but have no recorded benchmark.
+- x64: one benchmark run exists (Ryzen 7 7700X, see above). Encode at complexity 5 for CELT (1.14 to 1.15)
+  and hybrid (1.73) is slower than libopus there, and the x64 tier has no 256-bit paths.
 
 ## History
 
@@ -1641,6 +1850,66 @@ WB 20k is high-rate (one trellis state), so cx0 cost is per-sample work, not tre
 shaping and delayed-decision path where libopus runs its plain greedy quantizer. A single-state fast path that is
 bit-identical to the DD output, the rate-loop iteration count, and the hybrid CELT half (owned by ENC-CELT-1)
 are what is left for cx0 and hybrid.
+
+### PERF-X64: x64 gap work (encode)
+
+Measured on the same class of box as the x64 section above (AMD Ryzen 7 7700X, rented VM; the
+instance differs, the baseline re-measured on it matches the earlier run to within 1 %). Base is
+`origin/train-next` at PR #57; both sides were re-benchmarked on the box after the changes. Ratio is
+Kiln / libopus, lower is better, target 1.05. Every change is bit-exact: the encoder byte hashes of
+all eight configurations are unchanged, and the targeted test run (670 tests, oracle required)
+passes. Decode was not touched (the 09 and 10 rows are unchanged within noise).
+
+| Encode, 48 kHz | c0 before | c0 after | c5 before | c5 after |
+| -------------- | --------- | -------- | --------- | -------- |
+| CELT stereo 64k | 1.57 | 0.97 | 1.14 | 0.86 |
+| CELT mono 32k | 1.56 | 0.99 | 1.15 | 0.94 |
+| SILK WB 20k | 2.26 | 2.04 | 0.86 | 0.75 |
+| Hybrid FB 32k | 3.36 | 3.05 | 1.73 | 1.54 |
+
+Absolute us per 20 ms frame (Kiln before to after): CELT stereo c0 30.3 to 18.8, c5 48.3 to 36.4;
+CELT mono c0 15.6 to 9.9, c5 31.4 to 25.5; SILK c0 122.7 to 111.0, c5 143.9 to 126.3; hybrid c0
+120.2 to 109.1, c5 145.0 to 129.1.
+
+What was kept (all x64-only in effect):
+
+- **PVQ search** (`EncPvqKernel`). Measured with a replay of 147,672 real `alg_quant` calls, the
+  search cost 11.7 us per stereo frame; most of it was not the pulse loop. The per-band sign split
+  and the final sign restore were branchy scalar loops over random signs (about 110 ns per call of
+  mispredictions) and are now branch-free vector selects. The pulse loop computes every candidate's
+  ratio `num/den` in one pass and accepts the arg-max only when exactly one candidate is within
+  2^-18 of the maximum; any tie or near-tie re-runs the exact scalar-order cross-multiply walk for
+  that pulse, so the selected pulse, and therefore the bytes, are identical (the replay compares
+  every call against `PvqSearchScalar`: 0 mismatches; 1248 fallbacks in 16,031 frames). For
+  `n` of 4 to 16 the ratios stay in registers. Result: 11.7 to 5.4 us per stereo frame.
+- **Stereo pre-emphasis** (`EncKernels.PreEmphasisStereo`): the interleaved 48 kHz stereo path was
+  the scalar loop (2 us per frame); it is now four frames per pass with the same multiply and add.
+- **SILK NSQ without warping** (`SilkNsqVec`): when the warping coefficient is zero (the high-rate
+  case, which includes the 20 kbps WB and the hybrid configurations) every `Smlawb` of the warped
+  chain multiplies by zero, so the all-pass cascade is a one-position shift register and the eight
+  taps are independent multiply-accumulates instead of a serial chain. About 10 % of the SILK frame.
+- **SILK input high-pass**: the biquad memory was read and written through class fields each sample
+  on a serial chain; it is now held in locals for the block.
+
+What was tried and rejected:
+
+- A scalar single-state kernel for the delayed-decision quantizer when one state is live (complexity
+  0 to 3 at high rate), using lane 0 of the same history arrays. Bit-exact (hashes identical) but no
+  faster than the lane-parallel kernel (122 vs 123 us), so it was dropped.
+- Branch-free selection of the two quantizer levels in that scalar kernel: no change, so the
+  quantizer is not branch-misprediction bound.
+- Storing the PVQ `y` update as a vector read-modify-write to keep store forwarding: no change.
+
+What is left and why. SILK and hybrid at complexity 0 are still 2.0x and 3.0x. In a profile of the
+SILK WB 20k frame (111 us) the delayed-decision NSQ is about 55 us over five rate-loop iterations
+(roughly 36 ns, or 190 cycles, per sample, a serial chain through the quantization decision), the
+entropy coder 13 us (it re-encodes indices and pulses in every iteration), NLSF processing 9 us,
+pitch analysis 9 us, the input resampler 5.5 us, the high-pass 4 us and Burg 4.6 us. libopus does the
+same rate loop with a greedy, unwarped quantizer at c0 (its whole frame is 54 us), so the remaining
+gap is mostly the quality-bearing delayed-decision work that the frozen quality floors require. A
+compiler-level look (`DOTNET_JitDisasm`) shows the NSQ loop spilling most of its locals; splitting
+the per-sample work into smaller methods or restructuring the loop-carried state is the next thing
+to try. Hybrid c5 (1.54) and the NLSF, entropy and pitch stages are the other open items.
 
 ### ENC-CELT-1: CELT encoder PVQ/prefilter/analysis hot paths
 

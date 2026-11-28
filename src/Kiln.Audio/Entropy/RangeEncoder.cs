@@ -73,6 +73,17 @@ internal ref struct RangeEncoder
     /// </remarks>
     public readonly int RangeBytes => _done ? _frameBytes : _offs + _endOffs;
 
+    /// <summary>Gets the number of range-coded bytes written at the front of the buffer so far.</summary>
+    public readonly int FrontBytes => _offs;
+
+    /// <summary>Copies the bytes written so far at the front of the buffer into <paramref name="destination"/>.</summary>
+    /// <param name="destination">At least <see cref="FrontBytes"/> long.</param>
+    public readonly void CopyFrontBytesTo(Span<byte> destination) => _buffer[.._offs].CopyTo(destination);
+
+    /// <summary>Puts front bytes saved with <see cref="CopyFrontBytesTo"/> back into this encoder's own buffer.</summary>
+    /// <param name="saved">The saved bytes.</param>
+    public readonly void RestoreFrontBytes(ReadOnlySpan<byte> saved) => saved.CopyTo(_buffer);
+
     /// <summary>
     /// Returns the number of whole bits used so far (RFC 6716 §5.1.6).
     /// </summary>

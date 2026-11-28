@@ -111,6 +111,7 @@ internal sealed partial class CeltSynthesizer
             throw new System.ArgumentException("The PCM destination is too short for the frame.", nameof(pcmOut));
         }
 
+        NormalizeHistory();
         if (_plcLossCount >= 5 || startBand != 0)
         {
             PlcNoise(lm, startBand, pcmOut);
@@ -353,6 +354,7 @@ internal sealed partial class CeltSynthesizer
 
         _plcSeed = seed;
 
+        AdvanceHistory(n);
         Denormalise<ScalarKernels>(frame, n, streamChannels, channels, duplicate: false);
         for (int channel = 0; channel < channels; channel++)
         {

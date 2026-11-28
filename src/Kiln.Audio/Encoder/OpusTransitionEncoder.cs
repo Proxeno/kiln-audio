@@ -61,7 +61,8 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
     /// <summary>Creates an encoder for the given bitrate and complexity.</summary>
     /// <param name="bitrateBps">The frame's CBR target bitrate; the 5 ms frame size is bitrate/1600 bytes.</param>
     /// <param name="complexity">The encoder complexity, 0 to 10.</param>
-    internal CeltRedundantEncoder(int bitrateBps, int complexity)
+    /// <param name="mode">The performance mode.</param>
+    internal CeltRedundantEncoder(int bitrateBps, int complexity, OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
         _encoder = new CeltEncoder(
             OpusFrameDuration.Ms5,
@@ -70,7 +71,8 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
             channels: 1,
             InputResampler.InternalSampleRate,
             useVbr: false,
-            constrainedVbr: true);
+            constrainedVbr: true,
+            mode);
         _resetEachFrame = true;
     }
 
@@ -205,19 +207,16 @@ internal static class OpusTransitionEncoder
 
         if (mode == OpusMode.Hybrid)
         {
-            // The presence flag is explicit, so availability must be decided before writing it.
-            if (redundancy && maxFrameBytes - nbComprBytes - 1 < bytes)
+            // The presence flag is explicit, so availability must be decided before writing it. A requested
+            // redundant frame that has no room is dropped, but the flag still has to say so whenever the decoder
+            // will read it (it does when 37 bits fit in the frame).
+            bool send = redundancy && maxFrameBytes - nbComprBytes - 1 >= bytes;
+            if (send || tell + 37 <= 8 * nbComprBytes)
             {
-                return false;
+                encoder.EncodeBitLogp(send ? 1 : 0, 12);
             }
 
-            // Hybrid frames always signal the flag when there is room for it and the frame data.
-            if (redundancy || tell + 37 <= 8 * nbComprBytes)
-            {
-                encoder.EncodeBitLogp(redundancy ? 1 : 0, 12);
-            }
-
-            if (!redundancy)
+            if (!send)
             {
                 return false;
             }
@@ -269,6 +268,41 @@ internal static class OpusTransitionEncoder
         bool redundancy,
         bool celtToSilk,
         Span<byte> frameData,
+        out uint finalRange) =>
+        EncodeSilkOnlyFrame(
+            silkEncoder, redundantCelt, pcm, frameSamples, bitrateBps, maxFrameBytes, bandwidth, redundancy,
+            celtToSilk, maxFrameBytes, frameData, out finalRange);
+
+    /// <summary>
+    /// <see cref="EncodeSilkOnlyFrame(ISilkLayerEncoder, IRedundantCeltEncoder, ReadOnlySpan{short}, int, int, int, OpusBandwidth, bool, bool, Span{byte}, out uint)"/>
+    /// with a separate limit for what the redundant frame may be appended to: in CBR the packet, redundant
+    /// frame included, must stay within the nominal size even though the SILK layer's own capacity is larger.
+    /// </summary>
+    /// <param name="silkEncoder">Writes the SILK layer's symbols.</param>
+    /// <param name="redundantCelt">Encodes the redundant CELT frame.</param>
+    /// <param name="pcm">One frame of mono input.</param>
+    /// <param name="frameSamples">The frame length in samples.</param>
+    /// <param name="bitrateBps">The target bitrate.</param>
+    /// <param name="maxFrameBytes">The frame capacity in bytes, excluding the TOC byte.</param>
+    /// <param name="bandwidth">The SILK bandwidth.</param>
+    /// <param name="redundancy">Whether the transition wants a redundant frame.</param>
+    /// <param name="celtToSilk">Whether the transition is CELT to SILK.</param>
+    /// <param name="redundancyLimitBytes">The size the main frame plus the redundant frame must not exceed.</param>
+    /// <param name="frameData">Destination for the payload.</param>
+    /// <param name="finalRange">Receives the decoder's expected final range.</param>
+    /// <returns>The number of payload bytes written.</returns>
+    internal static int EncodeSilkOnlyFrame(
+        ISilkLayerEncoder silkEncoder,
+        IRedundantCeltEncoder redundantCelt,
+        ReadOnlySpan<short> pcm,
+        int frameSamples,
+        int bitrateBps,
+        int maxFrameBytes,
+        OpusBandwidth bandwidth,
+        bool redundancy,
+        bool celtToSilk,
+        int redundancyLimitBytes,
+        Span<byte> frameData,
         out uint finalRange)
     {
         ArgumentNullException.ThrowIfNull(silkEncoder);
@@ -313,7 +347,7 @@ internal static class OpusTransitionEncoder
         }
 
         bool hasRedundancy = TryEncodeSignalling(
-            ref encoder, OpusMode.Silk, redundancy, celtToSilk, 0, maxFrameBytes, bitrateBps,
+            ref encoder, OpusMode.Silk, redundancy, celtToSilk, 0, Math.Min(maxFrameBytes, redundancyLimitBytes), bitrateBps,
             out int redundancyBytes, redundantCelt.FrameBytes);
         if (encoder.Error)
         {
@@ -337,7 +371,7 @@ internal static class OpusTransitionEncoder
         }
 
         int written = encoder.RangeBytes;
-        if (written > mainBytes || mainBytes + redundancyBytes > maxFrameBytes)
+        if (written > mainBytes || mainBytes + redundancyBytes > Math.Min(maxFrameBytes, redundancyLimitBytes))
         {
             throw new InvalidOperationException("The redundant frame does not fit in the frame budget.");
         }

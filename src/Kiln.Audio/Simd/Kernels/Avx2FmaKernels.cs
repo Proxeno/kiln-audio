@@ -12,6 +12,14 @@ internal readonly partial struct Avx2FmaKernels : ICeltKernels, ISilkEncoderKern
 
     public static AudioKernelTier Tier => AudioKernelTier.Avx2Fma;
 
+    /// <summary>Hardware 12-bit reciprocal square root plus one Newton-Raphson step (about 23 bits).</summary>
+    [MethodImpl(Inline)]
+    public static float FastRsqrt(float x)
+    {
+        float y = System.Runtime.Intrinsics.Vector128.ToScalar(System.Runtime.Intrinsics.X86.Sse.ReciprocalSqrtScalar(System.Runtime.Intrinsics.Vector128.CreateScalarUnsafe(x)));
+        return y * MathF.FusedMultiplyAdd(-0.5f * x * y, y, 1.5f);
+    }
+
     [MethodImpl(Inline)]
     public static void ScaleCopy(Span<float> destination, ReadOnlySpan<float> source, float gain) =>
         DecKernels.ScaleCopy(destination, source, gain, useVector: true);

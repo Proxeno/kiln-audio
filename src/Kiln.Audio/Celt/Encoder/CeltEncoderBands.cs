@@ -40,6 +40,7 @@ internal sealed class CeltEncoderBands
     private readonly int[] _pulses = new int[BandCount];
     private readonly int[] _tfResolution = new int[BandCount];
     private int _band;
+
     private int _spread;
     private int _intensity;
 
