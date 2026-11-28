@@ -130,13 +130,15 @@ public sealed class OpusEncoder : IDisposable
                     channels: 1,
                     useInbandFec: true,
                     options.PacketLossPercent,
-                    useDtx: false);
+                    useDtx: false,
+                    options.PerformanceMode);
                 _silkLayer = new SilkFecLayerAdapter(_silkPacket);
             }
             else
             {
                 _silk = new SilkEncoderCore(
-                    48000, silkRate, frameDurationMs, options.BitrateBps, options.Complexity, options.UseCbr);
+                    48000, silkRate, frameDurationMs, options.BitrateBps, options.Complexity, options.UseCbr,
+                    options.PerformanceMode);
                 _silkLayer = new SilkLayerAdapter(_silk);
             }
 
@@ -147,8 +149,10 @@ public sealed class OpusEncoder : IDisposable
                 channels: 1,
                 48000,
                 options.UseVbr,
-                options.ConstrainedVbr);
-            _redundantCelt = new CeltRedundantEncoder(Math.Clamp(options.BitrateBps, 3200, 257 * 1600), options.Complexity);
+                options.ConstrainedVbr,
+                options.PerformanceMode);
+            _redundantCelt = new CeltRedundantEncoder(
+                Math.Clamp(options.BitrateBps, 3200, 257 * 1600), options.Complexity, options.PerformanceMode);
             _autoFrameSamples = frameDurationMs * 48;
 
             // The reference seeds its voice estimate from the application and refines it with a
@@ -201,7 +205,8 @@ public sealed class OpusEncoder : IDisposable
                 options.Channels,
                 options.UseInbandFec,
                 options.PacketLossPercent,
-                options.UseDtx);
+                options.UseDtx,
+                options.PerformanceMode);
             _silkFrameSamples = options.SampleRate * frameDurationMs / 1000 * options.Channels;
             _conversionBuffer = new short[_silkFrameSamples];
             _subFrameData = [];
@@ -262,7 +267,8 @@ public sealed class OpusEncoder : IDisposable
             options.Channels,
             options.SampleRate,
             options.UseVbr,
-            options.ConstrainedVbr);
+            options.ConstrainedVbr,
+            options.PerformanceMode);
         _subFrameSamples = _encoder.FrameSamples;
         _inputFrameSamples = _subFrameSamples * _subFrameCount * options.Channels;
         _silkFrameSamples = _inputFrameSamples;

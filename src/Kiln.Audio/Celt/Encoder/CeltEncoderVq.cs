@@ -33,6 +33,7 @@ internal static class CeltEncoderVq
     /// <param name="blocks">The number of short blocks (<c>B</c>).</param>
     /// <param name="spread">The spread decision, 0 to 3.</param>
     /// <param name="enc">The range encoder.</param>
+    /// <param name="relaxed">Whether to use the Relaxed-mode pulse search.</param>
     /// <returns>The collapse mask for the band (RFC 6716 §4.3.5).</returns>
     internal static int AlgQuant<TK>(
         Span<float> x,
@@ -43,13 +44,22 @@ internal static class CeltEncoderVq
         int k,
         int blocks,
         int spread,
-        ref RangeEncoder enc)
+        ref RangeEncoder enc,
+        bool relaxed = false)
         where TK : struct, IEncoderKernels
     {
         EncProf.Mark(30, "  qb: before pvq (split/theta/bookkeeping)");
         ExpRotation<TK>(x, n, 1, blocks, k, spread);
         EncProf.Mark(31, "  qb: spread rotation");
-        CeltEncoderKernels.PvqSearch(x, iy, signs, y, n, k);
+        if (relaxed)
+        {
+            EncPvqRelaxed.Search(x, iy, signs, y, n, k);
+        }
+        else
+        {
+            CeltEncoderKernels.PvqSearch(x, iy, signs, y, n, k);
+        }
+
         EncProf.Mark(32, "  qb: pvq search");
         EncodePulses(iy, n, k, ref enc);
         EncProf.Mark(33, "  qb: pulse index + entropy");

@@ -32,6 +32,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private const int IndependentCoding = 0;
     private const int ConditionalCoding = 2;
     private const int MaximumIterations = 6;
+    private const int RelaxedMaxIterations = 2;
 
     private readonly SilkEncoderState _state = new();
     private readonly SilkEncoderControl _control = new();
@@ -96,6 +97,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private int _hpPrevBand0Q15;
     private short[] _hpBuffer = [];
     private readonly AudioKernelTier _tier = AudioKernels.Select();
+    private readonly bool _relaxed;
+    private int _maxIterations = MaximumIterations;
 
     /// <summary>Creates and configures the encoder for one fixed mode.</summary>
     internal SilkEncoderCore(
@@ -104,8 +107,16 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         int durationMs,
         int bitrateBps,
         int complexity,
-        bool useCbr)
+        bool useCbr,
+        OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
+        _relaxed = mode == OpusPerformanceMode.Relaxed;
+        if (_relaxed)
+        {
+            // Relaxed: stop the CBR fill-up search after two extra quantizations once one result fits.
+            _maxIterations = RelaxedMaxIterations;
+        }
+
         _apiRate = apiRate;
         _internalRate = bandwidthHz;
         _durationMs = durationMs;
@@ -122,6 +133,11 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         _delayedDecisionStates = _state.HighRate != 0
             ? 1
             : (_complexity < 2 ? 4 : SilkNsqDelayedDecision.StatesForComplexity(_complexity));
+        if (_relaxed && _state.HighRate == 0)
+        {
+            // Relaxed: libopus-like state count instead of the four-state trellis at low complexity.
+            _delayedDecisionStates = _complexity < 4 ? 1 : (_complexity < 8 ? 2 : 3);
+        }
 
         _resampler = new SilkInputResampler(apiRate, bandwidthHz);
         _resampled = new short[bandwidthHz * durationMs / 1000];
@@ -792,6 +808,16 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             _state.WarpingQ16 = warpingQ16;
         }
 
+        if (_relaxed)
+        {
+            // Relaxed: half the NLSF survivors, and no warped shaping below complexity 6.
+            _state.NlsfMsvqSurvivors = Math.Max(2, _state.NlsfMsvqSurvivors >> 1);
+            if (complexity < 6)
+            {
+                _state.WarpingQ16 = 0;
+            }
+        }
+
         _state.PitchEstimationLpcOrder = Math.Min(_state.PitchEstimationLpcOrder, _state.PredictLpcOrder);
         _state.ShapeWinLength = (5 * fsKhz) + (2 * _state.LaShape);
 
@@ -984,7 +1010,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 }
             }
 
-            if (iter == MaximumIterations)
+            if (iter == MaximumIterations || (iter >= _maxIterations && foundLower))
             {
                 if (foundLower && (gainsId == gainsIdLower || nBits > maxBits))
                 {

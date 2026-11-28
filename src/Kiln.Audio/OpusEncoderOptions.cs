@@ -85,6 +85,15 @@ public sealed record OpusEncoderOptions
     public bool UseCbr { get; init; }
 
     /// <summary>
+    /// Speed/quality trade-off. Default <see cref="OpusPerformanceMode.Precise"/>, which produces
+    /// exactly the output of Kiln 1.0. <see cref="OpusPerformanceMode.Relaxed"/> uses cheaper
+    /// searches (fewer noise-shaping quantizer states, a cheaper pitch search, a lane-parallel
+    /// pulse search and similar) and non-bit-exact math: it encodes faster at a small cost in
+    /// signal-to-noise ratio. The packets are standard Opus and any decoder reads them.
+    /// </summary>
+    public OpusPerformanceMode PerformanceMode { get; init; } = OpusPerformanceMode.Precise;
+
+    /// <summary>
     /// Validates every field, including that <see cref="Application"/>, <see cref="FrameDuration"/>
     /// and a non-null <see cref="Bandwidth"/> are defined enum values.
     /// </summary>
@@ -117,6 +126,11 @@ public sealed record OpusEncoderOptions
         {
             throw new ArgumentOutOfRangeException(
                 nameof(PacketLossPercent), PacketLossPercent, "Packet loss must be between 0 and 100 percent.");
+        }
+
+        if (!Enum.IsDefined(PerformanceMode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(PerformanceMode), PerformanceMode, "Unknown performance mode.");
         }
 
         if (Bandwidth is { } bandwidth && !Enum.IsDefined(bandwidth))
