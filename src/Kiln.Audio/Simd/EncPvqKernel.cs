@@ -2,7 +2,9 @@
 
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Numerics;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Kiln.Audio.Simd;
 
@@ -97,7 +99,11 @@ internal static class EncPvqKernel
             pulsesLeft = 0;
         }
 
-        if (Vector128.IsHardwareAccelerated && n >= 4)
+        if (Sse.IsSupported && n >= 4 && n <= MaxRatioN)
+        {
+            SearchRatio(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
+        }
+        else if (Vector128.IsHardwareAccelerated && n >= 4)
         {
             SearchVector(ref xr, ref iyr, ref yr, n, pulsesLeft, ref xy, ref yy);
         }
@@ -118,6 +124,107 @@ internal static class EncPvqKernel
         }
 
         return yy;
+    }
+
+    private const int MaxRatioN = 256;
+
+    /// <summary>
+    /// x64 search: one branch-free pass computes every candidate's ratio <c>num/den</c>; when exactly one
+    /// candidate lies within 2^-18 (relative) of the maximum ratio it is the scalar loop's winner (every
+    /// other candidate loses to it by far more than the rounding of the scalar loop's two cross products,
+    /// and it beats any running best before it). Any other case (ties, near-ties, NaN) re-runs the exact
+    /// scalar-order walk for that pulse, so the result is bit-identical to the scalar reference.
+    /// </summary>
+    [SkipLocalsInit]
+    private static void SearchRatio(
+        ref float xr, ref int iyr, ref float yr, int n, int pulsesLeft, ref float xy, ref float yy)
+    {
+        Span<float> ratio = stackalloc float[MaxRatioN];
+        ref float rr = ref MemoryMarshal.GetReference(ratio);
+        int groupEnd = n & ~3;
+        for (int i = 0; i < pulsesLeft; i++)
+        {
+            yy += 1f;
+            Vector128<float> xyv = Vector128.Create(xy);
+            Vector128<float> yyv = Vector128.Create(yy);
+            Vector128<float> vmax = Vector128.Create(-1f);
+            int j = 0;
+            for (; j < groupEnd; j += 4)
+            {
+                Vector128<float> rxy = xyv + Vector128.LoadUnsafe(ref xr, (nuint)j);
+                rxy *= rxy;
+                Vector128<float> r = rxy / (yyv + Vector128.LoadUnsafe(ref yr, (nuint)j));
+                r.StoreUnsafe(ref rr, (nuint)j);
+                vmax = Vector128.Max(vmax, r);
+            }
+
+            float m = Math.Max(Math.Max(vmax.GetElement(0), vmax.GetElement(1)), Math.Max(vmax.GetElement(2), vmax.GetElement(3)));
+            for (; j < n; j++)
+            {
+                float num = xy + Unsafe.Add(ref xr, j);
+                num *= num;
+                float r = num / (yy + Unsafe.Add(ref yr, j));
+                Unsafe.Add(ref rr, j) = r;
+                m = Math.Max(m, r);
+            }
+
+            int bestId = -1;
+            if (m > 0f && m < 1e30f)
+            {
+                float threshold = m * (1f - (1f / 262144f));
+                Vector128<float> tv = Vector128.Create(threshold);
+                int count = 0;
+                int found = 0;
+                j = 0;
+                for (; j < groupEnd; j += 4)
+                {
+                    uint mask = Vector128.GreaterThanOrEqual(Vector128.LoadUnsafe(ref rr, (nuint)j), tv).ExtractMostSignificantBits();
+                    if (mask != 0)
+                    {
+                        count += BitOperations.PopCount(mask);
+                        found = j + BitOperations.TrailingZeroCount(mask);
+                    }
+                }
+
+                for (; j < n; j++)
+                {
+                    if (Unsafe.Add(ref rr, j) >= threshold)
+                    {
+                        count++;
+                        found = j;
+                    }
+                }
+
+                if (count == 1)
+                {
+                    bestId = found;
+                }
+            }
+
+            if (bestId < 0)
+            {
+                bestId = 0;
+                float bestNum = -VeryLarge;
+                float bestDen = 0f;
+                for (j = 0; j < n; j++)
+                {
+                    float num = xy + Unsafe.Add(ref xr, j);
+                    num *= num;
+                    float den = yy + Unsafe.Add(ref yr, j);
+                    if (bestDen * num > den * bestNum)
+                    {
+                        bestDen = den;
+                        bestNum = num;
+                        bestId = j;
+                    }
+                }
+            }
+
+            xy += Unsafe.Add(ref xr, bestId);
+            yy += Unsafe.Add(ref yr, bestId);
+            Unsafe.Add(ref yr, bestId) += 2f;
+            Unsafe.Add(ref iyr, bestId)++;
+        }
     }
 
     private static void SearchVector(
