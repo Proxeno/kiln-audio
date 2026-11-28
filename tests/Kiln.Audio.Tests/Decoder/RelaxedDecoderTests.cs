@@ -95,7 +95,7 @@ public class RelaxedDecoderTests
 
             _output.WriteLine(FormattableString.Invariant(
                 $"vector {vector:D2} {channels} ch: Relaxed vs Precise SNR {snr:F1} dB, max difference {maxDifference} LSB"));
-            snr.Should().BeGreaterThanOrEqualTo(55.0, "vector {0:D2} {1} ch", vector, channels);
+            snr.Should().BeGreaterThanOrEqualTo(90.0, "vector {0:D2} {1} ch", vector, channels);
         }
     }
 
@@ -103,7 +103,7 @@ public class RelaxedDecoderTests
     [InlineData(2)]
     [InlineData(4)]
     [InlineData(6)]
-    public void Silk_and_hybrid_frames_decode_the_same_in_both_modes_until_celt_is_involved(int vector)
+    public void Silk_only_vectors_are_identical_in_both_modes_and_hybrid_stays_close(int vector)
     {
         // Vector 02 and 04 are SILK-only: integer arithmetic, so Relaxed must be identical.
         if (vector is 2 or 4)
@@ -116,7 +116,7 @@ public class RelaxedDecoderTests
             double snr = Snr(
                 Decode(vector, Rate, 1, OpusPerformanceMode.Precise).Pcm,
                 Decode(vector, Rate, 1, OpusPerformanceMode.Relaxed).Pcm);
-            snr.Should().BeGreaterThanOrEqualTo(55.0);
+            snr.Should().BeGreaterThanOrEqualTo(90.0);
         }
     }
 
@@ -134,7 +134,7 @@ public class RelaxedDecoderTests
 
         double snr = Snr(precise, relaxed);
         _output.WriteLine(FormattableString.Invariant($"vector {vector:D2}: concealed stream, Relaxed vs Precise SNR {snr:F1} dB"));
-        snr.Should().BeGreaterThanOrEqualTo(40.0);
+        snr.Should().BeGreaterThanOrEqualTo(45.0);
     }
 
     [Fact]
@@ -152,8 +152,10 @@ public class RelaxedDecoderTests
             {
                 bool lbrr = OpusPacket.HasLbrr(packet);
                 OpusMode mode = OpusToc.Parse(packet[0]).Mode;
-                int n1 = precise.Decode(packet, a, decodeFec: lbrr);
-                int n2 = relaxed.Decode(packet, b, decodeFec: lbrr);
+                // decodeFec on a packet without LBRR conceals the lost interval instead, so both the
+                // recovered and the concealed outcome are covered.
+                int n1 = precise.Decode(packet, a, decodeFec: true);
+                int n2 = relaxed.Decode(packet, b, decodeFec: true);
                 relaxed.LastFecOutcome.Should().Be(precise.LastFecOutcome);
                 n2.Should().Be(n1);
                 if (mode == OpusMode.Silk)
@@ -176,7 +178,7 @@ public class RelaxedDecoderTests
             }
         }
 
-        _output.WriteLine($"{checkedPackets} packets decoded with FEC in both modes");
+        _output.WriteLine($"{checkedPackets} packets with LBRR data decoded with FEC in both modes");
     }
 
     [Theory]
@@ -300,7 +302,7 @@ public class RelaxedDecoderTests
 
             double snr = 10 * Math.Log10(signal / Math.Max(noise, 1e-30));
             _output.WriteLine($"{tier} Relaxed vs Scalar Precise, vector {vector:D2}: {snr:F1} dB");
-            snr.Should().BeGreaterThan(60.0);
+            snr.Should().BeGreaterThan(120.0);
         }
     }
 
