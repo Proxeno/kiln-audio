@@ -136,13 +136,27 @@ internal static class OpusHybridEncoder
         // In CBR the packet, redundant frame included, must not outgrow the nominal size, so the frame is
         // bounded by its CBR size here and a redundant frame that would not fit inside it is not sent.
         int budget = cbrBounded ? Math.Min(maxFrameBytes, nbComprBytes) : maxFrameBytes;
+
+        // In CBR the main payload normally fills the whole nominal budget, which leaves the signalling
+        // helper no room for a redundant frame. Offer it the smaller main payload that would make room
+        // when at least the 37 bits the hybrid flag needs still fit after SILK.
+        int signallingBytes = nbComprBytes;
+        if (cbrBounded && redundancy)
+        {
+            int prospectiveBytes = budget - redundantCelt.FrameBytes - 1;
+            if (enc.Tell() + 37 <= 8 * prospectiveBytes)
+            {
+                signallingBytes = prospectiveBytes;
+            }
+        }
+
         bool hasRedundancy = OpusTransitionEncoder.TryEncodeSignalling(
-            ref enc, OpusMode.Hybrid, redundancy, celtToSilk, nbComprBytes, budget, bitrateBps,
+            ref enc, OpusMode.Hybrid, redundancy, celtToSilk, signallingBytes, budget, bitrateBps,
             out int redundancyBytes, redundantCelt.FrameBytes);
         if (hasRedundancy)
         {
-            // The reference shrinks the CELT budget to leave room for the redundant frame.
-            nbComprBytes = Math.Min(budget - redundancyBytes, nbComprBytes);
+            // Keep the reduced main payload that made room for the redundant frame.
+            nbComprBytes = Math.Min(budget - redundancyBytes, signallingBytes);
         }
 
         nbComprBytes = Math.Max(2, Math.Min(maxFrameBytes, nbComprBytes));

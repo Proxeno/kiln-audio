@@ -151,6 +151,9 @@ internal sealed class SilkStereoPacketEncoder
         int payloadBits = EncodeInto(ref rangeEncoder, pcm, Math.Min(packet.Length + 1, 1276));
         if (LastPacketSuppressed)
         {
+            // A DTX-suppressed packet carries no range-coded payload, so the decoder reports a
+            // final range of zero; do not leave the previous frame's value in place.
+            FinalRange = 0;
             return 0;
         }
 

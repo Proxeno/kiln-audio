@@ -103,7 +103,6 @@ public class SilkNsqByteHashTests
         short[] pcm = Synthesize(c.Channels, 48000 * 3);
         var packets = new List<(byte[] Packet, uint Range)>();
         int suppressed = 0;
-        uint lastTransmittedRange = 0;
         using (AudioKernels.Scope(AudioKernelTier.Scalar))
         {
             using var encoder = CreateEncoder(c);
@@ -115,18 +114,14 @@ public class SilkNsqByteHashTests
                 byte[] packet = buffer.AsSpan(0, length).ToArray();
                 if (c.Dtx && length == 1)
                 {
-                    // A DTX-suppressed packet is one TOC byte and no range-coded payload. The encoder
-                    // leaves FinalRange at the last transmitted frame's value (a pre-existing accounting
-                    // gap, unrelated to the CBR restore), while a decoder reports 0 for such a packet and
-                    // the .bit format skips the range check when the stored range is 0. Record it as 0 so
-                    // that every transmitted packet is still range-checked exactly.
-                    Assert.Equal(lastTransmittedRange, encoder.FinalRange);
+                    // A DTX-suppressed packet is one TOC byte and no range-coded payload, so the encoder
+                    // must report range 0 just as a decoder does; feed that reported value to libopus.
+                    Assert.Equal(0u, encoder.FinalRange);
                     suppressed++;
-                    packets.Add((packet, 0u));
+                    packets.Add((packet, encoder.FinalRange));
                 }
                 else
                 {
-                    lastTransmittedRange = encoder.FinalRange;
                     packets.Add((packet, encoder.FinalRange));
                 }
             }

@@ -85,8 +85,9 @@ public sealed record OpusEncoderOptions
     public bool UseCbr { get; init; }
 
     /// <summary>
-    /// Speed/quality trade-off. Default <see cref="OpusPerformanceMode.Precise"/>, which produces
-    /// exactly the output of Kiln 1.0. <see cref="OpusPerformanceMode.Relaxed"/> uses a cheaper
+    /// Speed/quality trade-off. Default <see cref="OpusPerformanceMode.Precise"/>, which matches
+    /// Kiln 1.0 except for CBR packets, whose low-rate fill and nominal sizing were corrected in
+    /// 1.1.0. <see cref="OpusPerformanceMode.Relaxed"/> uses a cheaper
     /// SILK rate loop and quantizer (a single greedy state at low complexity, fewer trellis states
     /// above it, a narrower NLSF search, no warped shaping below complexity 6) and skips the CELT
     /// TF analysis and two-pass coarse energy at low complexity. It encodes faster at a small cost

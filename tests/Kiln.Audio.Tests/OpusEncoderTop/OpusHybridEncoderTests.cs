@@ -94,6 +94,36 @@ public class OpusHybridEncoderTests
         }
     }
 
+    [Fact]
+    public void Cbr_hybrid_retains_a_requested_redundant_frame_within_the_nominal_budget()
+    {
+        // The stub SILK layer emits an inactive frame in far fewer bits than the CBR budget, so a
+        // two-byte redundant frame fits once the main payload shrinks to make room for it.
+        var countingRedundant = new CountingRedundantCeltEncoder();
+        var celt = new CeltEncoder(OpusFrameDuration.Ms20, Bitrate, 5, channels: 1, 48000, useVbr: false, constrainedVbr: false);
+        short[] pcm = EncoderTestSignals.Tone(FrameSamples);
+        var payload = new byte[1274];
+
+        int bytes = OpusHybridEncoder.Encode(
+            new MockInactiveSilkEncoder(), celt, countingRedundant, pcm, 48000, FrameSamples, Bitrate,
+            payload.Length, endBand: 21, redundancy: true, celtToSilk: false, constantBitrate: true,
+            payload, out uint range);
+
+        int nominal = (Bitrate * FrameSamples / (48000 * 8)) - 1;
+        countingRedundant.Calls.Should().Be(1, "the requested redundant frame fits the nominal CBR budget");
+        bytes.Should().Be(nominal - 1, "the main payload shrinks by the signalling byte and takes the redundant frame");
+        bytes.Should().BeLessThanOrEqualTo(nominal);
+
+        byte toc = OpusTocBuilder.Build(OpusMode.Hybrid, OpusBandwidth.Fullband, OpusFrameDuration.Ms20, stereo: false);
+        var packet = new byte[bytes + 2];
+        int written = OpusPacketWriter.Write(packet, toc, [bytes], payload.AsSpan(0, bytes));
+
+        using var decoder = new OpusDecoder(new OpusDecoderOptions { SampleRate = 48000, Channels = 1 });
+        var decoded = new short[FrameSamples];
+        decoder.Decode(packet.AsSpan(0, written), decoded).Should().Be(FrameSamples);
+        decoder.FinalRange.Should().Be(range);
+    }
+
     private static (byte[] Packet, uint Range) EncodeHybridPacket(
         OpusBandwidth bandwidth, bool redundancy, bool celtToSilk, int frame)
     {
@@ -113,5 +143,23 @@ public class OpusHybridEncoderTests
         int written = OpusPacketWriter.Write(packet, toc, [bytes], payload.AsSpan(0, bytes));
         uint expectedRange = range;
         return (packet.AsSpan(0, written).ToArray(), expectedRange);
+    }
+
+    /// <summary>A silent redundant CELT stub that counts how often it is asked to encode.</summary>
+    private sealed class CountingRedundantCeltEncoder : IRedundantCeltEncoder
+    {
+        private readonly MockSilentRedundantCeltEncoder _inner = new();
+
+        public int Calls { get; private set; }
+
+        public uint FinalRange => _inner.FinalRange;
+
+        public int FrameBytes => _inner.FrameBytes;
+
+        public void Encode(ReadOnlySpan<short> pcm, int endBand, Span<byte> destination)
+        {
+            Calls++;
+            _inner.Encode(pcm, endBand, destination);
+        }
     }
 }

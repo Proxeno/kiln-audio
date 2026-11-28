@@ -158,7 +158,9 @@ Reproduce with `KILN_BENCH_RELAXED=1 dotnet run -c Release --project bench/Kiln.
 
 ### Encoder
 
-`OpusEncoderOptions.PerformanceMode` is fixed per instance. `Precise` is byte-identical to Kiln 1.0.
+`OpusEncoderOptions.PerformanceMode` is fixed per instance. `Precise` keeps Kiln 1.0's output for
+VBR and non-CBR frames; CBR packets changed in 1.1.0 when CBR-FIX corrected the low-rate SILK fill
+and the nominal CBR sizing.
 `Relaxed` is a per-instance flag read once per frame (SILK rate loop, quantizer choice, analysis
 switches) or once per call, never inside a per-sample or per-coefficient loop, so it did not need
 generic specialisation. The packets are standard Opus: libopus decodes them and the final range matches.
@@ -217,10 +219,11 @@ libopus reported "Range coder state mismatch". The defect both corrupted the str
 Precise SILK/hybrid rows (the earlier table showed ~2 to 3 dB); CBR-FIX uses the corrected restore in both
 modes, which is why the Precise SILK and hybrid CBR rows here are much higher and are now a fair baseline.
 CBR-FIX also sizes the automatic CELT fallback and the hybrid CBR frame to the nominal packet budget, so
-neither can emit one byte over the nominal size on a transition. Relaxed low-rate SILK CBR now fills the
-CBR budget instead of stopping at roughly half of it, which recovers ~0.6 dB at 12 kbps wideband complexity 0
+neither can emit one byte over the nominal size on a transition. The low-rate SILK CBR fill is narrowed to
+the frames that previously stopped at roughly half their budget: Relaxed now fills that budget, which
+recovers ~0.6 dB at 12 kbps wideband complexity 0
 (3.21 -> 3.85) and keeps Precise and Relaxed within the 1 dB limit; the cost is a few more rate-loop
-quantizations on those low-rate frames, while VBR and high-rate Relaxed are unchanged.
+quantizations on those low-rate frames, while VBR output stays unchanged.
 
 Reproduce: `KILN_BENCH_MODE=relaxed dotnet run -c Release --project bench/Kiln.Audio.Benchmarks -- micro enc run
 <pcm> 48000 <ch> <app> <bitrate> <bw> <cx> 7` (set `KILN_BENCH_SNR=1` for the SNR column).
