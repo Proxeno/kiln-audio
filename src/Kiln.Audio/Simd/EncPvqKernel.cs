@@ -26,14 +26,12 @@ namespace Kiln.Audio.Simd;
 /// </remarks>
 internal static class EncPvqKernel
 {
-    internal static List<(int N, int K, float[] X)>? Capture;
 
     private const float VeryLarge = 1e15f;
 
     /// <summary>Vector greedy PVQ search; see <c>CeltEncoderKernels.PvqSearch</c> for the contract.</summary>
     internal static float Search(Span<float> x, Span<int> iy, Span<float> signs, Span<float> y, int n, int k)
     {
-        Capture?.Add((n, k, x[..n].ToArray()));
         ref float xr = ref MemoryMarshal.GetReference(x);
         ref int iyr = ref MemoryMarshal.GetReference(iy);
         ref float signsr = ref MemoryMarshal.GetReference(signs);

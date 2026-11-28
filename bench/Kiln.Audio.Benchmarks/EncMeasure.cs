@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using Kiln.Audio.Celt.Encoder;
 using Kiln.Audio.Simd;
 
 namespace Kiln.Audio.Benchmarks;
@@ -28,12 +27,6 @@ internal static class EncMeasure
             }
 
             WriteShorts(Path.Combine(args[3], "stereo48.pcm"), [.. stereo]);
-            return;
-        }
-
-        if (args[2] == "pvq")
-        {
-            PvqReplay(args[3]);
             return;
         }
 
@@ -131,97 +124,6 @@ internal static class EncMeasure
                 }
             }
         }
-    }
-
-    private static void PvqReplay(string path)
-    {
-        byte[] bytes = File.ReadAllBytes(path);
-        var pcm = new short[bytes.Length / 2];
-        Buffer.BlockCopy(bytes, 0, pcm, 0, bytes.Length);
-        var cap = new List<(int N, int K, float[] X)>();
-        EncPvqKernel.Capture = cap;
-        var enc = new OpusEncoder(new OpusEncoderOptions { Application = OpusApplication.RestrictedLowDelay, SampleRate = 48000, Channels = 2, BitrateBps = 64000, FrameDuration = OpusFrameDuration.Ms20, Complexity = 0, UseCbr = true });
-        var packet = new byte[1276];
-        for (int f = 0; f < 3000; f++)
-        {
-            enc.Encode(pcm.AsSpan(f * 1920, 1920), packet);
-        }
-
-        EncPvqKernel.Capture = null;
-        enc.Dispose();
-        var x = new float[512];
-        var iy = new int[512];
-        var sg = new float[512];
-        var y = new float[512];
-        var iy2 = new int[512];
-        var sg2 = new float[512];
-        var y2 = new float[512];
-        var x2 = new float[512];
-        int bad = 0;
-        foreach ((int n, int k, float[] src) in cap)
-        {
-            src.CopyTo(x, 0);
-            src.CopyTo(x2, 0);
-            float a1 = EncPvqKernel.Search(x, iy, sg, y, n, k);
-            float a2 = CeltEncoderKernels.PvqSearchScalar(x2, iy2, sg2, y2, n, k);
-            if (a1 != a2 || !iy.AsSpan(0, n).SequenceEqual(iy2.AsSpan(0, n)))
-            {
-                bad++;
-            }
-        }
-
-        var hist = new SortedDictionary<int, (int C, long K)>();
-        foreach ((int n, int k, float[] _) in cap)
-        {
-            hist.TryGetValue(n, out var h);
-            hist[n] = (h.C + 1, h.K + k);
-        }
-
-        Console.WriteLine(string.Join(" ", hist.Select(e => $"n{e.Key}:{e.Value.C}/{e.Value.K}")));
-        double best = double.MaxValue;
-        for (int rep = 0; rep < 15; rep++)
-        {
-            long t0 = Stopwatch.GetTimestamp();
-            foreach ((int n, int k, float[] src) in cap)
-            {
-                src.CopyTo(x, 0);
-                EncPvqKernel.Search(x, iy, sg, y, n, k);
-            }
-
-            best = Math.Min(best, (Stopwatch.GetTimestamp() - t0) * 1e9 / Stopwatch.Frequency);
-        }
-
-        double copyBest = double.MaxValue;
-        for (int rep = 0; rep < 15; rep++)
-        {
-            long t0 = Stopwatch.GetTimestamp();
-            foreach ((int n, int k, float[] src) in cap)
-            {
-                src.CopyTo(x, 0);
-            }
-
-            copyBest = Math.Min(copyBest, (Stopwatch.GetTimestamp() - t0) * 1e9 / Stopwatch.Frequency);
-        }
-
-        foreach (int mode in new[] { 0, 1 })
-        {
-            double b2 = double.MaxValue;
-            for (int rep = 0; rep < 15; rep++)
-            {
-                long t0 = Stopwatch.GetTimestamp();
-                foreach ((int n, int k, float[] src) in cap)
-                {
-                    src.CopyTo(x, 0);
-                    EncPvqKernel.Search(x, iy, sg, y, n, mode == 0 ? 0 : Math.Min(k, n / 2));
-                }
-
-                b2 = Math.Min(b2, (Stopwatch.GetTimestamp() - t0) * 1e9 / Stopwatch.Frequency);
-            }
-
-            Console.WriteLine(FormattableString.Invariant($"mode{mode} ns/call={(b2 - copyBest) / cap.Count:F1}"));
-        }
-
-        Console.WriteLine(FormattableString.Invariant($"pvq calls={cap.Count} mismatches={bad} ns/call={(best - copyBest) / cap.Count:F1} us/frame(3000)={(best - copyBest) / 3000 / 1000:F3}"));
     }
 
     private static void WriteShorts(string path, short[] data)
