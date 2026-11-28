@@ -61,7 +61,8 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
     /// <summary>Creates an encoder for the given bitrate and complexity.</summary>
     /// <param name="bitrateBps">The frame's CBR target bitrate; the 5 ms frame size is bitrate/1600 bytes.</param>
     /// <param name="complexity">The encoder complexity, 0 to 10.</param>
-    internal CeltRedundantEncoder(int bitrateBps, int complexity)
+    /// <param name="mode">The performance mode.</param>
+    internal CeltRedundantEncoder(int bitrateBps, int complexity, OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
         _encoder = new CeltEncoder(
             OpusFrameDuration.Ms5,
@@ -70,7 +71,8 @@ internal sealed class CeltRedundantEncoder : IRedundantCeltEncoder
             channels: 1,
             InputResampler.InternalSampleRate,
             useVbr: false,
-            constrainedVbr: true);
+            constrainedVbr: true,
+            mode);
         _resetEachFrame = true;
     }
 

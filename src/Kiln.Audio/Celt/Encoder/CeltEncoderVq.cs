@@ -50,6 +50,7 @@ internal static class CeltEncoderVq
         ExpRotation<TK>(x, n, 1, blocks, k, spread);
         EncProf.Mark(31, "  qb: spread rotation");
         CeltEncoderKernels.PvqSearch(x, iy, signs, y, n, k);
+
         EncProf.Mark(32, "  qb: pvq search");
         EncodePulses(iy, n, k, ref enc);
         EncProf.Mark(33, "  qb: pulse index + entropy");

@@ -32,6 +32,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private const int IndependentCoding = 0;
     private const int ConditionalCoding = 2;
     private const int MaximumIterations = 6;
+    private const int RelaxedMaxIterations = 2;
+    private const int RelaxedFitShift = 1;
 
     private readonly SilkEncoderState _state = new();
     private readonly SilkEncoderControl _control = new();
@@ -65,6 +67,12 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private readonly short[] _delayedDecisionOutput = new short[SilkEncoderMath.MaxFrameLength];
     private readonly short[] _delayedDecisionPredictionQ12 = new short[2 * SilkEncoderMath.MaxLpcOrder];
     private readonly int _delayedDecisionStates;
+
+    // Relaxed with a single trellis state runs the greedy quantizer (SilkNsq) instead, libopus's own c0 shape.
+    private readonly bool _greedy;
+    private readonly SilkNsqState _nsqStart = new();
+    private readonly SilkNsqState _nsqLower = new();
+    private readonly SilkNsqState _nsqLbrr = new();
     private readonly SilkSideInfo _lastEncodedIndices = new();
     private readonly SilkSideInfo[] _encodedPerFrame =
     [
@@ -96,6 +104,8 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
     private int _hpPrevBand0Q15;
     private short[] _hpBuffer = [];
     private readonly AudioKernelTier _tier = AudioKernels.Select();
+    private readonly bool _relaxed;
+    private int _maxIterations = MaximumIterations;
 
     /// <summary>Creates and configures the encoder for one fixed mode.</summary>
     internal SilkEncoderCore(
@@ -104,8 +114,16 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         int durationMs,
         int bitrateBps,
         int complexity,
-        bool useCbr)
+        bool useCbr,
+        OpusPerformanceMode mode = OpusPerformanceMode.Precise)
     {
+        _relaxed = mode == OpusPerformanceMode.Relaxed;
+        if (_relaxed)
+        {
+            // Relaxed: stop the CBR fill-up search after two extra quantizations once one result fits.
+            _maxIterations = RelaxedMaxIterations;
+        }
+
         _apiRate = apiRate;
         _internalRate = bandwidthHz;
         _durationMs = durationMs;
@@ -122,7 +140,13 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         _delayedDecisionStates = _state.HighRate != 0
             ? 1
             : (_complexity < 2 ? 4 : SilkNsqDelayedDecision.StatesForComplexity(_complexity));
+        if (_relaxed && _state.HighRate == 0)
+        {
+            // Relaxed: libopus-like state count instead of the four-state trellis at low complexity.
+            _delayedDecisionStates = _complexity < 4 ? 1 : (_complexity < 8 ? 2 : 3);
+        }
 
+        _greedy = _relaxed && _delayedDecisionStates == 1;
         _resampler = new SilkInputResampler(apiRate, bandwidthHz);
         _resampled = new short[bandwidthHz * durationMs / 1000];
         _pitchAnalysis = new SilkPitchAnalysis(bandwidthHz / 1000, durationMs == 10 ? 2 : 4);
@@ -580,8 +604,19 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         ReadOnlySpan<int> inputQ3,
         Span<short> pulses,
         SilkNsqDelayedDecision delayed,
-        int[] tiltQ14)
+        int[] tiltQ14,
+        SilkNsqState? greedyState = null)
     {
+        if (_greedy)
+        {
+            SilkNsq.Process(
+                state, greedyState ?? state.Nsq, indices, inputQ3[..state.FrameLength], pulses,
+                control.PredCoefQ12[0], control.PredCoefQ12[1], control.LtpCoefQ14, control.Ar2Q13,
+                control.HarmShapeGainQ14, tiltQ14, control.LfShpQ14, control.GainsQ16, control.PitchL,
+                control.LambdaQ10, control.LtpScaleQ14);
+            return;
+        }
+
         control.PredCoefQ12[0].CopyTo(_delayedDecisionPredictionQ12.AsSpan(0, SilkEncoderMath.MaxLpcOrder));
         control.PredCoefQ12[1].CopyTo(
             _delayedDecisionPredictionQ12.AsSpan(SilkEncoderMath.MaxLpcOrder, SilkEncoderMath.MaxLpcOrder));
@@ -641,7 +676,15 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             control.GainsQ16, lbrr.GainsIndices, ref state.LbrrPrevLastGainIndex,
             conditionalCoding == ConditionalCoding ? 1 : 0, state.SubframeCount);
 
-        _delayedDecisionLbrr.CopyFullFrom(_delayedDecision);
+        if (_greedy)
+        {
+            _nsqLbrr.CopyFrom(state.Nsq);
+        }
+        else
+        {
+            _delayedDecisionLbrr.CopyFullFrom(_delayedDecision);
+        }
+
         // FEC-QUAL-1: the LBRR copy is requantized at a gain several steps coarser than the main
         // frame, so it wants a stronger rate penalty than the high-rate main path's lambda.
         int regularLambdaQ10 = control.LambdaQ10;
@@ -654,7 +697,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
         bool separateLbrrFilter = state.HighRate != 0;
         Quantize(
             state, control, lbrr, separateLbrrFilter ? _xfwLbrrQ3 : _xfwQ3, state.LbrrPulses[frameIndex],
-            _delayedDecisionLbrr, separateLbrrFilter ? control.TiltLbrrQ14 : control.TiltQ14);
+            _delayedDecisionLbrr, separateLbrrFilter ? control.TiltLbrrQ14 : control.TiltQ14, _nsqLbrr);
 
         control.LambdaQ10 = regularLambdaQ10;
         savedGains.CopyTo(control.GainsQ16);
@@ -798,6 +841,16 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
             _state.LtpQuantLowComplexity = 0;
             _state.NlsfMsvqSurvivors = 32;
             _state.WarpingQ16 = warpingQ16;
+        }
+
+        if (_relaxed)
+        {
+            // Relaxed: half the NLSF survivors, and no warped shaping below complexity 6.
+            _state.NlsfMsvqSurvivors = Math.Max(2, _state.NlsfMsvqSurvivors >> 1);
+            if (complexity < 6)
+            {
+                _state.WarpingQ16 = 0;
+            }
         }
 
         _state.PitchEstimationLpcOrder = Math.Min(_state.PitchEstimationLpcOrder, _state.PredictLpcOrder);
@@ -948,11 +1001,21 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
 
         RangeEncoder savedStart = rangeEncoder;
         RangeEncoder savedLower = default;
-        _delayedDecisionStart.CopyFrom(_delayedDecision);
+        if (_greedy)
+        {
+            _nsqStart.CopyFrom(_state.Nsq);
+        }
+        else
+        {
+            _delayedDecisionStart.CopyFrom(_delayedDecision);
+        }
+
         int seedStart = state.Indices.Seed;
         int ecPrevLagStart = state.EcPrevLagIndex;
         int ecPrevSignalStart = state.EcPrevSignalType;
 
+        // Relaxed accepts any result that fills most of the budget; Precise only one within 5 bits of it.
+        int fitWindow = _relaxed ? Math.Max(5, maxBits >> RelaxedFitShift) : 5;
         for (int iter = 0; ; iter++)
         {
             if (gainsId == gainsIdLower)
@@ -968,7 +1031,15 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 if (iter > 0)
                 {
                     rangeEncoder = savedStart;
-                    _delayedDecision.CopyFrom(_delayedDecisionStart);
+                    if (_greedy)
+                    {
+                        state.Nsq.CopyFrom(_nsqStart);
+                    }
+                    else
+                    {
+                        _delayedDecision.CopyFrom(_delayedDecisionStart);
+                    }
+
                     state.Indices.Seed = seedStart;
                     state.EcPrevLagIndex = ecPrevLagStart;
                     state.EcPrevSignalType = ecPrevSignalStart;
@@ -992,13 +1063,31 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 }
             }
 
-            if (iter == MaximumIterations)
+            if (iter == MaximumIterations || (iter >= _maxIterations && foundLower))
             {
                 if (foundLower && (gainsId == gainsIdLower || nBits > maxBits))
                 {
                     rangeEncoder = savedLower;
-                    _rangeLowerBytes.AsSpan(0, _rangeLowerCount).CopyTo(_rangeBuffer);
-                    _delayedDecision.CopyFrom(_delayedDecisionLower);
+                    if (_relaxed)
+                    {
+                        rangeEncoder.RestoreFrontBytes(_rangeLowerBytes.AsSpan(0, _rangeLowerCount));
+                    }
+                    else
+                    {
+                        // Kiln 1.0 behaviour, kept byte for byte in Precise: the saved copy comes from the
+                        // internal scratch buffer, which is not where a shared (SILK-only/hybrid) range coder writes.
+                        _rangeLowerBytes.AsSpan(0, _rangeLowerCount).CopyTo(_rangeBuffer);
+                    }
+
+                    if (_greedy)
+                    {
+                        state.Nsq.CopyFrom(_nsqLower);
+                    }
+                    else
+                    {
+                        _delayedDecision.CopyFrom(_delayedDecisionLower);
+                    }
+
                     state.Shape.LastGainIndex = lastGainIndexLower;
                 }
 
@@ -1021,7 +1110,7 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                     gainsIdUpper = gainsId;
                 }
             }
-            else if (nBits < maxBits - 5)
+            else if (nBits < maxBits - fitWindow)
             {
                 foundLower = true;
                 nBitsLower = nBits;
@@ -1030,9 +1119,26 @@ internal sealed class SilkEncoderCore : ISilkLayerEncoder
                 {
                     gainsIdLower = gainsId;
                     savedLower = rangeEncoder;
-                    _rangeLowerCount = rangeEncoder.RangeBytes;
-                    _rangeBuffer.AsSpan(0, _rangeLowerCount).CopyTo(_rangeLowerBytes);
-                    _delayedDecisionLower.CopyFrom(_delayedDecision);
+                    if (_relaxed)
+                    {
+                        _rangeLowerCount = rangeEncoder.FrontBytes;
+                        rangeEncoder.CopyFrontBytesTo(_rangeLowerBytes);
+                    }
+                    else
+                    {
+                        _rangeLowerCount = rangeEncoder.RangeBytes;
+                        _rangeBuffer.AsSpan(0, _rangeLowerCount).CopyTo(_rangeLowerBytes);
+                    }
+
+                    if (_greedy)
+                    {
+                        _nsqLower.CopyFrom(state.Nsq);
+                    }
+                    else
+                    {
+                        _delayedDecisionLower.CopyFrom(_delayedDecision);
+                    }
+
                     lastGainIndexLower = state.Shape.LastGainIndex;
                 }
             }

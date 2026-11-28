@@ -115,6 +115,7 @@ instances are independent and can run on different threads at the same time.
 | Packet loss concealment | SILK, CELT and hybrid (`DecodeLoss`, or an empty packet) | n/a |
 | Sample rates | 8, 12, 16, 24, 48 kHz output | 8, 12, 16, 24, 48 kHz input |
 | Channels | 1 or 2 (mono/stereo up- and down-mix) | 1 or 2 |
+| Performance modes | `PerformanceMode`: `Precise` (default, bit-identical to 1.0) or `Relaxed` (non-bit-exact float math) | `PerformanceMode`: `Precise` (default, byte-identical to 1.0) or `Relaxed` (cheaper SILK rate loop and quantizer, fewer CELT analysis passes; standard packets, small quality cost) |
 | Packet layouts | Codes 0 to 3, padding, up to 120 ms per packet | One packet per `Encode` call |
 | Sample formats | `short` and `float` | `short` and `float` |
 
@@ -131,6 +132,7 @@ Encoder options, all on `OpusEncoderOptions`:
 | `Bandwidth` | null | Caps the audio bandwidth, or selects the SILK bandwidth on the SILK-only path. |
 | `UseVbr` / `ConstrainedVbr` | false / true | Variable bitrate for the CELT encoder. |
 | `UseCbr` | false | Constant packet size for the SILK layer. |
+| `PerformanceMode` | `Precise` | `Relaxed` encodes faster at a small quality cost; see [Performance modes](docs/performance.md#performance-modes). |
 | `UseInbandFec` / `PacketLossPercent` | false / 0 | In-band FEC on SILK and hybrid frames. |
 | `UseDtx` | false | Discontinuous transmission on the SILK-only path. |
 

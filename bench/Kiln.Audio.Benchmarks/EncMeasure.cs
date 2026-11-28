@@ -77,6 +77,8 @@ internal static class EncMeasure
                 Complexity = complexity,
                 Bandwidth = bandwidth,
                 UseCbr = true,
+                PerformanceMode = string.Equals(Environment.GetEnvironmentVariable("KILN_BENCH_MODE"), "relaxed", StringComparison.OrdinalIgnoreCase)
+                    ? OpusPerformanceMode.Relaxed : OpusPerformanceMode.Precise,
             });
             long[] pm = new long[3];
             ulong passHash = 14695981039346656037UL;
@@ -107,6 +109,38 @@ internal static class EncMeasure
 
         Console.WriteLine(FormattableString.Invariant(
             $"kiln-encode file={Path.GetFileName(path)} rate={rate} ch={channels} app={a[3]} bitrate={bitrate} bw={a[5]} cx={complexity} frames={frames} us_per_frame={best:F3} modes: silk={modes[0]} hybrid={modes[1]} celt={modes[2]} hash={hash:x16}"));
+        if (Environment.GetEnvironmentVariable("KILN_BENCH_SNR") == "1")
+        {
+            var qenc = new OpusEncoder(new OpusEncoderOptions
+            {
+                Application = app,
+                SampleRate = rate,
+                Channels = channels,
+                BitrateBps = bitrate,
+                FrameDuration = OpusFrameDuration.Ms20,
+                Complexity = complexity,
+                Bandwidth = bandwidth,
+                UseCbr = true,
+                PerformanceMode = string.Equals(Environment.GetEnvironmentVariable("KILN_BENCH_MODE"), "relaxed", StringComparison.OrdinalIgnoreCase)
+                    ? OpusPerformanceMode.Relaxed : OpusPerformanceMode.Precise,
+            });
+            var qdec = new OpusDecoder(new OpusDecoderOptions { SampleRate = rate, Channels = channels });
+            var decoded = new short[frames * frameSamples];
+            var dframe = new short[frameSamples * 6];
+            long totalBytes = 0;
+            int maxBytes = 0;
+            for (int f = 0; f < frames; f++)
+            {
+                int n = qenc.Encode(pcm.AsSpan(f * frameSamples, frameSamples), packet);
+                totalBytes += n;
+                maxBytes = Math.Max(maxBytes, n);
+                int got = qdec.Decode(packet.AsSpan(0, n), dframe);
+                Array.Copy(dframe, 0, decoded, f * frameSamples, Math.Min(got * channels, frameSamples));
+            }
+
+            Console.WriteLine(FormattableString.Invariant($"snr_db={SegSnr(pcm, decoded, channels, rate):F4} avg_bytes={(double)totalBytes / frames:F2} max_bytes={maxBytes}"));
+        }
+
         if (profile)
         {
             double total = 0;
@@ -124,6 +158,58 @@ internal static class EncMeasure
                 }
             }
         }
+    }
+
+    private static double SegSnr(short[] reference, short[] test, int channels, int rate)
+    {
+        int seg = rate / 50;
+        int perChannel = Math.Min(reference.Length, test.Length) / channels;
+        int bestDelay = 0;
+        double bestVal = double.MinValue;
+        int probe = Math.Min(perChannel - 4000, rate * 4);
+        for (int delay = 0; delay < 2000; delay++)
+        {
+            double sig = 0;
+            double noise = 0;
+            for (int i = 4000; i < probe; i += 3)
+            {
+                double r = reference[i * channels];
+                double d = test[(i + delay) * channels] - r;
+                sig += r * r;
+                noise += d * d;
+            }
+
+            double v = -noise / Math.Max(sig, 1);
+            if (v > bestVal)
+            {
+                bestVal = v;
+                bestDelay = delay;
+            }
+        }
+
+        double total = 0;
+        long count = 0;
+        for (int start = 0; start + seg <= perChannel - bestDelay; start += seg)
+        {
+            double signal = 0;
+            double noise = 0;
+            for (int i = 0; i < seg; i++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    double r = reference[((start + i) * channels) + c];
+                    double d = test[((start + i + bestDelay) * channels) + c] - r;
+                    signal += r * r;
+                    noise += d * d;
+                }
+            }
+
+            double snr = signal <= 0 ? (noise <= 0 ? 60 : -10) : 10 * Math.Log10(signal / Math.Max(noise, 1e-9));
+            total += Math.Clamp(snr, -10, 60);
+            count++;
+        }
+
+        return total / count;
     }
 
     private static void WriteShorts(string path, short[] data)
